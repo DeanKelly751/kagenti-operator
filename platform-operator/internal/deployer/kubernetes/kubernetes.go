@@ -329,7 +329,7 @@ func (d *KubernetesDeployer) createDeployment(ctx context.Context, component *pl
 							MountPath: "/etc/spiffe-helper",
 						},
 						{
-							Name:      "spire-agent-socket",
+							Name:      "spiffe-workload-api",
 							MountPath: "/spiffe-workload-api",
 						},
 						SVIDMount,
@@ -424,10 +424,11 @@ func (d *KubernetesDeployer) createDeployment(ctx context.Context, component *pl
 						},
 					},
 					{
-						Name: "spire-agent-socket",
+						Name: "spiffe-workload-api",
 						VolumeSource: corev1.VolumeSource{
-							HostPath: &corev1.HostPathVolumeSource{
-								Path: "/run/spire/agent-sockets",
+							CSI: &corev1.CSIVolumeSource{
+								Driver:   "csi.spiffe.io",
+								ReadOnly: func() *bool { b := true; return &b }(),
 							},
 						},
 					},
