@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: check-dockerfile-step
+  namespace: {{ .Release.Namespace }}
+  labels:
+    kagenti.operator.dev/tekton: step 
+data:
+  
+  task-spec.yaml: |
+    params:
+      - name: subfolder-path
+        type: string
+        description: Path to the subfolder to verify
+        default: "" 
+    workspaces:
+      - name: source
+    results:
+      - name: has-dockerfile
+        description: Whether Dockerfile exists
+    steps:
+      - name: check
+        image: alpine:latest
+        script: |
+          #!/bin/sh
+          if [ -f $(workspaces.source.path)/Dockerfile ]; then
+            echo -n "true" | tee $(results.has-dockerfile.path)
+          else
+            echo -n "false" | tee $(results.has-dockerfile.path)
+          fi

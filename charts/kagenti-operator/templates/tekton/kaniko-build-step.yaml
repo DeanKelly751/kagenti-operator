@@ -50,5 +50,8 @@ data:
           items:
           - key: .dockerconfigjson
             path: config.json
+    results:
+      - name: IMAGE_URL
+        description: URL of the built image        
     workspaces:
       - name: source

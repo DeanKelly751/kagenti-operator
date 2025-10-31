@@ -27,18 +27,42 @@ data:
         type: string
         description: Python version to use
         default: "3.13"
-
+      - name: START_COMMAND  
+        type: string
+        description: Command to start the application
+        default: "python __main__.py"  # Change to your actual start command
     steps:
-      - name: add-python-version
+      - name: setup-build-files
         image: busybox
         script: |
           #!/bin/sh
           set -e
           cd $(workspaces.source.path)/$(params.subfolder-path)
+          
+          # Create .python-version
           echo "$(params.PYTHON_VERSION)" > .python-version
           echo "Created .python-version file"
+          
+          # Create Procfile if it doesn't exist
+          if [ ! -f Procfile ]; then
+            echo "web: $(params.START_COMMAND)" > Procfile
+            echo "Created Procfile with command: $(params.START_COMMAND)"
+          else
+            echo "Procfile already exists"
+          fi
+          
+          # Verify files
+          echo "=== Build configuration ==="
+          echo "Python version:"
           cat .python-version
-      
+          echo "Procfile:"
+          cat Procfile
+          echo "==========================="
+          
+          # List all files for debugging
+          echo "Files in directory:"
+          ls -la
+          
       - name: buildpack-build
         image: $(params.BUILDER_IMAGE)
         script: |
@@ -48,6 +72,8 @@ data:
           /cnb/lifecycle/creator \
             -app=$(workspaces.source.path)/$(params.subfolder-path) \
             -cache-dir=/workspace/cache \
+            -process-type=web \
+            -launch-cache-dir=/workspace/launch-cache \
             $(params.image)
           
         env:
@@ -60,6 +86,8 @@ data:
             mountPath: /layers
           - name: cache-dir
             mountPath: /workspace/cache
+          - name: launch-cache-dir
+            mountPath: /workspace/launch-cache            
           - name: docker-config
             mountPath: /kaniko/.docker
             readOnly: true
@@ -75,6 +103,8 @@ data:
       - name: layers-dir
         emptyDir: {}
       - name: cache-dir
+        emptyDir: {}
+      - name: launch-cache-dir
         emptyDir: {}
       - name: docker-config
         secret:
