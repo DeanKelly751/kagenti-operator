@@ -255,6 +255,10 @@ func (d *KubernetesDeployer) createDeployment(ctx context.Context, component *pl
 			kubeSpec.ImageSpec.ImageTag,
 		)
 	}
+	imagePullSecrets := []corev1.LocalObjectReference{}
+	if kubeSpec.ImageSpec != nil && len(kubeSpec.ImageSpec.ImagePullSecrets) > 0 {
+		imagePullSecrets = kubeSpec.ImageSpec.ImagePullSecrets
+	}
 	gracePeriodSeconds := int64(300)
 
 	clientId := namespace + "/" + component.Name
@@ -404,11 +408,8 @@ func (d *KubernetesDeployer) createDeployment(ctx context.Context, component *pl
 				},
 			},
 			TerminationGracePeriodSeconds: &gracePeriodSeconds,
-			ImagePullSecrets: []corev1.LocalObjectReference{
-				{
-					Name: "ghcr-secret",
-				},
-			},
+			ImagePullSecrets:              imagePullSecrets,
+
 			Volumes: append(
 				component.Spec.Deployer.Kubernetes.Volumes,
 				[]corev1.Volume{

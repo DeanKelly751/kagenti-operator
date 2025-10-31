@@ -400,6 +400,10 @@ type ImageSpec struct {
 	// ImagePullPolicy defines when to pull the image
 	// +optional
 	ImagePullPolicy string `json:"imagePullPolicy,omitempty"`
+
+	// ImagePullSecrets is a list of references to secrets for pulling images
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 }
 
 // ComponentStatus defines the observed state of Component.
