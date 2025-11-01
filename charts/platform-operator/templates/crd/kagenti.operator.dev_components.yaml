@@ -497,6 +497,26 @@ spec:
                             description: ImagePullPolicy defines when to pull the
                               image
                             type: string
+                          imagePullSecrets:
+                            description: ImagePullSecrets is a list of references
+                              to secrets for pulling images
+                            items:
+                              description: |-
+                                LocalObjectReference contains enough information to let you locate the
+                                referenced object inside the same namespace.
+                              properties:
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            type: array
                           imageRegistry:
                             description: ImageRegistry is the container registry where
                               the image is going to be pulled from
@@ -552,8 +572,13 @@ spec:
                             type: string
                         type: object
                       podTemplateSpec:
-                        description: PodTemplateSpec describes the data a pod should
-                          have when created from a template
+                        description: |-
+                          PodTemplateSpec provides complete control over Pod specification.
+                          When specified, this field takes precedence over all other configuration
+                          fields except Replicas. All other fields (ImageSpec, Resources, ContainerPorts,
+                          ServicePorts, ServiceType, Volumes, VolumeMounts) should be omitted
+                          as they will be ignored in favor of the PodTemplateSpec configuration.
+                          Mutually exclusive with ImageSpec and Manifest deployment modes.
                         properties:
                           metadata:
                             description: |-
@@ -10738,6 +10763,11 @@ spec:
                           type: object
                         type: array
                     type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of imageSpec, manifest, or podTemplateSpec
+                        must be specified
+                      rule: '[has(self.imageSpec), has(self.manifest), has(self.podTemplateSpec)].filter(x,
+                        x).size() == 1'
                   name:
                     description: Name of the k8s resource
                     type: string
