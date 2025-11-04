@@ -45,7 +45,7 @@ data:
           
           # Create Procfile if it doesn't exist
           if [ ! -f Procfile ]; then
-            echo "web: $(params.START_COMMAND)" > Procfile
+            printf "web: %s\ndefault: %s\n" "$(params.START_COMMAND)" "$(params.START_COMMAND)" > Procfile
             echo "Created Procfile with command: $(params.START_COMMAND)"
           else
             echo "Procfile already exists"
@@ -73,7 +73,6 @@ data:
             -app=$(workspaces.source.path)/$(params.subfolder-path) \
             -cache-dir=/workspace/cache \
             -process-type=web \
-            -launch-cache-dir=/workspace/launch-cache \
             $(params.image)
           
         env:
@@ -85,9 +84,7 @@ data:
           - name: layers-dir
             mountPath: /layers
           - name: cache-dir
-            mountPath: /workspace/cache
-          - name: launch-cache-dir
-            mountPath: /workspace/launch-cache            
+            mountPath: /workspace/cache          
           - name: docker-config
             mountPath: /kaniko/.docker
             readOnly: true
@@ -103,8 +100,6 @@ data:
       - name: layers-dir
         emptyDir: {}
       - name: cache-dir
-        emptyDir: {}
-      - name: launch-cache-dir
         emptyDir: {}
       - name: docker-config
         secret:

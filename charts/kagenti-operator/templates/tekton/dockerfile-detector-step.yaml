@@ -23,8 +23,15 @@ data:
         image: alpine:latest
         script: |
           #!/bin/sh
-          if [ -f $(workspaces.source.path)/Dockerfile ]; then
+          SEARCH_PATH="$(workspaces.source.path)/$(params.subfolder-path)"
+          
+          echo "Checking for Dockerfile in: ${SEARCH_PATH}"
+          ls -la "${SEARCH_PATH}" || true
+          
+          if [ -f "${SEARCH_PATH}/Dockerfile" ]; then
+            echo "Found Dockerfile!"
             echo -n "true" | tee $(results.has-dockerfile.path)
           else
+            echo "No Dockerfile found"
             echo -n "false" | tee $(results.has-dockerfile.path)
           fi
