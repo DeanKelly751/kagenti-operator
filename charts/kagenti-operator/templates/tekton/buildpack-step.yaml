@@ -43,10 +43,18 @@ data:
           echo "$(params.PYTHON_VERSION)" > .python-version
           echo "Created .python-version file"
           
+          echo "Detected START_COMMAND: $(params.START_COMMAND)"
+
+          # Default: assume command is fine
+          CMD="$(params.START_COMMAND)"
+
+          # Create .python-version file if missing
+          echo "$(params.PYTHON_VERSION)" > .python-version
+
           # Create Procfile if it doesn't exist
           if [ ! -f Procfile ]; then
-            printf "web: %s\ndefault: %s\n" "$(params.START_COMMAND)" "$(params.START_COMMAND)" > Procfile
-            echo "Created Procfile with command: $(params.START_COMMAND)"
+            printf "web: %s\ndefault: %s\n" "$CMD" "$CMD" > Procfile
+            echo "Created Procfile with command: $CMD"
           else
             echo "Procfile already exists"
           fi

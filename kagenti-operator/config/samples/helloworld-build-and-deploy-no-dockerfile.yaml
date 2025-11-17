@@ -17,7 +17,10 @@ spec:
     parameters:
     - name: SOURCE_REPO_SECRET
       value: github-token-secret
-
+    - name: START_COMMAND          # Custom start command
+      value: "python __main__.py"
+    - name: PYTHON_VERSION         # Specify Python version
+      value: "3.13"
   buildOutput:
     image: "helloworld-service"
     imageTag: "v0.0.1"
