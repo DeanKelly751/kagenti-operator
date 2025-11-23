@@ -431,7 +431,8 @@ func (d *KubernetesDeployer) createDeployment(ctx context.Context, component *pl
 							LocalObjectReference: corev1.LocalObjectReference{
 								Name: "environments",
 							},
-							Key: "KEYCLOAK_TOKEN_EXCHANGE_ENABLED",
+							Key:      "KEYCLOAK_TOKEN_EXCHANGE_ENABLED",
+							Optional: ptr.To(true),
 						},
 					},
 				},
@@ -442,7 +443,8 @@ func (d *KubernetesDeployer) createDeployment(ctx context.Context, component *pl
 							LocalObjectReference: corev1.LocalObjectReference{
 								Name: "environments",
 							},
-							Key: "KEYCLOAK_CLIENT_REGISTRATION_ENABLED",
+							Key:      "KEYCLOAK_CLIENT_REGISTRATION_ENABLED",
+							Optional: ptr.To(true),
 						},
 					},
 				},
