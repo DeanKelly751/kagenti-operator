@@ -94,6 +94,8 @@ func (b *TektonBuilder) Cleanup(ctx context.Context, agentBuild *agentv1alpha1.A
 			completedPods = append(completedPods, pod)
 		case corev1.PodRunning, corev1.PodPending:
 			runningPods++
+		case corev1.PodUnknown:
+			completedPods = append(completedPods, pod)
 		}
 	}
 
