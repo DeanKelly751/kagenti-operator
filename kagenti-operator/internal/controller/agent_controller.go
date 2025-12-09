@@ -522,7 +522,7 @@ func hasVolumeMounts(podSpec *corev1.PodSpec, volumeMountName string) bool {
 }
 
 func (r *AgentReconciler) reconcileAgentService(ctx context.Context, agent *agentv1alpha1.Agent) (ctrl.Result, error) {
-	serviceName := agent.Name + "-svc"
+	serviceName := agent.Name
 	service := &corev1.Service{}
 
 	err := r.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: agent.Namespace}, service)
@@ -568,7 +568,7 @@ func (r *AgentReconciler) createServiceForAgent(agent *agentv1alpha1.Agent) *cor
 
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        agent.Name + "-svc",
+			Name:        agent.Name,
 			Namespace:   agent.Namespace,
 			Labels:      labels,
 			Annotations: agent.Annotations,
