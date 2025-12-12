@@ -180,7 +180,7 @@ apiVersion: agent.kagenti.dev/v1alpha1
 kind: Agent
 metadata:
   name: weather-agent
-  namespace  team1
+  namespace: team1
   labels:
     kagenti.io/framework: LangGraph
     kagenti.io/protocol: a2a
