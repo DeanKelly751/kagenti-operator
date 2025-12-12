@@ -573,7 +573,6 @@ kubectl logs -l app.kubernetes.io/name=weather-agent -n team1 | grep -i "llm\|mo
 kubectl logs -l app.kubernetes.io/name=weather-agent -n team1 --tail=100
 
 # Test if the agent pod can reach Ollama
-AGENT_POD=$(kubectl get pods -n team1 -l app.kubernetes.io/name=weather-agent -o jsonpath='{.items[0].metadata.name}')
 kubectl run curl-test --image=curlimages/curl:8.1.2 --rm -i --tty -n team1 -- \
   curl -v http://host.docker.internal:11434/v1/models
 ```
