@@ -7,17 +7,19 @@
 
 ## Overview
 
-The Kagenti Operator simplifies AI agent deployment by managing two Custom Resource Definitions (CRDs):
+The Kagenti Operator simplifies AI agent deployment by managing three Custom Resource Definitions (CRDs):
 
 | Resource | Purpose |
 |----------|---------|
 | **[Agent](./docs/api-reference.md#agent)** | Deploys and manages AI agent workloads from container images or source code |
 | **[AgentBuild](./docs/api-reference.md#agentbuild)** | Builds container images from GitHub repositories using Tekton pipelines |
+| **[AgentCard](./docs/api-reference.md#agentcard)** | Automatically discovers and indexes agent metadata for Kubernetes-native agent discovery |
 
 ### Key Features
 
 - **Deploy from Image or Source** — Use pre-built container images or build directly from GitHub repositories
 - **Automated Build Pipelines** — Integrated Tekton pipelines with support for Dockerfile and Cloud Native Buildpacks
+- **Dynamic Agent Discovery** — Kubernetes-native agent discovery through automatic indexing of agent metadata
 - **Flexible Configuration** — Complete control over pod specifications, service ports, and environment variables
 - **Security Built-in** — Support for private registries, secret management, and RBAC
 - **Multi-Framework Support** — Works with LangGraph, CrewAI, AG2, and any A2A-compatible framework
