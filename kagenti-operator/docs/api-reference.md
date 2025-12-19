@@ -6,7 +6,7 @@ This document provides a comprehensive reference for the Kagenti Operator Custom
 
 - [Agent](#agent) — Deploys and manages AI agent workloads
 - [AgentBuild](#agentbuild) — Builds container images from source code
-- [AgentCard](#agentcard) — Stores agent metadata for dynamic discovery
+- [AgentCard](#agentcard) — Fetches and stores agent metadata for dynamic discovery
 
 ---
 
