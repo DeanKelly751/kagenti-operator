@@ -210,6 +210,7 @@ kubectl logs -l app.kubernetes.io/name=my-agent
 |-------|------|
 | **API Reference** | [CRD Specifications & Examples](./docs/api-reference.md) |
 | **Architecture** | [Operator Design & Components](./docs/architecture.md) |
+| **Dynamic Discovery** | [Agent Discovery with AgentCard](./docs/dynamic-agent-discovery.md) |
 | **Developer Guide** | [Contributing & Development](./docs/dev.md) |
 | **Getting Started** | [Detailed Tutorials](./GETTING_STARTED.md) |
 

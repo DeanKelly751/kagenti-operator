@@ -6,6 +6,7 @@ This document provides a comprehensive reference for the Kagenti Operator Custom
 
 - [Agent](#agent) — Deploys and manages AI agent workloads
 - [AgentBuild](#agentbuild) — Builds container images from source code
+- [AgentCard](#agentcard) — Stores agent metadata for dynamic discovery
 
 ---
 
@@ -549,11 +550,256 @@ kubectl logs -l tekton.dev/pipelineRun=<pipelinerun-name>
 | `Complete` | `False` | `BuildFailed` | Build failed |
 | `Complete` | `Unknown` | `BuildRunning` | Build in progress |
 
+#### AgentCard Conditions
+
+| Type | Status | Reason | Description |
+|------|--------|--------|-------------|
+| `Synced` | `True` | `SyncSucceeded` | Agent card fetched successfully |
+| `Synced` | `False` | `SyncFailed` | Unable to fetch agent card |
+| `Synced` | `False` | `AgentNotReady` | Agent not ready yet |
+| `Synced` | `False` | `ProtocolNotSupported` | Unsupported protocol |
+| `Synced` | `False` | `InvalidCard` | Card format invalid |
+| `Ready` | `True` | `ReadyToServe` | Agent index ready for queries |
+| `Ready` | `False` | `NotReady` | Agent index not ready |
+
+---
+
+## AgentCard
+
+The `AgentCard` Custom Resource stores agent metadata for dynamic discovery and introspection. It automatically synchronizes agent card data from deployed agents that implement supported protocols (currently A2A).
+
+### API Group and Version
+
+- **API Group:** `agent.kagenti.dev`
+- **API Version:** `v1alpha1`
+- **Kind:** `AgentCard`
+- **Short Names:** `agentcards`, `cards`
+
+### Spec Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `syncPeriod` | string | No | How often to re-fetch the agent card (default: "30s", format: "30s", "5m", etc.) |
+| `selector` | [AgentSelector](#agentselector) | Yes | Identifies which Agent to index |
+
+#### AgentSelector
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `matchLabels` | map[string]string | Yes | Label selector to match against Agent resources |
+
+### Status Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `card` | [AgentCardData](#agentcarddata) | Cached agent card data from the agent |
+| `conditions` | [][Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) | Current state of indexing process |
+| `lastSyncTime` | timestamp | When the agent card was last successfully fetched |
+| `protocol` | string | Detected agent protocol (e.g., "a2a") |
+| `validSignature` | boolean | Whether the agent card signature is valid (future use) |
+
+#### AgentCardData
+
+Represents the A2A agent card structure based on the [A2A specification](https://a2a-protocol.org/).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Human-readable name of the agent |
+| `description` | string | What the agent does |
+| `version` | string | Agent version |
+| `url` | string | Endpoint where the agent can be reached |
+| `capabilities` | [AgentCapabilities](#agentcapabilities) | Supported A2A features |
+| `defaultInputModes` | []string | Default media types the agent accepts |
+| `defaultOutputModes` | []string | Default media types the agent produces |
+| `skills` | [][AgentSkill](#agentskill) | Skills/capabilities offered by the agent |
+| `supportsAuthenticatedExtendedCard` | boolean | Whether agent has an extended card |
+
+#### AgentCapabilities
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `streaming` | boolean | Whether the agent supports streaming responses |
+| `pushNotifications` | boolean | Whether the agent supports push notifications |
+
+#### AgentSkill
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Skill identifier |
+| `description` | string | What this skill does |
+| `inputModes` | []string | Media types this skill accepts |
+| `outputModes` | []string | Media types this skill produces |
+| `parameters` | [][SkillParameter](#skillparameter) | Parameters this skill accepts |
+
+#### SkillParameter
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Parameter name |
+| `type` | string | Parameter type (e.g., "string", "number", "boolean") |
+| `description` | string | What this parameter is for |
+| `required` | boolean | Whether this parameter must be provided |
+| `default` | string | Default value for this parameter |
+
+### Examples
+
+#### Deploy Agent with Discovery Enabled
+
+```yaml
+apiVersion: agent.kagenti.dev/v1alpha1
+kind: Agent
+metadata:
+  name: weather-agent
+  namespace: default
+  labels:
+    kagenti.io/type: agent           # Required for discovery
+    kagenti.io/protocol: a2a         # Specifies protocol
+    app.kubernetes.io/name: weather-agent
+spec:
+  imageSource:
+    image: "ghcr.io/kagenti/agent-examples/weather_service:v0.0.1-alpha.3"
+  servicePorts:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  podTemplateSpec:
+    spec:
+      containers:
+      - name: agent
+        ports:
+        - containerPort: 8000
+        env:
+        - name: PORT
+          value: "8000"
+```
+
+The AgentCard is automatically created by the operator.
+
+#### View Discovered Agents
+
+```bash
+# List all agent cards
+kubectl get agentcards
+
+# Example output:
+# NAME                 PROTOCOL   AGENT               SYNCED   LASTSYNC   AGE
+# weather-agent-card   a2a        Weather Assistant   True     5m         10m
+
+# Get detailed information
+kubectl describe agentcard weather-agent-card
+```
+
+#### AgentCard Status Example
+
+```yaml
+apiVersion: agent.kagenti.dev/v1alpha1
+kind: AgentCard
+metadata:
+  name: weather-agent-card
+  namespace: default
+  ownerReferences:
+    - apiVersion: agent.kagenti.dev/v1alpha1
+      kind: Agent
+      name: weather-agent
+      controller: true
+spec:
+  syncPeriod: 30s
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: weather-agent
+      kagenti.io/type: agent
+status:
+  protocol: a2a
+  lastSyncTime: "2025-12-19T10:30:00Z"
+  
+  card:
+    name: "Weather Assistant"
+    description: "Provides weather information using MCP tools"
+    version: "1.0.0"
+    url: "http://weather-agent.default.svc.cluster.local:8000"
+    
+    capabilities:
+      streaming: true
+      pushNotifications: false
+    
+    defaultInputModes:
+      - text
+    defaultOutputModes:
+      - text
+    
+    skills:
+      - name: "get-weather"
+        description: "Get current weather for a city"
+        inputModes:
+          - text
+        outputModes:
+          - text
+        parameters:
+          - name: "city"
+            type: "string"
+            description: "City name to get weather for"
+            required: true
+  
+  conditions:
+    - type: Synced
+      status: "True"
+      reason: SyncSucceeded
+      message: "Successfully fetched agent card for Weather Assistant"
+      lastTransitionTime: "2025-12-19T10:30:00Z"
+    - type: Ready
+      status: "True"
+      reason: ReadyToServe
+      message: "Agent index is ready for queries"
+      lastTransitionTime: "2025-12-19T10:30:00Z"
+```
+
+#### Query Agent Metadata
+
+```bash
+# Get agent name from card
+kubectl get agentcard weather-agent-card \
+  -o jsonpath='{.status.card.name}'
+
+# List all skills
+kubectl get agentcard weather-agent-card \
+  -o jsonpath='{.status.card.skills[*].name}'
+
+# Get agent endpoint
+kubectl get agentcard weather-agent-card \
+  -o jsonpath='{.status.card.url}'
+
+# Check if streaming is supported
+kubectl get agentcard weather-agent-card \
+  -o jsonpath='{.status.card.capabilities.streaming}'
+
+# View sync status
+kubectl get agentcard weather-agent-card \
+  -o jsonpath='{.status.conditions[?(@.type=="Synced")].status}'
+```
+
+#### Custom Sync Period
+
+```yaml
+apiVersion: agent.kagenti.dev/v1alpha1
+kind: AgentCard
+metadata:
+  name: custom-agent-card
+  namespace: default
+spec:
+  syncPeriod: "5m"  # Sync every 5 minutes instead of default 30s
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: custom-agent
+      kagenti.io/type: agent
+```
+
 ---
 
 ## Additional Resources
 
-- [Architecture Documentation](./architecture.md)
-- [Developer Guide](./dev.md)
-- [Getting Started Tutorial](../GETTING_STARTED.md)
-- [Configuration Examples](../config/samples/)
+- [Dynamic Agent Discovery](./dynamic-agent-discovery.md) — How AgentCard enables agent discovery
+- [Architecture Documentation](./architecture.md) — Operator design and components
+- [Developer Guide](./dev.md) — Contributing and development
+- [Getting Started Tutorial](../GETTING_STARTED.md) — Detailed tutorials and examples
+- [Configuration Examples](../config/samples/) — Sample CRs and configurations
