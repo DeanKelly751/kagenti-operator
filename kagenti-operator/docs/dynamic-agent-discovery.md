@@ -269,7 +269,7 @@ conditions:
   status: "True"
   reason: SyncSucceeded
   message: "Successfully fetched agent card for Weather Assistant"
-  lastTransitionTime: "2025-12-19T10:30:00Z"
+  lastTransitionTime: "2024-01-15T10:30:00Z"
 ```
 
 Reasons:
