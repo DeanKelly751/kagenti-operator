@@ -95,8 +95,9 @@ Once synchronized, agent cards are discoverable via standard Kubernetes commands
 kubectl get agentcards
 
 # Output:
-# NAME                 PROTOCOL   AGENT               SYNCED   LASTSYNC   AGE
+# NAME                 PROTOCOL   CARD_NAME           SYNCED   LASTSYNC   AGE
 # weather-agent-card   a2a        Weather Assistant   True     5m         10m
+# (CARD_NAME column displays AgentCard status.card.name, not the Agent resource name)
 
 # Get detailed information
 kubectl describe agentcard weather-agent-card
