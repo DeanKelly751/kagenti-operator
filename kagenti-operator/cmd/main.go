@@ -39,8 +39,6 @@ import (
 	"github.com/kagenti/operator/internal/agentcard"
 	"github.com/kagenti/operator/internal/controller"
 	"github.com/kagenti/operator/internal/distribution"
-	"github.com/kagenti/operator/internal/signature"
-	webhookv1alpha1 "github.com/kagenti/operator/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -255,36 +253,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize signature verification provider
-	if !requireA2ASignature {
-		setupLog.Info("WARNING: --require-a2a-signature is false. Identity binding requires " +
-			"--require-a2a-signature=true to function. AgentCards with spec.identityBinding " +
-			"will always report NotBound.")
-	}
-
-	var sigProvider signature.Provider
-	if requireA2ASignature {
-		sigConfig := &signature.Config{
-			Type:            signature.ProviderType(signatureProvider),
-			SecretName:      signatureSecretName,
-			SecretNamespace: signatureSecretNamespace,
-			SecretKey:       signatureSecretKey,
-			JWKSURL:         signatureJWKSURL,
-			AuditMode:       signatureAuditMode,
-		}
-
-		var providerErr error
-		sigProvider, providerErr = signature.NewProvider(sigConfig)
-		if providerErr != nil {
-			setupLog.Error(providerErr, "unable to create signature provider")
-			os.Exit(1)
-		}
-		setupLog.Info("Signature verification enabled",
-			"provider", signatureProvider,
-			"auditMode", signatureAuditMode,
-			"requireSignature", requireA2ASignature)
-	}
-
 	if err = (&controller.AgentCardReconciler{
 		Client:             mgr.GetClient(),
 		Scheme:             mgr.GetScheme(),
@@ -317,10 +285,6 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentCardSync")
-		os.Exit(1)
-	}
-	if err = webhookv1alpha1.SetupAgentCardWebhookWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create webhook", "webhook", "AgentCard")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
