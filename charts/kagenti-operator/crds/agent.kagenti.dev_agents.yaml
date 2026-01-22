@@ -59,24 +59,9 @@ spec:
               description:
                 description: Description is a human-readable description of the agent
                 type: string
-              imageSource:
-                description: ImageSource specifies the container image or build reference
-                  for the agent
-                properties:
-                  buildRef:
-                    description: BuildRef specifies the AgentBuild used for building
-                      the agent image from source code.
-                    properties:
-                      name:
-                        description: Name of the AgentBuild resource to use for building
-                          the agent image
-                        type: string
-                    type: object
-                  image:
-                    description: Image is the container image to use for the agent.
-                      This is used when BuildRef is not specified.
-                    type: string
-                type: object
+              image:
+                description: Image specifies the container image to use for the agent
+                type: string
               labels:
                 additionalProperties:
                   type: string
@@ -8187,7 +8172,7 @@ spec:
                   type: object
                 type: array
             required:
-            - imageSource
+            - image
             - podTemplateSpec
             type: object
           status:

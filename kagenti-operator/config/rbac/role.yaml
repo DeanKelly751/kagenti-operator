@@ -8,6 +8,7 @@ rules:
   - ""
   resources:
   - configmaps
+  - pods
   - pods/log
   - secrets
   verbs:
@@ -21,26 +22,6 @@ rules:
   verbs:
   - create
   - patch
-  - update
-- apiGroups:
-  - ""
-  resources:
-  - persistentvolumeclaims
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  verbs:
-  - delete
-  - get
-  - list
-  - watch
 - apiGroups:
   - ""
   resources:
@@ -57,7 +38,6 @@ rules:
 - apiGroups:
   - agent.kagenti.dev
   resources:
-  - agentbuilds
   - agentcards
   - agents
   verbs:
@@ -71,7 +51,6 @@ rules:
 - apiGroups:
   - agent.kagenti.dev
   resources:
-  - agentbuilds/finalizers
   - agentcards/finalizers
   - agents/finalizers
   verbs:
@@ -79,7 +58,6 @@ rules:
 - apiGroups:
   - agent.kagenti.dev
   resources:
-  - agentbuilds/status
   - agentcards/status
   - agents/status
   verbs:
@@ -110,25 +88,4 @@ rules:
   - list
   - patch
   - update
-  - watch
-- apiGroups:
-  - tekton.dev
-  resources:
-  - pipelineruns
-  - pipelines
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - tekton.dev
-  resources:
-  - taskruns
-  verbs:
-  - get
-  - list
   - watch

@@ -23,8 +23,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kagenti/operator/internal/builder/tekton"
-
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -40,8 +38,6 @@ import (
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 	"github.com/kagenti/operator/internal/controller"
 	"github.com/kagenti/operator/internal/distribution"
-	webhookv1alpha1 "github.com/kagenti/operator/internal/webhook/v1alpha1"
-	tektonv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -52,7 +48,6 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(tektonv1.AddToScheme(scheme))
 	utilruntime.Must(agentv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
@@ -227,21 +222,6 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
 	}
-	if err = (&controller.AgentBuildReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Builder: tekton.NewTektonBuilder(
-			mgr.GetClient(),
-			mgr.GetLogger(),
-			mgr.GetScheme(),
-			tekton.NewPipelineComposer(mgr.GetClient(), mgr.GetLogger()),
-			tekton.NewWorkspaceManager(mgr.GetClient(), mgr.GetScheme(), mgr.GetLogger()),
-		),
-		Recorder: mgr.GetEventRecorderFor("agentbuild-controller"),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "AgentBuild")
-		os.Exit(1)
-	}
 
 	if err = (&controller.AgentCardReconciler{
 		Client: mgr.GetClient(),
@@ -255,10 +235,6 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentCardSync")
-	}
-	if err = webhookv1alpha1.SetupAgentBuildWebhookWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create webhook", "webhook", "AgentBuild")
-		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
 
