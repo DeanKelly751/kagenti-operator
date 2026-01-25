@@ -18,6 +18,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -31,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -58,6 +62,24 @@ const (
 
 	// Default sync period
 	DefaultSyncPeriod = 30 * time.Second
+
+	// Default trust domain for SPIFFE IDs
+	DefaultTrustDomain = "cluster.local"
+
+	// Annotation keys for binding enforcement
+	AnnotationDisabledBy     = "kagenti.io/disabled-by"
+	AnnotationDisabledReason = "kagenti.io/disabled-reason"
+
+	// Annotation values
+	DisabledByIdentityBinding = "identity-binding"
+
+	// Binding status reasons
+	ReasonBound                 = "Bound"
+	ReasonNotBound              = "NotBound"
+	ReasonAgentNotFound         = "AgentNotFound"
+	ReasonMultipleAgentsMatched = "MultipleAgentsMatched"
+	ReasonNoTrustDomain         = "NoTrustDomain"
+	ReasonNoIdentityConfig      = "NoIdentityConfig"
 )
 
 var (
@@ -86,6 +108,8 @@ type AgentCardReconciler struct {
 	client.Client
 	Scheme       *runtime.Scheme
 	AgentFetcher agentcard.Fetcher
+	Recorder     record.EventRecorder
+	TrustDomain  string
 }
 
 // +kubebuilder:rbac:groups=agent.kagenti.dev,resources=agentcards,verbs=get;list;watch;create;update;patch;delete
@@ -123,19 +147,46 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Get workload using targetRef (preferred) or selector (legacy)
 	workload, err := r.getWorkload(ctx, agentCard)
 	if err != nil {
-		if errors.Is(err, ErrWorkloadNotFound) {
-			agentCardLogger.Info("Workload not found", "agentCard", agentCard.Name)
-			r.updateCondition(ctx, agentCard, "Synced", metav1.ConditionFalse, "WorkloadNotFound", err.Error())
-			return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
-		}
-		if errors.Is(err, ErrNotAgentWorkload) {
-			agentCardLogger.Info("Referenced resource is not an agent", "agentCard", agentCard.Name)
-			r.updateCondition(ctx, agentCard, "Synced", metav1.ConditionFalse, "NotAgentWorkload", err.Error())
-			return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
-		}
 		agentCardLogger.Error(err, "Failed to get workload", "agentCard", agentCard.Name)
-		r.updateCondition(ctx, agentCard, "Synced", metav1.ConditionFalse, "WorkloadError", err.Error())
+
+		// Determine the appropriate reason based on error type
+		var reason, message, conditionReason string
+		if errors.Is(err, ErrMultipleAgentsMatched) {
+			reason = ReasonMultipleAgentsMatched
+			message = fmt.Sprintf("Cannot evaluate binding: %s", err.Error())
+			conditionReason = "MultipleAgentsMatched"
+		} else if errors.Is(err, ErrWorkloadNotFound) {
+			reason = ReasonAgentNotFound
+			message = "No matching workload found"
+			conditionReason = "WorkloadNotFound"
+		} else if errors.Is(err, ErrNotAgentWorkload) {
+			reason = ReasonAgentNotFound
+			message = "Referenced resource is not an agent"
+			conditionReason = "NotAgentWorkload"
+		} else {
+			reason = ReasonAgentNotFound
+			message = err.Error()
+			conditionReason = "WorkloadError"
+		}
+
+		r.updateCondition(ctx, agentCard, "Synced", metav1.ConditionFalse, conditionReason, err.Error())
+
+		// If identity binding is configured, update binding status
+		if agentCard.Spec.IdentityBinding != nil {
+			r.updateBindingStatus(ctx, agentCard, false, reason, message, "")
+			// Emit event for visibility
+			if r.Recorder != nil {
+				r.Recorder.Event(agentCard, corev1.EventTypeWarning, reason, message)
+			}
+		}
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
+	}
+
+	// Evaluate identity binding BEFORE fetching the card (uses only K8s metadata)
+	if agentCard.Spec.IdentityBinding != nil {
+		if err := r.evaluateBinding(ctx, agentCard, workload); err != nil {
+			agentCardLogger.Error(err, "Failed to evaluate binding", "agentCard", agentCard.Name)
+		}
 	}
 
 	// Check if workload is ready
@@ -181,13 +232,26 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Using the Service URL ensures other components can reliably reach the agent.
 	cardData.URL = serviceURL
 
-	// Update the AgentCard status with the fetched card and resolved targetRef
-	targetRef := &agentv1alpha1.TargetRef{
+	// Compute card_id for drift detection (optional)
+	cardId := r.computeCardId(cardData)
+	if cardId != "" && agentCard.Status.CardId != "" && agentCard.Status.CardId != cardId {
+		// Card content has changed - emit event
+		if r.Recorder != nil {
+			r.Recorder.Event(agentCard, corev1.EventTypeWarning, "CardContentChanged",
+				fmt.Sprintf("Agent card content changed: previous=%s, current=%s", agentCard.Status.CardId, cardId))
+		}
+		agentCardLogger.Info("Card content changed", "agentCard", agentCard.Name, "previousCardId", agentCard.Status.CardId, "newCardId", cardId)
+	}
+
+	// Build resolved targetRef for status
+	resolvedTargetRef := &agentv1alpha1.TargetRef{
 		APIVersion: workload.APIVersion,
 		Kind:       workload.Kind,
 		Name:       workload.Name,
 	}
-	if err := r.updateAgentCardStatus(ctx, agentCard, cardData, protocol, targetRef); err != nil {
+
+	// Update the AgentCard status with the fetched card
+	if err := r.updateAgentCardStatus(ctx, agentCard, cardData, protocol, cardId, resolvedTargetRef); err != nil {
 		agentCardLogger.Error(err, "Failed to update AgentCard status")
 		return ctrl.Result{}, err
 	}
@@ -198,6 +262,9 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	return ctrl.Result{RequeueAfter: syncPeriod}, nil
 }
+
+// ErrMultipleAgentsMatched is returned when multiple agents match the selector
+var ErrMultipleAgentsMatched = fmt.Errorf("multiple agents match selector")
 
 // getWorkload fetches the workload using targetRef or falls back to selector
 func (r *AgentCardReconciler) getWorkload(ctx context.Context, agentCard *agentv1alpha1.AgentCard) (*WorkloadInfo, error) {
@@ -492,7 +559,7 @@ func (r *AgentCardReconciler) getSyncPeriod(agentCard *agentv1alpha1.AgentCard) 
 }
 
 // updateAgentCardStatus updates the AgentCard status with the fetched agent card
-func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCard *agentv1alpha1.AgentCard, cardData *agentv1alpha1.AgentCardData, protocol string, targetRef *agentv1alpha1.TargetRef) error {
+func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCard *agentv1alpha1.AgentCard, cardData *agentv1alpha1.AgentCardData, protocol, cardId string, targetRef *agentv1alpha1.TargetRef) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Fetch the latest version
 		latest := &agentv1alpha1.AgentCard{}
@@ -508,6 +575,9 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 		latest.Status.Protocol = protocol
 		latest.Status.TargetRef = targetRef
 		latest.Status.LastSyncTime = &metav1.Time{Time: time.Now()}
+		if cardId != "" {
+			latest.Status.CardId = cardId
+		}
 
 		// Update conditions
 		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
@@ -718,6 +788,164 @@ func agentLabelPredicate() predicate.Predicate {
 		labels := obj.GetLabels()
 		return labels != nil && labels[LabelAgentType] == LabelValueAgent
 	})
+}
+
+// evaluateBinding evaluates identity binding using Kubernetes metadata only
+// Works with WorkloadInfo to support any workload type (Deployment, StatefulSet, Agent CRD)
+func (r *AgentCardReconciler) evaluateBinding(ctx context.Context, agentCard *agentv1alpha1.AgentCard, workload *WorkloadInfo) error {
+	binding := agentCard.Spec.IdentityBinding
+	if binding == nil {
+		return nil
+	}
+
+	// Determine trust domain
+	trustDomain := binding.TrustDomain
+	if trustDomain == "" {
+		trustDomain = r.TrustDomain
+	}
+	if trustDomain == "" {
+		trustDomain = DefaultTrustDomain
+	}
+
+	// Get service account from the workload
+	serviceAccount, err := r.getWorkloadServiceAccount(ctx, workload)
+	if err != nil {
+		agentCardLogger.Error(err, "Failed to get service account for workload", "workload", workload.Name)
+		serviceAccount = workload.Name + "-sa" // fallback
+	}
+
+	// Derive expected SPIFFE ID from Kubernetes metadata
+	// Convention: spiffe://<trust-domain>/ns/<namespace>/sa/<serviceAccount>
+	expectedSpiffeID := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, workload.Namespace, serviceAccount)
+
+	// Check if expected SPIFFE ID is in the allowlist
+	bound := false
+	for _, allowedID := range binding.AllowedSpiffeIDs {
+		if string(allowedID) == expectedSpiffeID {
+			bound = true
+			break
+		}
+	}
+
+	// Determine reason and message
+	var reason, message string
+	if bound {
+		reason = ReasonBound
+		message = fmt.Sprintf("Expected SPIFFE ID %s is in the allowlist", expectedSpiffeID)
+	} else {
+		reason = ReasonNotBound
+		message = fmt.Sprintf("Expected SPIFFE ID %s is not in the allowlist", expectedSpiffeID)
+	}
+
+	// Update binding status
+	if err := r.updateBindingStatus(ctx, agentCard, bound, reason, message, expectedSpiffeID); err != nil {
+		return err
+	}
+
+	// Emit events
+	if r.Recorder != nil {
+		if bound {
+			r.Recorder.Event(agentCard, corev1.EventTypeNormal, "BindingEvaluated", message)
+		} else {
+			r.Recorder.Event(agentCard, corev1.EventTypeWarning, "BindingFailed", message)
+		}
+	}
+
+	return nil
+}
+
+// getWorkloadServiceAccount returns the service account name for a workload
+func (r *AgentCardReconciler) getWorkloadServiceAccount(ctx context.Context, workload *WorkloadInfo) (string, error) {
+	switch workload.Kind {
+	case "Agent":
+		// For Agent CRD, get the Agent and check its PodTemplateSpec
+		agent := &agentv1alpha1.Agent{}
+		if err := r.Get(ctx, types.NamespacedName{Name: workload.Name, Namespace: workload.Namespace}, agent); err != nil {
+			return "", err
+		}
+		if agent.Spec.PodTemplateSpec != nil && agent.Spec.PodTemplateSpec.Spec.ServiceAccountName != "" {
+			return agent.Spec.PodTemplateSpec.Spec.ServiceAccountName, nil
+		}
+		return agent.Name + "-sa", nil
+
+	case "Deployment":
+		deployment := &appsv1.Deployment{}
+		if err := r.Get(ctx, types.NamespacedName{Name: workload.Name, Namespace: workload.Namespace}, deployment); err != nil {
+			return "", err
+		}
+		if deployment.Spec.Template.Spec.ServiceAccountName != "" {
+			return deployment.Spec.Template.Spec.ServiceAccountName, nil
+		}
+		return "default", nil
+
+	case "StatefulSet":
+		statefulset := &appsv1.StatefulSet{}
+		if err := r.Get(ctx, types.NamespacedName{Name: workload.Name, Namespace: workload.Namespace}, statefulset); err != nil {
+			return "", err
+		}
+		if statefulset.Spec.Template.Spec.ServiceAccountName != "" {
+			return statefulset.Spec.Template.Spec.ServiceAccountName, nil
+		}
+		return "default", nil
+
+	default:
+		// For unknown types, try to get from unstructured
+		return workload.Name + "-sa", nil
+	}
+}
+
+// updateBindingStatus updates the binding status in the AgentCard
+func (r *AgentCardReconciler) updateBindingStatus(ctx context.Context, agentCard *agentv1alpha1.AgentCard, bound bool, reason, message, expectedSpiffeID string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &agentv1alpha1.AgentCard{}
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      agentCard.Name,
+			Namespace: agentCard.Namespace,
+		}, latest); err != nil {
+			return err
+		}
+
+		now := metav1.Now()
+		latest.Status.BindingStatus = &agentv1alpha1.BindingStatus{
+			Bound:              bound,
+			Reason:             reason,
+			Message:            message,
+			LastEvaluationTime: &now,
+		}
+		if expectedSpiffeID != "" {
+			latest.Status.ExpectedSpiffeID = expectedSpiffeID
+		}
+
+		// Update the Bound condition
+		conditionStatus := metav1.ConditionFalse
+		if bound {
+			conditionStatus = metav1.ConditionTrue
+		}
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               "Bound",
+			Status:             conditionStatus,
+			LastTransitionTime: now,
+			Reason:             reason,
+			Message:            message,
+		})
+
+		return r.Status().Update(ctx, latest)
+	})
+}
+
+// computeCardId computes a SHA256 hash of the card data for drift detection
+func (r *AgentCardReconciler) computeCardId(cardData *agentv1alpha1.AgentCardData) string {
+	if cardData == nil {
+		return ""
+	}
+	// Use JSON serialization for simplicity (JCS would be ideal but adds complexity)
+	data, err := json.Marshal(cardData)
+	if err != nil {
+		agentCardLogger.Error(err, "Failed to marshal card data for hash computation")
+		return ""
+	}
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
 }
 
 // SetupWithManager sets up the controller with the Manager.
