@@ -689,6 +689,64 @@ var _ = Describe("AgentCard Controller - findMatchingWorkloadBySelector", func()
 	})
 })
 
+var _ = Describe("getWorkloadProtocol", func() {
+	It("should return new label value when both labels are present", func() {
+		labels := map[string]string{
+			LabelKagentiProtocol: "a2a",        // New label
+			LabelAgentProtocol:   "old-value",  // Legacy label
+		}
+
+		protocol := getWorkloadProtocol(labels)
+
+		Expect(protocol).To(Equal("a2a"))
+	})
+
+	It("should fall back to legacy label when new label is absent", func() {
+		labels := map[string]string{
+			LabelAgentProtocol: "a2a", // Only legacy label
+		}
+
+		protocol := getWorkloadProtocol(labels)
+
+		Expect(protocol).To(Equal("a2a"))
+	})
+
+	It("should return empty string when neither label is present", func() {
+		labels := map[string]string{
+			"some-other-label": "value",
+		}
+
+		protocol := getWorkloadProtocol(labels)
+
+		Expect(protocol).To(BeEmpty())
+	})
+
+	It("should return empty string when labels map is nil", func() {
+		protocol := getWorkloadProtocol(nil)
+
+		Expect(protocol).To(BeEmpty())
+	})
+
+	It("should return empty string when labels map is empty", func() {
+		labels := map[string]string{}
+
+		protocol := getWorkloadProtocol(labels)
+
+		Expect(protocol).To(BeEmpty())
+	})
+
+	It("should use new label even when legacy label has different value", func() {
+		labels := map[string]string{
+			LabelKagentiProtocol: "mcp",
+			LabelAgentProtocol:   "a2a",
+		}
+
+		protocol := getWorkloadProtocol(labels)
+
+		Expect(protocol).To(Equal("mcp"))
+	})
+})
+
 // Helper function to find a condition by type
 func findCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
 	for i := range conditions {
