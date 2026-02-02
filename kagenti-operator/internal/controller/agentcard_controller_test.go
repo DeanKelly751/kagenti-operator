@@ -321,7 +321,7 @@ var _ = Describe("AgentCard Controller - findMatchingWorkloadBySelector", func()
 			Expect(workload.APIVersion).To(Equal("apps/v1"))
 		})
 
-		It("should skip Deployments without agent label", func() {
+		It("should not match Deployments without agent label even if selector matches other labels", func() {
 			By("creating a Deployment without agent label")
 			deployment := &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{

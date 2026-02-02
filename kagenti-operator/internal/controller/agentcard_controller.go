@@ -266,7 +266,14 @@ func (r *AgentCardReconciler) findMatchingWorkloadBySelector(ctx context.Context
 		return nil, fmt.Errorf("no selector specified")
 	}
 
-	labelSelector := client.MatchingLabels(agentCard.Spec.Selector.MatchLabels)
+	// Build selector that includes the agent label to ensure we only match agent workloads
+	selectorLabels := make(map[string]string)
+	for k, v := range agentCard.Spec.Selector.MatchLabels {
+		selectorLabels[k] = v
+	}
+	selectorLabels[LabelAgentType] = LabelValueAgent
+
+	labelSelector := client.MatchingLabels(selectorLabels)
 	namespace := client.InNamespace(agentCard.Namespace)
 
 	// Try Deployments first
@@ -274,18 +281,17 @@ func (r *AgentCardReconciler) findMatchingWorkloadBySelector(ctx context.Context
 	if err := r.List(ctx, deployments, namespace, labelSelector); err != nil {
 		return nil, fmt.Errorf("failed to list deployments: %w", err)
 	}
-	for _, d := range deployments.Items {
-		if isAgentWorkload(d.Labels) {
-			return &WorkloadInfo{
-				Name:        d.Name,
-				Namespace:   d.Namespace,
-				APIVersion:  "apps/v1",
-				Kind:        "Deployment",
-				Labels:      d.Labels,
-				Ready:       isDeploymentReady(&d),
-				ServiceName: d.Name,
-			}, nil
-		}
+	if len(deployments.Items) > 0 {
+		d := &deployments.Items[0]
+		return &WorkloadInfo{
+			Name:        d.Name,
+			Namespace:   d.Namespace,
+			APIVersion:  "apps/v1",
+			Kind:        "Deployment",
+			Labels:      d.Labels,
+			Ready:       isDeploymentReady(d),
+			ServiceName: d.Name,
+		}, nil
 	}
 
 	// Try StatefulSets
@@ -293,18 +299,17 @@ func (r *AgentCardReconciler) findMatchingWorkloadBySelector(ctx context.Context
 	if err := r.List(ctx, statefulsets, namespace, labelSelector); err != nil {
 		return nil, fmt.Errorf("failed to list statefulsets: %w", err)
 	}
-	for _, s := range statefulsets.Items {
-		if isAgentWorkload(s.Labels) {
-			return &WorkloadInfo{
-				Name:        s.Name,
-				Namespace:   s.Namespace,
-				APIVersion:  "apps/v1",
-				Kind:        "StatefulSet",
-				Labels:      s.Labels,
-				Ready:       isStatefulSetReady(&s),
-				ServiceName: s.Name,
-			}, nil
-		}
+	if len(statefulsets.Items) > 0 {
+		s := &statefulsets.Items[0]
+		return &WorkloadInfo{
+			Name:        s.Name,
+			Namespace:   s.Namespace,
+			APIVersion:  "apps/v1",
+			Kind:        "StatefulSet",
+			Labels:      s.Labels,
+			Ready:       isStatefulSetReady(s),
+			ServiceName: s.Name,
+		}, nil
 	}
 
 	// Fall back to legacy Agent CRD
@@ -312,18 +317,17 @@ func (r *AgentCardReconciler) findMatchingWorkloadBySelector(ctx context.Context
 	if err := r.List(ctx, agents, namespace, labelSelector); err != nil {
 		return nil, fmt.Errorf("failed to list agents: %w", err)
 	}
-	for _, a := range agents.Items {
-		if isAgentWorkload(a.Labels) {
-			return &WorkloadInfo{
-				Name:        a.Name,
-				Namespace:   a.Namespace,
-				APIVersion:  agentv1alpha1.GroupVersion.String(),
-				Kind:        "Agent",
-				Labels:      a.Labels,
-				Ready:       isAgentCRDReady(&a),
-				ServiceName: a.Name,
-			}, nil
-		}
+	if len(agents.Items) > 0 {
+		a := &agents.Items[0]
+		return &WorkloadInfo{
+			Name:        a.Name,
+			Namespace:   a.Namespace,
+			APIVersion:  agentv1alpha1.GroupVersion.String(),
+			Kind:        "Agent",
+			Labels:      a.Labels,
+			Ready:       isAgentCRDReady(a),
+			ServiceName: a.Name,
+		}, nil
 	}
 
 	return nil, fmt.Errorf("%w: no matching workload found for selector", ErrWorkloadNotFound)
