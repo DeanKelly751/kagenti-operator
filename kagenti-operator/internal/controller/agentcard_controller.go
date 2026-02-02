@@ -175,7 +175,10 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 	}
 
-	// Override the URL with the actual in-cluster service URL
+	// Override the URL with the actual in-cluster Service URL.
+	// Agents may advertise URLs like 0.0.0.0:8000, which are only valid from
+	// within the agent Pod itself and are not usable for cluster communication.
+	// Using the Service URL ensures other components can reliably reach the agent.
 	cardData.URL = serviceURL
 
 	// Update the AgentCard status with the fetched card and resolved targetRef
