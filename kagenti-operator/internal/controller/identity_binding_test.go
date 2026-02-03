@@ -124,7 +124,7 @@ var _ = Describe("Identity Binding", func() {
 				},
 				Spec: agentv1alpha1.AgentCardSpec{
 					SyncPeriod: "30s",
-					Selector: agentv1alpha1.AgentSelector{
+					Selector: &agentv1alpha1.AgentSelector{
 						MatchLabels: map[string]string{
 							"app.kubernetes.io/name": agentName,
 							LabelAgentType:           LabelValueAgent,
@@ -265,7 +265,7 @@ var _ = Describe("Identity Binding", func() {
 				},
 				Spec: agentv1alpha1.AgentCardSpec{
 					SyncPeriod: "30s",
-					Selector: agentv1alpha1.AgentSelector{
+					Selector: &agentv1alpha1.AgentSelector{
 						MatchLabels: map[string]string{
 							"app.kubernetes.io/name": agentName,
 							LabelAgentType:           LabelValueAgent,
@@ -401,7 +401,7 @@ var _ = Describe("Identity Binding", func() {
 				},
 				Spec: agentv1alpha1.AgentCardSpec{
 					SyncPeriod: "30s",
-					Selector: agentv1alpha1.AgentSelector{
+					Selector: &agentv1alpha1.AgentSelector{
 						MatchLabels: map[string]string{
 							"app.kubernetes.io/name": agentName,
 							LabelAgentType:           LabelValueAgent,
@@ -585,7 +585,7 @@ var _ = Describe("Identity Binding", func() {
 				},
 				Spec: agentv1alpha1.AgentCardSpec{
 					SyncPeriod: "30s",
-					Selector: agentv1alpha1.AgentSelector{
+					Selector: &agentv1alpha1.AgentSelector{
 						MatchLabels: map[string]string{
 							"app.kubernetes.io/name": agentName,
 							LabelAgentType:           LabelValueAgent,
@@ -715,26 +715,43 @@ var _ = Describe("Identity Binding", func() {
 				TrustDomain: "my.domain",
 			}
 
+			// Create the agent in the cluster for getWorkloadServiceAccount to fetch
 			agent := &agentv1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "my-agent",
-					Namespace: "my-namespace",
+					Name:      "spiffe-test-agent",
+					Namespace: "default",
 				},
 				Spec: agentv1alpha1.AgentSpec{
 					PodTemplateSpec: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							ServiceAccountName: "my-service-account",
+							Containers: []corev1.Container{
+								{
+									Name:  "agent",
+									Image: "test-image:latest",
+								},
+							},
 						},
 					},
 				},
 			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			defer k8sClient.Delete(ctx, agent)
 
-			sa := reconciler.getAgentServiceAccount(agent)
+			workload := &WorkloadInfo{
+				Name:       agent.Name,
+				Namespace:  agent.Namespace,
+				Kind:       "Agent",
+				APIVersion: agentv1alpha1.GroupVersion.String(),
+			}
+
+			sa, err := reconciler.getWorkloadServiceAccount(ctx, workload)
+			Expect(err).NotTo(HaveOccurred())
 			Expect(sa).To(Equal("my-service-account"))
 
 			// Expected SPIFFE ID format: spiffe://<trust-domain>/ns/<namespace>/sa/<serviceAccount>
-			expectedSpiffeID := "spiffe://my.domain/ns/my-namespace/sa/my-service-account"
-			actualSpiffeID := "spiffe://" + reconciler.TrustDomain + "/ns/" + agent.Namespace + "/sa/" + sa
+			expectedSpiffeID := "spiffe://my.domain/ns/default/sa/my-service-account"
+			actualSpiffeID := "spiffe://" + reconciler.TrustDomain + "/ns/" + workload.Namespace + "/sa/" + sa
 			Expect(actualSpiffeID).To(Equal(expectedSpiffeID))
 		})
 
@@ -744,22 +761,39 @@ var _ = Describe("Identity Binding", func() {
 				Scheme: k8sClient.Scheme(),
 			}
 
+			// Create the agent in the cluster for getWorkloadServiceAccount to fetch
 			agent := &agentv1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "my-agent",
+					Name:      "spiffe-test-agent-default",
 					Namespace: "default",
 				},
 				Spec: agentv1alpha1.AgentSpec{
 					PodTemplateSpec: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							// No ServiceAccountName specified
+							Containers: []corev1.Container{
+								{
+									Name:  "agent",
+									Image: "test-image:latest",
+								},
+							},
 						},
 					},
 				},
 			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			defer k8sClient.Delete(ctx, agent)
 
-			sa := reconciler.getAgentServiceAccount(agent)
-			Expect(sa).To(Equal("my-agent-sa"))
+			workload := &WorkloadInfo{
+				Name:       agent.Name,
+				Namespace:  agent.Namespace,
+				Kind:       "Agent",
+				APIVersion: agentv1alpha1.GroupVersion.String(),
+			}
+
+			sa, err := reconciler.getWorkloadServiceAccount(ctx, workload)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sa).To(Equal("spiffe-test-agent-default-sa"))
 		})
 	})
 
@@ -772,7 +806,7 @@ var _ = Describe("Identity Binding", func() {
 
 			card := &agentv1alpha1.AgentCard{
 				Spec: agentv1alpha1.AgentCardSpec{
-					Selector: agentv1alpha1.AgentSelector{
+					Selector: &agentv1alpha1.AgentSelector{
 						MatchLabels: map[string]string{
 							"app": "test",
 							"env": "prod",
@@ -812,7 +846,7 @@ var _ = Describe("Identity Binding", func() {
 
 			card := &agentv1alpha1.AgentCard{
 				Spec: agentv1alpha1.AgentCardSpec{
-					Selector: agentv1alpha1.AgentSelector{
+					Selector: &agentv1alpha1.AgentSelector{
 						MatchLabels: map[string]string{
 							"app": "test",
 						},

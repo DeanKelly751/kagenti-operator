@@ -436,16 +436,42 @@ kubectl get agentcard <name> -n <namespace> -o jsonpath='{.status.expectedSpiffe
 spec:
   identityBinding:
     trustDomain: "cluster.local"      # Optional, defaults to operator config
+    expectedSpiffeID: ""              # Optional, override auto-derived ID (see below)
     allowedSpiffeIDs:                 # Required
       - "spiffe://cluster.local/ns/demo/sa/my-sa"
     strict: false                     # Optional, default false
+```
+
+### Custom SPIFFE ID Configurations
+
+By default, the controller derives the expected SPIFFE ID as:
+```
+spiffe://<trust-domain>/ns/<namespace>/sa/<serviceAccount>
+```
+
+This matches the default SPIRE Helm operator configuration. However, SPIRE supports [richer identity patterns](https://github.com/spiffe/spire/blob/main/doc/plugin_agent_workloadattestor_k8s.md#k8s-selectors) including:
+- Pod labels (`k8s:pod-label:<key>:<value>`)
+- Pod names (`k8s:pod-name:<name>`)
+- Container names (`k8s:container-name:<name>`)
+- And more...
+
+**If your SPIRE is configured with a custom identity pattern**, use the `expectedSpiffeID` field to explicitly specify the expected identity:
+
+```yaml
+spec:
+  identityBinding:
+    # Override auto-derivation with your custom SPIFFE ID format
+    expectedSpiffeID: "spiffe://mycompany.local/cluster/prod/workload/weather-agent"
+    allowedSpiffeIDs:
+      - "spiffe://mycompany.local/cluster/prod/workload/weather-agent"
+    strict: true
 ```
 
 ### Status Fields
 
 | Field | Description |
 |-------|-------------|
-| `status.expectedSpiffeID` | Derived SPIFFE ID from Agent metadata |
+| `status.expectedSpiffeID` | SPIFFE ID used for binding (explicit or derived) |
 | `status.bindingStatus.bound` | `true` if ID in allowlist |
 | `status.bindingStatus.reason` | `Bound`, `NotBound`, `AgentNotFound`, `MultipleAgentsMatched` |
 | `agent.status.bindingEnforcement.disabledByBinding` | `true` if scaled to 0 |

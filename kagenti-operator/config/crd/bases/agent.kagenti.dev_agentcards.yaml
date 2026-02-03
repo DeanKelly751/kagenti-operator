@@ -88,6 +88,16 @@ spec:
                       type: string
                     minItems: 1
                     type: array
+                  expectedSpiffeID:
+                    description: |-
+                      ExpectedSpiffeID overrides the auto-derived SPIFFE ID for this workload.
+                      Use this when your SPIRE configuration uses a non-standard identity format
+                      (e.g., pod labels, container names, or other workload attestor selectors).
+                      If not specified, the controller derives the ID as:
+                        spiffe://<trust-domain>/ns/<namespace>/sa/<serviceAccount>
+                      See: https://github.com/spiffe/spire/blob/main/doc/plugin_agent_workloadattestor_k8s.md
+                    pattern: ^spiffe://[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9](/[a-zA-Z0-9\-\._~%!$&'()*+,;=:@]+)*$
+                    type: string
                   strict:
                     default: false
                     description: |-

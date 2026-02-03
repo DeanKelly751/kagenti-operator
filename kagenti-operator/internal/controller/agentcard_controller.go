@@ -328,6 +328,7 @@ func (r *AgentCardReconciler) getWorkloadByTargetRef(ctx context.Context, namesp
 
 // findMatchingWorkloadBySelector finds a workload matching the selector (legacy mode)
 // It searches Deployments, StatefulSets, and Agent CRDs
+// Returns ErrMultipleAgentsMatched if more than one unique workload matches
 func (r *AgentCardReconciler) findMatchingWorkloadBySelector(ctx context.Context, agentCard *agentv1alpha1.AgentCard) (*WorkloadInfo, error) {
 	if agentCard.Spec.Selector == nil {
 		return nil, fmt.Errorf("no selector specified")
@@ -343,58 +344,90 @@ func (r *AgentCardReconciler) findMatchingWorkloadBySelector(ctx context.Context
 	labelSelector := client.MatchingLabels(selectorLabels)
 	namespace := client.InNamespace(agentCard.Namespace)
 
-	// Try Deployments first
+	// Use a map to deduplicate by name (Agent CRD creates Deployment with same name)
+	workloadsByName := make(map[string]*WorkloadInfo)
+	var matchedNames []string
+
+	// Search Deployments first (preferred over Agent CRD)
 	deployments := &appsv1.DeploymentList{}
 	if err := r.List(ctx, deployments, namespace, labelSelector); err != nil {
 		return nil, fmt.Errorf("failed to list deployments: %w", err)
 	}
-	if len(deployments.Items) > 0 {
-		d := &deployments.Items[0]
-		return &WorkloadInfo{
-			Name:        d.Name,
-			Namespace:   d.Namespace,
-			APIVersion:  "apps/v1",
-			Kind:        "Deployment",
-			Labels:      d.Labels,
-			Ready:       isDeploymentReady(d),
-			ServiceName: d.Name,
-		}, nil
+	for i := range deployments.Items {
+		d := &deployments.Items[i]
+		if _, exists := workloadsByName[d.Name]; !exists {
+			workloadsByName[d.Name] = &WorkloadInfo{
+				Name:        d.Name,
+				Namespace:   d.Namespace,
+				APIVersion:  "apps/v1",
+				Kind:        "Deployment",
+				Labels:      d.Labels,
+				Ready:       isDeploymentReady(d),
+				ServiceName: d.Name,
+			}
+			matchedNames = append(matchedNames, d.Name)
+		}
 	}
 
-	// Try StatefulSets
+	// Search StatefulSets
 	statefulsets := &appsv1.StatefulSetList{}
 	if err := r.List(ctx, statefulsets, namespace, labelSelector); err != nil {
 		return nil, fmt.Errorf("failed to list statefulsets: %w", err)
 	}
-	if len(statefulsets.Items) > 0 {
-		s := &statefulsets.Items[0]
-		return &WorkloadInfo{
-			Name:        s.Name,
-			Namespace:   s.Namespace,
-			APIVersion:  "apps/v1",
-			Kind:        "StatefulSet",
-			Labels:      s.Labels,
-			Ready:       isStatefulSetReady(s),
-			ServiceName: s.Name,
-		}, nil
+	for i := range statefulsets.Items {
+		s := &statefulsets.Items[i]
+		if _, exists := workloadsByName[s.Name]; !exists {
+			workloadsByName[s.Name] = &WorkloadInfo{
+				Name:        s.Name,
+				Namespace:   s.Namespace,
+				APIVersion:  "apps/v1",
+				Kind:        "StatefulSet",
+				Labels:      s.Labels,
+				Ready:       isStatefulSetReady(s),
+				ServiceName: s.Name,
+			}
+			matchedNames = append(matchedNames, s.Name)
+		}
 	}
 
-	// Fall back to legacy Agent CRD
+	// Search Agent CRDs (fallback if no Deployment/StatefulSet with same name)
 	agents := &agentv1alpha1.AgentList{}
 	if err := r.List(ctx, agents, namespace, labelSelector); err != nil {
 		return nil, fmt.Errorf("failed to list agents: %w", err)
 	}
-	if len(agents.Items) > 0 {
-		a := &agents.Items[0]
-		return &WorkloadInfo{
-			Name:        a.Name,
-			Namespace:   a.Namespace,
-			APIVersion:  agentv1alpha1.GroupVersion.String(),
-			Kind:        "Agent",
-			Labels:      a.Labels,
-			Ready:       isAgentCRDReady(a),
-			ServiceName: a.Name,
-		}, nil
+	for i := range agents.Items {
+		a := &agents.Items[i]
+		if _, exists := workloadsByName[a.Name]; !exists {
+			workloadsByName[a.Name] = &WorkloadInfo{
+				Name:        a.Name,
+				Namespace:   a.Namespace,
+				APIVersion:  agentv1alpha1.GroupVersion.String(),
+				Kind:        "Agent",
+				Labels:      a.Labels,
+				Ready:       isAgentCRDReady(a),
+				ServiceName: a.Name,
+			}
+			matchedNames = append(matchedNames, a.Name)
+		}
+	}
+
+	// Check results
+	if len(workloadsByName) == 0 {
+		return nil, fmt.Errorf("%w: no matching workload found for selector", ErrWorkloadNotFound)
+	}
+
+	if len(workloadsByName) > 1 {
+		agentCardLogger.Error(ErrMultipleAgentsMatched, "Ambiguous selector - identity binding requires unique selector",
+			"count", len(workloadsByName),
+			"agentCard", agentCard.Name,
+			"matchingWorkloads", matchedNames)
+		return nil, fmt.Errorf("%w: found %d workloads (%v) - use more specific labels in selector or use targetRef",
+			ErrMultipleAgentsMatched, len(workloadsByName), matchedNames)
+	}
+
+	// Return the single match
+	for _, workload := range workloadsByName {
+		return workload, nil
 	}
 
 	return nil, fmt.Errorf("%w: no matching workload found for selector", ErrWorkloadNotFound)
@@ -798,25 +831,36 @@ func (r *AgentCardReconciler) evaluateBinding(ctx context.Context, agentCard *ag
 		return nil
 	}
 
-	// Determine trust domain
-	trustDomain := binding.TrustDomain
-	if trustDomain == "" {
-		trustDomain = r.TrustDomain
-	}
-	if trustDomain == "" {
-		trustDomain = DefaultTrustDomain
-	}
+	// Determine expected SPIFFE ID
+	var expectedSpiffeID string
 
-	// Get service account from the workload
-	serviceAccount, err := r.getWorkloadServiceAccount(ctx, workload)
-	if err != nil {
-		agentCardLogger.Error(err, "Failed to get service account for workload", "workload", workload.Name)
-		serviceAccount = workload.Name + "-sa" // fallback
-	}
+	// Use explicit expectedSpiffeID if provided (supports custom SPIRE configurations)
+	if binding.ExpectedSpiffeID != "" {
+		expectedSpiffeID = string(binding.ExpectedSpiffeID)
+		agentCardLogger.V(1).Info("Using explicit expectedSpiffeID from spec", "expectedSpiffeID", expectedSpiffeID)
+	} else {
+		// Derive from Kubernetes metadata (standard SPIRE Helm operator pattern)
+		// See: https://github.com/spiffe/spire/blob/main/doc/plugin_agent_workloadattestor_k8s.md
 
-	// Derive expected SPIFFE ID from Kubernetes metadata
-	// Convention: spiffe://<trust-domain>/ns/<namespace>/sa/<serviceAccount>
-	expectedSpiffeID := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, workload.Namespace, serviceAccount)
+		// Determine trust domain
+		trustDomain := binding.TrustDomain
+		if trustDomain == "" {
+			trustDomain = r.TrustDomain
+		}
+		if trustDomain == "" {
+			trustDomain = DefaultTrustDomain
+		}
+
+		// Get service account from the workload
+		serviceAccount, err := r.getWorkloadServiceAccount(ctx, workload)
+		if err != nil {
+			agentCardLogger.Error(err, "Failed to get service account for workload", "workload", workload.Name)
+			serviceAccount = workload.Name + "-sa" // fallback
+		}
+
+		// Convention: spiffe://<trust-domain>/ns/<namespace>/sa/<serviceAccount>
+		expectedSpiffeID = fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, workload.Namespace, serviceAccount)
+	}
 
 	// Check if expected SPIFFE ID is in the allowlist
 	bound := false
@@ -825,6 +869,15 @@ func (r *AgentCardReconciler) evaluateBinding(ctx context.Context, agentCard *ag
 			bound = true
 			break
 		}
+	}
+
+	// Warn if expectedSpiffeID doesn't match any allowedSpiffeID (likely config error)
+	if !bound && r.Recorder != nil {
+		// Log at higher verbosity to help users debug misconfigurations
+		agentCardLogger.Info("SPIFFE ID mismatch - verify your SPIRE configuration matches allowedSpiffeIDs",
+			"expectedSpiffeID", expectedSpiffeID,
+			"allowedSpiffeIDs", binding.AllowedSpiffeIDs,
+			"hint", "If using custom SPIRE identity patterns, set spec.identityBinding.expectedSpiffeID explicitly")
 	}
 
 	// Determine reason and message

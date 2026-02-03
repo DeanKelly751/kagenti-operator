@@ -56,6 +56,15 @@ type IdentityBinding struct {
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$`
 	TrustDomain string `json:"trustDomain,omitempty"`
 
+	// ExpectedSpiffeID overrides the auto-derived SPIFFE ID for this workload.
+	// Use this when your SPIRE configuration uses a non-standard identity format
+	// (e.g., pod labels, container names, or other workload attestor selectors).
+	// If not specified, the controller derives the ID as:
+	//   spiffe://<trust-domain>/ns/<namespace>/sa/<serviceAccount>
+	// See: https://github.com/spiffe/spire/blob/main/doc/plugin_agent_workloadattestor_k8s.md
+	// +optional
+	ExpectedSpiffeID SpiffeID `json:"expectedSpiffeID,omitempty"`
+
 	// AllowedSpiffeIDs is the allowlist of SPIFFE IDs that can bind to this agent.
 	// Each ID must be a valid SPIFFE ID in the format spiffe://<trust-domain>/<path>
 	// +required
