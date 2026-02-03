@@ -189,6 +189,143 @@ var _ = Describe("AgentCardSync Controller", func() {
 			By("cleaning up the test Agent")
 			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
 		})
+
+		It("should create AgentCard for agents with the new protocol label (kagenti.io/protocol)", func() {
+			const agentNewLabel = "test-new-protocol-label-agent"
+
+			By("creating an Agent with the new kagenti.io/protocol label")
+			agent := &agentv1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      agentNewLabel,
+					Namespace: namespace,
+					Labels: map[string]string{
+						"app.kubernetes.io/name": agentNewLabel,
+						LabelAgentType:           LabelValueAgent,
+						LabelKagentiProtocol:     "a2a", // New label
+					},
+				},
+				Spec: agentv1alpha1.AgentSpec{
+					PodTemplateSpec: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "agent",
+									Image: "test-image:latest",
+								},
+							},
+						},
+					},
+					ImageSource: agentv1alpha1.ImageSource{
+						Image: ptr.To("test-image:latest"),
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+
+			By("reconciling the Agent")
+			reconciler := &AgentCardSyncReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      agentNewLabel,
+					Namespace: namespace,
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("checking that an AgentCard was created")
+			agentCard := &agentv1alpha1.AgentCard{}
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      agentNewLabel + "-card",
+					Namespace: namespace,
+				}, agentCard)
+				return err == nil
+			}).Should(BeTrue())
+
+			By("verifying the AgentCard has correct selector")
+			Expect(agentCard.Spec.Selector.MatchLabels).To(HaveKeyWithValue("app.kubernetes.io/name", agentNewLabel))
+			Expect(agentCard.Spec.Selector.MatchLabels).To(HaveKeyWithValue(LabelAgentType, LabelValueAgent))
+
+			By("verifying the AgentCard has owner reference")
+			Expect(agentCard.OwnerReferences).NotTo(BeEmpty())
+			Expect(agentCard.OwnerReferences[0].Kind).To(Equal("Agent"))
+			Expect(agentCard.OwnerReferences[0].Name).To(Equal(agentNewLabel))
+
+			By("cleaning up the test Agent and AgentCard")
+			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, agentCard)).To(Succeed())
+		})
+
+		It("should create AgentCard for agents with both old and new protocol labels (new label takes precedence)", func() {
+			const agentBothLabels = "test-both-protocol-labels-agent"
+
+			By("creating an Agent with both old and new protocol labels")
+			agent := &agentv1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      agentBothLabels,
+					Namespace: namespace,
+					Labels: map[string]string{
+						"app.kubernetes.io/name": agentBothLabels,
+						LabelAgentType:           LabelValueAgent,
+						LabelKagentiProtocol:     "a2a", // New label (should be used)
+						LabelAgentProtocol:       "mcp", // Old label (should be ignored)
+					},
+				},
+				Spec: agentv1alpha1.AgentSpec{
+					PodTemplateSpec: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "agent",
+									Image: "test-image:latest",
+								},
+							},
+						},
+					},
+					ImageSource: agentv1alpha1.ImageSource{
+						Image: ptr.To("test-image:latest"),
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+
+			By("reconciling the Agent")
+			reconciler := &AgentCardSyncReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      agentBothLabels,
+					Namespace: namespace,
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("checking that an AgentCard was created")
+			agentCard := &agentv1alpha1.AgentCard{}
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      agentBothLabels + "-card",
+					Namespace: namespace,
+				}, agentCard)
+				return err == nil
+			}).Should(BeTrue())
+
+			By("verifying the AgentCard has correct selector and owner reference")
+			Expect(agentCard.Spec.Selector.MatchLabels).To(HaveKeyWithValue("app.kubernetes.io/name", agentBothLabels))
+			Expect(agentCard.OwnerReferences).NotTo(BeEmpty())
+			Expect(agentCard.OwnerReferences[0].Name).To(Equal(agentBothLabels))
+
+			By("cleaning up the test Agent and AgentCard")
+			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, agentCard)).To(Succeed())
+		})
 	})
 
 	Context("When reconciling a Deployment with agent labels", func() {
