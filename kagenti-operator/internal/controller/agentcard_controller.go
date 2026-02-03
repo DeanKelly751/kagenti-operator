@@ -106,10 +106,11 @@ type WorkloadInfo struct {
 // AgentCardReconciler reconciles an AgentCard object
 type AgentCardReconciler struct {
 	client.Client
-	Scheme       *runtime.Scheme
-	AgentFetcher agentcard.Fetcher
-	Recorder     record.EventRecorder
-	TrustDomain  string
+	Scheme               *runtime.Scheme
+	AgentFetcher         agentcard.Fetcher
+	Recorder             record.EventRecorder
+	TrustDomain          string
+	EnableLegacyAgentCRD bool
 }
 
 // +kubebuilder:rbac:groups=agent.kagenti.dev,resources=agentcards,verbs=get;list;watch;create;update;patch;delete
@@ -273,8 +274,11 @@ func (r *AgentCardReconciler) getWorkload(ctx context.Context, agentCard *agentv
 		return r.getWorkloadByTargetRef(ctx, agentCard.Namespace, agentCard.Spec.TargetRef)
 	}
 
-	// Fall back to deprecated selector
+	// Fall back to deprecated selector with warning
 	if agentCard.Spec.Selector != nil {
+		agentCardLogger.Info("DEPRECATION WARNING: AgentCard uses deprecated 'selector' field, please migrate to 'targetRef' for explicit workload references",
+			"agentCard", agentCard.Name,
+			"namespace", agentCard.Namespace)
 		return r.findMatchingWorkloadBySelector(ctx, agentCard)
 	}
 
@@ -548,8 +552,13 @@ func getWorkloadProtocol(labels map[string]string) string {
 	if protocol := labels[LabelKagentiProtocol]; protocol != "" {
 		return protocol
 	}
-	// Fall back to old label
-	return labels[LabelAgentProtocol]
+	// Fall back to old label with deprecation warning
+	if protocol := labels[LabelAgentProtocol]; protocol != "" {
+		agentCardLogger.Info("DEPRECATION WARNING: workload uses deprecated label 'kagenti.io/agent-protocol', please migrate to 'kagenti.io/protocol'",
+			"protocol", protocol)
+		return protocol
+	}
+	return ""
 }
 
 // getService retrieves a Service by name
@@ -1008,7 +1017,7 @@ func (r *AgentCardReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.AgentFetcher = agentcard.NewFetcher()
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&agentv1alpha1.AgentCard{}).
 		// Watch Deployments with agent labels
 		Watches(
@@ -1021,13 +1030,21 @@ func (r *AgentCardReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&appsv1.StatefulSet{},
 			handler.EnqueueRequestsFromMapFunc(r.mapWorkloadToAgentCard("apps/v1", "StatefulSet")),
 			builder.WithPredicates(agentLabelPredicate()),
-		).
-		// Watch legacy Agent CRDs
-		Watches(
+		)
+
+	// Optionally watch legacy Agent CRDs if enabled
+	if r.EnableLegacyAgentCRD {
+		agentCardLogger.Info("Legacy Agent CRD support is enabled, watching Agent resources")
+		controllerBuilder = controllerBuilder.Watches(
 			&agentv1alpha1.Agent{},
 			handler.EnqueueRequestsFromMapFunc(r.mapAgentToAgentCard),
 			builder.WithPredicates(agentLabelPredicate()),
-		).
+		)
+	} else {
+		agentCardLogger.Info("Legacy Agent CRD support is disabled, not watching Agent resources")
+	}
+
+	return controllerBuilder.
 		Named("AgentCard").
 		Complete(r)
 }

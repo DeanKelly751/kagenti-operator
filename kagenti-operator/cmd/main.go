@@ -69,6 +69,7 @@ func main() {
 	var tlsOpts []func(*tls.Config)
 	var enableClientRegistration bool
 	var defaultTrustDomain string
+	var enableLegacyAgentCRD bool
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -91,6 +92,8 @@ func main() {
 		"If set, Kagenti will register clients (agents and tools) in Keycloak")
 	flag.StringVar(&defaultTrustDomain, "default-trust-domain", "cluster.local",
 		"Default SPIFFE trust domain for identity binding evaluation")
+	flag.BoolVar(&enableLegacyAgentCRD, "enable-legacy-agent-crd", true,
+		"Enable support for legacy Agent CRD. Set to false after full migration to workload-based agents (Deployments/StatefulSets).")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -248,19 +251,26 @@ func main() {
 	}
 
 	if err = (&controller.AgentCardReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		Recorder:    mgr.GetEventRecorderFor("agentcard-controller"),
-		TrustDomain: defaultTrustDomain,
+		Client:               mgr.GetClient(),
+		Scheme:               mgr.GetScheme(),
+		Recorder:             mgr.GetEventRecorderFor("agentcard-controller"),
+		TrustDomain:          defaultTrustDomain,
+		EnableLegacyAgentCRD: enableLegacyAgentCRD,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentCard")
 		os.Exit(1)
 	}
-	if err = (&controller.AgentCardSyncReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "AgentCardSync")
+	// Only enable AgentCardSync controller if legacy Agent CRD support is enabled
+	// This controller watches Agent CRDs and automatically creates AgentCards
+	if enableLegacyAgentCRD {
+		if err = (&controller.AgentCardSyncReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "AgentCardSync")
+		}
+	} else {
+		setupLog.Info("Legacy Agent CRD support is disabled, skipping AgentCardSync controller")
 	}
 	if err = webhookv1alpha1.SetupAgentBuildWebhookWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create webhook", "webhook", "AgentBuild")

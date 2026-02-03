@@ -106,13 +106,22 @@ func (r *AgentCardSyncReconciler) shouldSyncAgent(agent *agentv1alpha1.Agent) bo
 		return false
 	}
 
-	// Must have a protocol label to know how to fetch the card
-	if agent.Labels[LabelAgentProtocol] == "" {
-		syncLogger.Info("Agent has type=agent but no protocol label", "agent", agent.Name)
-		return false
+	// Check for protocol label - support both old and new labels
+	// Try new label first
+	if agent.Labels[LabelKagentiProtocol] != "" {
+		return true
 	}
 
-	return true
+	// Fall back to old label with deprecation warning
+	if agent.Labels[LabelAgentProtocol] != "" {
+		syncLogger.Info("DEPRECATION WARNING: Agent uses deprecated label 'kagenti.io/agent-protocol', please migrate to 'kagenti.io/protocol'",
+			"agent", agent.Name,
+			"protocol", agent.Labels[LabelAgentProtocol])
+		return true
+	}
+
+	syncLogger.Info("Agent has type=agent but no protocol label", "agent", agent.Name)
+	return false
 }
 
 // getAgentCardName generates the AgentCard name for an Agent
