@@ -222,6 +222,43 @@ func (r *AgentCardSyncReconciler) ensureAgentCard(ctx context.Context, obj clien
 			needsUpdate = true
 		}
 
+		// Ensure existing TargetRef (if present) matches the current workload.
+		if existingCard.Spec.TargetRef != nil {
+			tr := existingCard.Spec.TargetRef
+			expectedAPIVersion := gvk.GroupVersion().String()
+			expectedKind := gvk.Kind
+			expectedName := obj.GetName()
+
+			// If TargetRef is effectively empty, initialize it to match the workload.
+			if tr.APIVersion == "" && tr.Kind == "" && tr.Name == "" {
+				syncLogger.Info("Initializing empty AgentCard TargetRef to match workload",
+					"agentCard", cardName,
+					"apiVersion", expectedAPIVersion,
+					"kind", expectedKind,
+					"name", expectedName)
+				tr.APIVersion = expectedAPIVersion
+				tr.Kind = expectedKind
+				tr.Name = expectedName
+				needsUpdate = true
+			} else if tr.APIVersion != expectedAPIVersion || tr.Kind != expectedKind || tr.Name != expectedName {
+				// Existing TargetRef points at a different workload; surface a clear conflict error.
+				errMsg := fmt.Sprintf(
+					"AgentCard TargetRef conflict for %s/%s: expected targetRef %s/%s %s, found %s/%s %s",
+					obj.GetNamespace(), cardName,
+					expectedAPIVersion, expectedKind, expectedName,
+					tr.APIVersion, tr.Kind, tr.Name,
+				)
+				syncLogger.Error(nil, "AgentCard TargetRef does not match reconciled workload",
+					"agentCard", cardName,
+					"expectedAPIVersion", expectedAPIVersion,
+					"expectedKind", expectedKind,
+					"expectedName", expectedName,
+					"foundAPIVersion", tr.APIVersion,
+					"foundKind", tr.Kind,
+					"foundName", tr.Name)
+				return ctrl.Result{}, fmt.Errorf("%s", errMsg)
+			}
+		}
 		if needsUpdate {
 			if err := r.Update(ctx, existingCard); err != nil {
 				syncLogger.Error(err, "Failed to update AgentCard")
