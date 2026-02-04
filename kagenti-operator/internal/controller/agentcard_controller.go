@@ -560,7 +560,8 @@ func getWorkloadProtocol(labels map[string]string) string {
 	}
 	// Fall back to old label with deprecation warning
 	if protocol := labels[LabelAgentProtocol]; protocol != "" {
-		agentCardLogger.Info("DEPRECATION WARNING: workload uses deprecated label 'kagenti.io/agent-protocol', please migrate to 'kagenti.io/protocol'",
+		// Use V(1) to reduce log noise - this helper is called frequently
+		agentCardLogger.V(1).Info("Workload uses deprecated label 'kagenti.io/agent-protocol', please migrate to 'kagenti.io/protocol'",
 			"protocol", protocol)
 		return protocol
 	}
