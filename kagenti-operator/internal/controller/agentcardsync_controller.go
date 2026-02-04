@@ -317,14 +317,90 @@ func (r *AgentCardSyncReconciler) createAgentCardForWorkload(ctx context.Context
 
 	if err := r.Create(ctx, agentCard); err != nil {
 		if errors.IsAlreadyExists(err) {
-			syncLogger.Info("AgentCard already exists", "agentCard", agentCard.Name)
-			return ctrl.Result{}, nil
+			// Re-fetch the existing AgentCard and validate/repair it
+			// This handles race conditions and ensures the card belongs to this workload
+			return r.handleAlreadyExistsOnCreate(ctx, obj, gvk, cardName)
 		}
 		syncLogger.Error(err, "Failed to create AgentCard")
 		return ctrl.Result{}, err
 	}
 
 	syncLogger.Info("Successfully created AgentCard", "agentCard", agentCard.Name)
+	return ctrl.Result{}, nil
+}
+
+// handleAlreadyExistsOnCreate handles the case where an AgentCard already exists during create.
+// It re-fetches the existing card and validates that its targetRef matches the workload we're
+// reconciling. If there's a mismatch, it returns a conflict error to make the misconfiguration visible.
+func (r *AgentCardSyncReconciler) handleAlreadyExistsOnCreate(ctx context.Context, obj client.Object, gvk schema.GroupVersionKind, cardName string) (ctrl.Result, error) {
+	syncLogger.Info("AgentCard already exists, validating ownership", "agentCard", cardName)
+
+	existingCard := &agentv1alpha1.AgentCard{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      cardName,
+		Namespace: obj.GetNamespace(),
+	}, existingCard); err != nil {
+		// Card was deleted between create attempt and re-fetch, requeue to retry
+		if errors.IsNotFound(err) {
+			syncLogger.Info("AgentCard was deleted after AlreadyExists, requeueing", "agentCard", cardName)
+			return ctrl.Result{Requeue: true}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	expectedAPIVersion := gvk.GroupVersion().String()
+	expectedKind := gvk.Kind
+	expectedName := obj.GetName()
+
+	// Check if the existing card's targetRef matches our workload
+	if existingCard.Spec.TargetRef != nil {
+		tr := existingCard.Spec.TargetRef
+		if tr.APIVersion != expectedAPIVersion || tr.Kind != expectedKind || tr.Name != expectedName {
+			// Conflict: existing AgentCard belongs to a different workload
+			errMsg := fmt.Sprintf(
+				"AgentCard %s/%s already exists with conflicting targetRef: expected %s/%s %s, found %s/%s %s",
+				obj.GetNamespace(), cardName,
+				expectedAPIVersion, expectedKind, expectedName,
+				tr.APIVersion, tr.Kind, tr.Name,
+			)
+			syncLogger.Error(nil, "AgentCard targetRef conflict detected",
+				"agentCard", cardName,
+				"expectedAPIVersion", expectedAPIVersion,
+				"expectedKind", expectedKind,
+				"expectedName", expectedName,
+				"foundAPIVersion", tr.APIVersion,
+				"foundKind", tr.Kind,
+				"foundName", tr.Name)
+			return ctrl.Result{}, fmt.Errorf("%s", errMsg)
+		}
+	}
+
+	// Card exists and either has no targetRef or matches our workload
+	// Ensure owner reference is set correctly
+	if !r.hasOwnerReferenceForObject(existingCard, obj) {
+		syncLogger.Info("Adding owner reference to existing AgentCard",
+			"agentCard", cardName, "owner", obj.GetName(), "kind", gvk.Kind)
+		if err := controllerutil.SetControllerReference(obj, existingCard, r.Scheme); err != nil {
+			syncLogger.Error(err, "Failed to set owner reference on existing AgentCard")
+			return ctrl.Result{}, err
+		}
+
+		// Update targetRef if not set
+		if existingCard.Spec.TargetRef == nil {
+			existingCard.Spec.TargetRef = &agentv1alpha1.TargetRef{
+				APIVersion: expectedAPIVersion,
+				Kind:       expectedKind,
+				Name:       expectedName,
+			}
+		}
+
+		if err := r.Update(ctx, existingCard); err != nil {
+			syncLogger.Error(err, "Failed to update existing AgentCard")
+			return ctrl.Result{}, err
+		}
+		syncLogger.Info("Successfully updated existing AgentCard", "agentCard", cardName)
+	}
+
 	return ctrl.Result{}, nil
 }
 
