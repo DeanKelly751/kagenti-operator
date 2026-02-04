@@ -276,9 +276,15 @@ func (r *AgentCardReconciler) getWorkload(ctx context.Context, agentCard *agentv
 
 	// Fall back to deprecated selector with warning
 	if agentCard.Spec.Selector != nil {
-		agentCardLogger.Info("DEPRECATION WARNING: AgentCard uses deprecated 'selector' field, please migrate to 'targetRef' for explicit workload references",
+		// Use V(1) to reduce log noise - this is logged on every reconcile
+		agentCardLogger.V(1).Info("AgentCard uses deprecated 'selector' field, please migrate to 'targetRef'",
 			"agentCard", agentCard.Name,
 			"namespace", agentCard.Namespace)
+		// Emit event for visibility - events are deduplicated by the recorder
+		if r.Recorder != nil {
+			r.Recorder.Event(agentCard, corev1.EventTypeWarning, "DeprecatedSelector",
+				"AgentCard uses deprecated 'selector' field, please migrate to 'targetRef' for explicit workload references")
+		}
 		return r.findMatchingWorkloadBySelector(ctx, agentCard)
 	}
 
