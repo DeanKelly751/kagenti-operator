@@ -262,7 +262,7 @@ var _ = Describe("AgentCardSync Controller", func() {
 			Expect(k8sClient.Delete(ctx, agentCard)).To(Succeed())
 		})
 
-		It("should create AgentCard for agents with both old and new protocol labels (new label takes precedence)", func() {
+		It("should create AgentCard for agents with both old and new protocol labels", func() {
 			const agentBothLabels = "test-both-protocol-labels-agent"
 
 			By("creating an Agent with both old and new protocol labels")
