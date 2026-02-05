@@ -308,14 +308,17 @@ var _ = Describe("AgentCardSync Controller", func() {
 			agentCard := &agentv1alpha1.AgentCard{}
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      agentBothLabels + "-card",
+					Name:      agentBothLabels + "-agent-card",
 					Namespace: namespace,
 				}, agentCard)
 				return err == nil
 			}).Should(BeTrue())
 
-			By("verifying the AgentCard has correct selector and owner reference")
-			Expect(agentCard.Spec.Selector.MatchLabels).To(HaveKeyWithValue("app.kubernetes.io/name", agentBothLabels))
+			By("verifying the AgentCard has correct TargetRef and owner reference")
+			Expect(agentCard.Spec.TargetRef).NotTo(BeNil())
+			Expect(agentCard.Spec.TargetRef.Kind).To(Equal("Agent"))
+			Expect(agentCard.Spec.TargetRef.Name).To(Equal(agentBothLabels))
+			Expect(agentCard.Spec.TargetRef.Namespace).To(Equal(namespace))
 			Expect(agentCard.OwnerReferences).NotTo(BeEmpty())
 			Expect(agentCard.OwnerReferences[0].Name).To(Equal(agentBothLabels))
 
