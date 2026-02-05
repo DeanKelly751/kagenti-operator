@@ -297,12 +297,7 @@ var _ = Describe("AgentCardSync Controller", func() {
 				Scheme: k8sClient.Scheme(),
 			}
 
-			_, err := reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      agentBothLabels,
-					Namespace: namespace,
-				},
-			})
+			_, err := reconciler.ReconcileAgent(ctx, agent)
 			Expect(err).NotTo(HaveOccurred())
 
 			By("checking that an AgentCard was created")
