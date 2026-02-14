@@ -30,12 +30,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
-	"github.com/kagenti/operator/internal/distribution"
 	"github.com/kagenti/operator/internal/signature"
 )
 
@@ -47,21 +45,20 @@ var _ = Describe("Identity Binding", func() {
 
 	Context("AgentCard Binding Evaluation - Matching", func() {
 		const (
-			agentName     = "bind-eval-match-agent"
-			agentCardName = "bind-eval-match-card"
-			secretName    = "bind-eval-match-keys"
-			namespace     = "default"
-			trustDomain   = "test.local"
+			deploymentName = "bind-eval-match-deploy"
+			agentCardName  = "bind-eval-match-card"
+			secretName     = "bind-eval-match-keys"
+			namespace      = "default"
+			trustDomain    = "test.local"
 		)
 
 		ctx := context.Background()
 
 		AfterEach(func() {
-			// Clean up resources with proper wait
 			By("cleaning up test resources")
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
-			cleanupResource(ctx, &agentv1alpha1.Agent{}, agentName, namespace)
-			cleanupResource(ctx, &corev1.Service{}, agentName, namespace)
+			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
+			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
@@ -80,56 +77,55 @@ var _ = Describe("Identity Binding", func() {
 			}
 			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 
-			By("creating an Agent with specific service account")
-			agent := &agentv1alpha1.Agent{
+			By("creating a Deployment with agent labels")
+			labels := map[string]string{
+				"app.kubernetes.io/name": deploymentName,
+				LabelAgentType:           LabelValueAgent,
+				LabelKagentiProtocol:     "a2a",
+			}
+			deployment := &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      agentName,
+					Name:      deploymentName,
 					Namespace: namespace,
-					Labels: map[string]string{
-						"app.kubernetes.io/name": agentName,
-						LabelAgentType:           LabelValueAgent,
-						LabelAgentProtocol:       "a2a",
-					},
+					Labels:    labels,
 				},
-				Spec: agentv1alpha1.AgentSpec{
-					PodTemplateSpec: &corev1.PodTemplateSpec{
+				Spec: appsv1.DeploymentSpec{
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": deploymentName}},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": deploymentName}},
 						Spec: corev1.PodSpec{
 							ServiceAccountName: "test-sa",
 							Containers: []corev1.Container{
-								{
-									Name:  "agent",
-									Image: "test-image:latest",
-								},
+								{Name: "agent", Image: "test-image:latest"},
 							},
 						},
 					},
-					Image: "test-image:latest",
 				},
 			}
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
 
-			// Update agent status to Ready
+			By("setting Deployment status to Available")
 			Eventually(func() error {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: namespace}, agent); err != nil {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: namespace}, deployment); err != nil {
 					return err
 				}
-				agent.Status.DeploymentStatus = &agentv1alpha1.DeploymentStatus{
-					Phase: agentv1alpha1.PhaseReady,
+				deployment.Status.Conditions = []appsv1.DeploymentCondition{
+					{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue},
 				}
-				return k8sClient.Status().Update(ctx, agent)
+				return k8sClient.Status().Update(ctx, deployment)
 			}).Should(Succeed())
 
-			By("creating a Service for the Agent")
+			By("creating a Service for the Deployment")
 			service := &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      agentName,
+					Name:      deploymentName,
 					Namespace: namespace,
 				},
 				Spec: corev1.ServiceSpec{
 					Ports: []corev1.ServicePort{
 						{Name: "http", Port: 8000, Protocol: corev1.ProtocolTCP},
 					},
-					Selector: map[string]string{"app.kubernetes.io/name": agentName},
+					Selector: map[string]string{"app": deploymentName},
 				},
 			}
 			Expect(k8sClient.Create(ctx, service)).To(Succeed())
@@ -152,11 +148,10 @@ var _ = Describe("Identity Binding", func() {
 				},
 				Spec: agentv1alpha1.AgentCardSpec{
 					SyncPeriod: "30s",
-					Selector: &agentv1alpha1.AgentSelector{
-						MatchLabels: map[string]string{
-							"app.kubernetes.io/name": agentName,
-							LabelAgentType:           LabelValueAgent,
-						},
+					TargetRef: &agentv1alpha1.TargetRef{
+						APIVersion: "apps/v1",
+						Kind:       "Deployment",
+						Name:       deploymentName,
 					},
 					IdentityBinding: &agentv1alpha1.IdentityBinding{
 						AllowedSpiffeIDs: []agentv1alpha1.SpiffeID{agentv1alpha1.SpiffeID(expectedSpiffeID)},
@@ -215,11 +210,11 @@ var _ = Describe("Identity Binding", func() {
 
 	Context("AgentCard Binding Evaluation - NonMatching", func() {
 		const (
-			agentName     = "bind-eval-nomatch-agent"
-			agentCardName = "bind-eval-nomatch-card"
-			secretName    = "bind-eval-nomatch-keys"
-			namespace     = "default"
-			trustDomain   = "test.local"
+			deploymentName = "bind-eval-nomatch-deploy"
+			agentCardName  = "bind-eval-nomatch-card"
+			secretName     = "bind-eval-nomatch-keys"
+			namespace      = "default"
+			trustDomain    = "test.local"
 		)
 
 		ctx := context.Background()
@@ -227,8 +222,8 @@ var _ = Describe("Identity Binding", func() {
 		AfterEach(func() {
 			By("cleaning up test resources")
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
-			cleanupResource(ctx, &agentv1alpha1.Agent{}, agentName, namespace)
-			cleanupResource(ctx, &corev1.Service{}, agentName, namespace)
+			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
+			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
@@ -247,56 +242,55 @@ var _ = Describe("Identity Binding", func() {
 			}
 			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 
-			By("creating an Agent")
-			agent := &agentv1alpha1.Agent{
+			By("creating a Deployment with agent labels")
+			labels := map[string]string{
+				"app.kubernetes.io/name": deploymentName,
+				LabelAgentType:           LabelValueAgent,
+				LabelKagentiProtocol:     "a2a",
+			}
+			deployment := &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      agentName,
+					Name:      deploymentName,
 					Namespace: namespace,
-					Labels: map[string]string{
-						"app.kubernetes.io/name": agentName,
-						LabelAgentType:           LabelValueAgent,
-						LabelAgentProtocol:       "a2a",
-					},
+					Labels:    labels,
 				},
-				Spec: agentv1alpha1.AgentSpec{
-					PodTemplateSpec: &corev1.PodTemplateSpec{
+				Spec: appsv1.DeploymentSpec{
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": deploymentName}},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": deploymentName}},
 						Spec: corev1.PodSpec{
 							ServiceAccountName: "test-sa",
 							Containers: []corev1.Container{
-								{
-									Name:  "agent",
-									Image: "test-image:latest",
-								},
+								{Name: "agent", Image: "test-image:latest"},
 							},
 						},
 					},
-					Image: "test-image:latest",
 				},
 			}
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
 
-			// Update agent status to Ready
+			By("setting Deployment status to Available")
 			Eventually(func() error {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: namespace}, agent); err != nil {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: namespace}, deployment); err != nil {
 					return err
 				}
-				agent.Status.DeploymentStatus = &agentv1alpha1.DeploymentStatus{
-					Phase: agentv1alpha1.PhaseReady,
+				deployment.Status.Conditions = []appsv1.DeploymentCondition{
+					{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue},
 				}
-				return k8sClient.Status().Update(ctx, agent)
+				return k8sClient.Status().Update(ctx, deployment)
 			}).Should(Succeed())
 
-			By("creating a Service for the Agent")
+			By("creating a Service for the Deployment")
 			service := &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      agentName,
+					Name:      deploymentName,
 					Namespace: namespace,
 				},
 				Spec: corev1.ServiceSpec{
 					Ports: []corev1.ServicePort{
 						{Name: "http", Port: 8000, Protocol: corev1.ProtocolTCP},
 					},
-					Selector: map[string]string{"app.kubernetes.io/name": agentName},
+					Selector: map[string]string{"app": deploymentName},
 				},
 			}
 			Expect(k8sClient.Create(ctx, service)).To(Succeed())
@@ -320,11 +314,10 @@ var _ = Describe("Identity Binding", func() {
 				},
 				Spec: agentv1alpha1.AgentCardSpec{
 					SyncPeriod: "30s",
-					Selector: &agentv1alpha1.AgentSelector{
-						MatchLabels: map[string]string{
-							"app.kubernetes.io/name": agentName,
-							LabelAgentType:           LabelValueAgent,
-						},
+					TargetRef: &agentv1alpha1.TargetRef{
+						APIVersion: "apps/v1",
+						Kind:       "Deployment",
+						Name:       deploymentName,
 					},
 					IdentityBinding: &agentv1alpha1.IdentityBinding{
 						AllowedSpiffeIDs: []agentv1alpha1.SpiffeID{"spiffe://" + trustDomain + "/ns/other/sa/other-sa"},
@@ -376,339 +369,6 @@ var _ = Describe("Identity Binding", func() {
 			card := &agentv1alpha1.AgentCard{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: agentCardName, Namespace: namespace}, card)).To(Succeed())
 			Expect(card.Status.BindingStatus.Reason).To(Equal(ReasonNotBound))
-		})
-	})
-
-	Context("Agent Binding Enforcement - Disable", func() {
-		const (
-			agentName     = "enforce-disable-agent"
-			agentCardName = "enforce-disable-card"
-			namespace     = "default"
-			trustDomain   = "test.local"
-		)
-
-		ctx := context.Background()
-
-		AfterEach(func() {
-			By("cleaning up test resources")
-			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
-			cleanupResource(ctx, &agentv1alpha1.Agent{}, agentName, namespace)
-			cleanupResource(ctx, &appsv1.Deployment{}, agentName, namespace)
-		})
-
-		It("should scale deployment to 0 when strict binding fails", func() {
-			By("creating an Agent")
-			agent := &agentv1alpha1.Agent{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      agentName,
-					Namespace: namespace,
-					Labels: map[string]string{
-						"app.kubernetes.io/name": agentName,
-						LabelAgentType:           LabelValueAgent,
-					},
-				},
-				Spec: agentv1alpha1.AgentSpec{
-					Replicas: ptr.To(int32(3)),
-					PodTemplateSpec: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							ServiceAccountName: "test-sa",
-							Containers: []corev1.Container{
-								{
-									Name:  "agent",
-									Image: "test-image:latest",
-								},
-							},
-						},
-					},
-					Image: "test-image:latest",
-				},
-			}
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
-
-			By("creating a Deployment for the Agent")
-			labels := map[string]string{"app.kubernetes.io/name": agentName}
-			deployment := &appsv1.Deployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      agentName,
-					Namespace: namespace,
-					Labels:    labels,
-				},
-				Spec: appsv1.DeploymentSpec{
-					Replicas: ptr.To(int32(3)),
-					Selector: &metav1.LabelSelector{MatchLabels: labels},
-					Template: corev1.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{Labels: labels},
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{Name: "agent", Image: "test-image:latest"},
-							},
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
-
-			By("creating an AgentCard with strict binding that fails")
-			agentCard := &agentv1alpha1.AgentCard{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      agentCardName,
-					Namespace: namespace,
-				},
-				Spec: agentv1alpha1.AgentCardSpec{
-					SyncPeriod: "30s",
-					Selector: &agentv1alpha1.AgentSelector{
-						MatchLabels: map[string]string{
-							"app.kubernetes.io/name": agentName,
-							LabelAgentType:           LabelValueAgent,
-						},
-					},
-					IdentityBinding: &agentv1alpha1.IdentityBinding{
-						AllowedSpiffeIDs: []agentv1alpha1.SpiffeID{"spiffe://" + trustDomain + "/ns/other/sa/other-sa"},
-						Strict:           true,
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, agentCard)).To(Succeed())
-
-			// Set binding status to NotBound
-			Eventually(func() error {
-				card := &agentv1alpha1.AgentCard{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: agentCardName, Namespace: namespace}, card); err != nil {
-					return err
-				}
-				now := metav1.Now()
-				card.Status.BindingStatus = &agentv1alpha1.BindingStatus{
-					Bound:              false,
-					Reason:             ReasonNotBound,
-					Message:            "SPIFFE ID not in allowlist",
-					LastEvaluationTime: &now,
-				}
-				return k8sClient.Status().Update(ctx, card)
-			}).Should(Succeed())
-
-			By("reconciling the Agent")
-			agentReconciler := &AgentReconciler{
-				Client:       k8sClient,
-				Scheme:       k8sClient.Scheme(),
-				Distribution: distribution.Kubernetes,
-			}
-
-			// First reconcile adds finalizer
-			_, err := agentReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: agentName, Namespace: namespace},
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			// Second reconcile enforces binding
-			_, err = agentReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: agentName, Namespace: namespace},
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			By("verifying deployment is scaled to 0")
-			Eventually(func() int32 {
-				dep := &appsv1.Deployment{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: namespace}, dep); err != nil {
-					return -1
-				}
-				if dep.Spec.Replicas == nil {
-					return -1
-				}
-				return *dep.Spec.Replicas
-			}, timeout, interval).Should(Equal(int32(0)))
-
-			By("verifying deployment has binding annotations")
-			dep := &appsv1.Deployment{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: namespace}, dep)).To(Succeed())
-			Expect(dep.Annotations[AnnotationDisabledBy]).To(Equal(DisabledByIdentityBinding))
-
-			By("verifying agent status has binding enforcement info")
-			Eventually(func() bool {
-				ag := &agentv1alpha1.Agent{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: namespace}, ag); err != nil {
-					return false
-				}
-				return ag.Status.BindingEnforcement != nil && ag.Status.BindingEnforcement.DisabledByBinding
-			}, timeout, interval).Should(BeTrue())
-
-			ag := &agentv1alpha1.Agent{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: namespace}, ag)).To(Succeed())
-			Expect(ag.Status.BindingEnforcement.OriginalReplicas).NotTo(BeNil())
-			Expect(*ag.Status.BindingEnforcement.OriginalReplicas).To(Equal(int32(3)))
-		})
-
-	})
-
-	Context("Agent Binding Enforcement - Restore", func() {
-		const (
-			agentName     = "enforce-restore-agent"
-			agentCardName = "enforce-restore-card"
-			namespace     = "default"
-			trustDomain   = "test.local"
-		)
-
-		ctx := context.Background()
-
-		AfterEach(func() {
-			By("cleaning up test resources")
-			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
-			cleanupResource(ctx, &agentv1alpha1.Agent{}, agentName, namespace)
-			cleanupResource(ctx, &appsv1.Deployment{}, agentName, namespace)
-		})
-
-		It("should restore replicas when binding passes after being disabled", func() {
-			By("creating an Agent with binding enforcement already in place")
-			agent := &agentv1alpha1.Agent{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      agentName,
-					Namespace: namespace,
-					Labels: map[string]string{
-						"app.kubernetes.io/name": agentName,
-						LabelAgentType:           LabelValueAgent,
-					},
-				},
-				Spec: agentv1alpha1.AgentSpec{
-					Replicas: ptr.To(int32(3)),
-					PodTemplateSpec: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							ServiceAccountName: "test-sa",
-							Containers: []corev1.Container{
-								{
-									Name:  "agent",
-									Image: "test-image:latest",
-								},
-							},
-						},
-					},
-					Image: "test-image:latest",
-				},
-			}
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
-
-			// Set agent status to show it was disabled
-			Eventually(func() error {
-				ag := &agentv1alpha1.Agent{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: namespace}, ag); err != nil {
-					return err
-				}
-				now := metav1.Now()
-				ag.Status.BindingEnforcement = &agentv1alpha1.BindingEnforcementStatus{
-					DisabledByBinding: true,
-					OriginalReplicas:  ptr.To(int32(3)),
-					DisabledAt:        &now,
-					DisabledReason:    "Test reason",
-				}
-				return k8sClient.Status().Update(ctx, ag)
-			}).Should(Succeed())
-
-			By("creating a Deployment scaled to 0 with binding annotations")
-			labels := map[string]string{"app.kubernetes.io/name": agentName}
-			deployment := &appsv1.Deployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      agentName,
-					Namespace: namespace,
-					Labels:    labels,
-					Annotations: map[string]string{
-						AnnotationDisabledBy:     DisabledByIdentityBinding,
-						AnnotationDisabledReason: "Test reason",
-					},
-				},
-				Spec: appsv1.DeploymentSpec{
-					Replicas: ptr.To(int32(0)),
-					Selector: &metav1.LabelSelector{MatchLabels: labels},
-					Template: corev1.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{Labels: labels},
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{Name: "agent", Image: "test-image:latest"},
-							},
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
-
-			By("creating an AgentCard with strict binding that now passes")
-			expectedSpiffeID := "spiffe://" + trustDomain + "/ns/" + namespace + "/sa/test-sa"
-			agentCard := &agentv1alpha1.AgentCard{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      agentCardName,
-					Namespace: namespace,
-				},
-				Spec: agentv1alpha1.AgentCardSpec{
-					SyncPeriod: "30s",
-					Selector: &agentv1alpha1.AgentSelector{
-						MatchLabels: map[string]string{
-							"app.kubernetes.io/name": agentName,
-							LabelAgentType:           LabelValueAgent,
-						},
-					},
-					IdentityBinding: &agentv1alpha1.IdentityBinding{
-						AllowedSpiffeIDs: []agentv1alpha1.SpiffeID{agentv1alpha1.SpiffeID(expectedSpiffeID)},
-						Strict:           true,
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, agentCard)).To(Succeed())
-
-			// Set binding status to Bound
-			Eventually(func() error {
-				card := &agentv1alpha1.AgentCard{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: agentCardName, Namespace: namespace}, card); err != nil {
-					return err
-				}
-				now := metav1.Now()
-				card.Status.BindingStatus = &agentv1alpha1.BindingStatus{
-					Bound:              true,
-					Reason:             ReasonBound,
-					Message:            "SPIFFE ID in allowlist",
-					LastEvaluationTime: &now,
-				}
-				card.Status.ExpectedSpiffeID = expectedSpiffeID
-				return k8sClient.Status().Update(ctx, card)
-			}).Should(Succeed())
-
-			By("reconciling the Agent")
-			agentReconciler := &AgentReconciler{
-				Client:       k8sClient,
-				Scheme:       k8sClient.Scheme(),
-				Distribution: distribution.Kubernetes,
-			}
-
-			// First reconcile adds finalizer
-			_, err := agentReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: agentName, Namespace: namespace},
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			// Second reconcile restores the agent
-			_, err = agentReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: agentName, Namespace: namespace},
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			By("verifying deployment is restored to original replicas")
-			Eventually(func() int32 {
-				dep := &appsv1.Deployment{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: namespace}, dep); err != nil {
-					return -1
-				}
-				if dep.Spec.Replicas == nil {
-					return -1
-				}
-				return *dep.Spec.Replicas
-			}, timeout, interval).Should(Equal(int32(3)))
-
-			By("verifying binding annotations are removed")
-			dep := &appsv1.Deployment{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: namespace}, dep)).To(Succeed())
-			Expect(dep.Annotations).NotTo(HaveKey(AnnotationDisabledBy))
-			Expect(dep.Annotations).NotTo(HaveKey(AnnotationDisabledReason))
-
-			By("verifying agent status binding enforcement is cleared")
-			ag := &agentv1alpha1.Agent{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: namespace}, ag)).To(Succeed())
-			Expect(ag.Status.BindingEnforcement).To(BeNil())
 		})
 	})
 
@@ -848,72 +508,6 @@ var _ = Describe("Identity Binding", func() {
 		})
 	})
 
-	Context("Selector Matching", func() {
-		It("should correctly match AgentCard selector to Agent", func() {
-			reconciler := &AgentReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
-
-			card := &agentv1alpha1.AgentCard{
-				Spec: agentv1alpha1.AgentCardSpec{
-					Selector: &agentv1alpha1.AgentSelector{
-						MatchLabels: map[string]string{
-							"app": "test",
-							"env": "prod",
-						},
-					},
-				},
-			}
-
-			matchingAgent := &agentv1alpha1.Agent{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app":   "test",
-						"env":   "prod",
-						"extra": "label",
-					},
-				},
-			}
-
-			nonMatchingAgent := &agentv1alpha1.Agent{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app": "test",
-						"env": "dev",
-					},
-				},
-			}
-
-			Expect(reconciler.agentCardSelectsAgent(card, matchingAgent)).To(BeTrue())
-			Expect(reconciler.agentCardSelectsAgent(card, nonMatchingAgent)).To(BeFalse())
-		})
-
-		It("should not match when agent has no labels", func() {
-			reconciler := &AgentReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
-
-			card := &agentv1alpha1.AgentCard{
-				Spec: agentv1alpha1.AgentCardSpec{
-					Selector: &agentv1alpha1.AgentSelector{
-						MatchLabels: map[string]string{
-							"app": "test",
-						},
-					},
-				},
-			}
-
-			agent := &agentv1alpha1.Agent{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: nil,
-				},
-			}
-
-			Expect(reconciler.agentCardSelectsAgent(card, agent)).To(BeFalse())
-		})
-	})
 })
 
 // cleanupResource removes a resource and waits for it to be fully deleted

@@ -384,7 +384,10 @@ kubectl patch agentcard weather-card -n demo --type=merge -p '
     }
   }
 }'
+
+# Wait for reconcile + pod rollout (label removal triggers a new rollout)
 sleep 5
+kubectl rollout status deployment/weather-agent -n demo --timeout=60s
 
 # Check binding - should be false
 kubectl get agentcard weather-card -n demo -o jsonpath='{.status.bindingStatus}' | jq .
@@ -434,7 +437,10 @@ kubectl patch agentcard weather-card -n demo --type=merge -p '
     }
   }
 }'
+
+# Wait for reconcile + pod rollout (label restoration triggers a new rollout)
 sleep 5
+kubectl rollout status deployment/weather-agent -n demo --timeout=60s
 
 # Binding now passes
 kubectl get agentcard weather-card -n demo -o jsonpath='{.status.bindingStatus}' | jq .

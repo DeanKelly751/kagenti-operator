@@ -62,7 +62,7 @@ def create_canonical_json(card_data):
     card_copy = dict(card_data)
     card_copy.pop('signatures', None)
     card_copy.pop('signature', None)  # Legacy field, just in case
-
+    
     # Remove empty/None values to match Go canonical JSON behavior
     card_copy = {k: v for k, v in card_copy.items() if v is not None and v != "" and v != [] and v != {}}
 
@@ -137,7 +137,7 @@ def sign_card_jws(card_data, private_key, key_id, spiffe_id=None):
     else:
         print(f"Error: Unsupported algorithm: {algorithm}")
         sys.exit(1)
-
+    
     signature_b64 = base64url_encode(signature_bytes)
 
     # Build signatures array (A2A spec allows multiple signatures)
@@ -177,9 +177,9 @@ def main():
         '--output',
         help='Output file (default: overwrite input file)'
     )
-
+    
     args = parser.parse_args()
-
+    
     # Load agent card
     try:
         with open(args.card_file, 'r') as f:
@@ -187,13 +187,13 @@ def main():
     except Exception as e:
         print(f"Error loading agent card: {e}")
         sys.exit(1)
-
+    
     # Load private key
     private_key = load_private_key(args.key_file)
-
+    
     # Sign the card in JWS format
     signed_card, algorithm = sign_card_jws(card_data, private_key, args.key_id, args.spiffe_id)
-
+    
     # Write output
     output_file = args.output or args.card_file
     try:

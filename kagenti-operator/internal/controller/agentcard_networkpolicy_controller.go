@@ -54,7 +54,6 @@ type AgentCardNetworkPolicyReconciler struct {
 	client.Client
 	Scheme                 *runtime.Scheme
 	EnforceNetworkPolicies bool
-	EnableLegacyAgentCRD   bool
 }
 
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -109,8 +108,8 @@ func (r *AgentCardNetworkPolicyReconciler) Reconcile(ctx context.Context, req ct
 }
 
 // resolveWorkload resolves the workload name and pod selector labels from the AgentCard.
+// Requires spec.targetRef to identify the backing workload.
 func (r *AgentCardNetworkPolicyReconciler) resolveWorkload(ctx context.Context, agentCard *agentv1alpha1.AgentCard) (string, map[string]string, error) {
-	// Prefer spec.targetRef
 	if agentCard.Spec.TargetRef != nil {
 		ref := agentCard.Spec.TargetRef
 		podLabels, err := r.getPodTemplateLabels(ctx, agentCard.Namespace, ref)
@@ -120,22 +119,7 @@ func (r *AgentCardNetworkPolicyReconciler) resolveWorkload(ctx context.Context, 
 		return ref.Name, podLabels, nil
 	}
 
-	// Try status.targetRef (populated by AgentCardReconciler after resolving selector)
-	if agentCard.Status.TargetRef != nil {
-		ref := agentCard.Status.TargetRef
-		podLabels, err := r.getPodTemplateLabels(ctx, agentCard.Namespace, ref)
-		if err == nil {
-			return ref.Name, podLabels, nil
-		}
-		// Fall through to selector if status targetRef lookup fails
-	}
-
-	// Fall back to selector (legacy)
-	if agentCard.Spec.Selector != nil && len(agentCard.Spec.Selector.MatchLabels) > 0 {
-		return agentCard.Name, agentCard.Spec.Selector.MatchLabels, nil
-	}
-
-	return "", nil, fmt.Errorf("neither targetRef nor selector specified")
+	return "", nil, fmt.Errorf("spec.targetRef is required: specify the workload backing this agent")
 }
 
 // getPodTemplateLabels extracts the pod template labels from a workload using targetRef
@@ -156,17 +140,6 @@ func (r *AgentCardNetworkPolicyReconciler) getPodTemplateLabels(ctx context.Cont
 			return nil, err
 		}
 		return statefulset.Spec.Template.Labels, nil
-
-	case "Agent":
-		agent := &agentv1alpha1.Agent{}
-		if err := r.Get(ctx, key, agent); err != nil {
-			return nil, err
-		}
-		if agent.Spec.PodTemplateSpec != nil {
-			return agent.Spec.PodTemplateSpec.Labels, nil
-		}
-		// Fallback: use agent labels
-		return agent.Labels, nil
 
 	default:
 		// For unknown workload types, use the agent card name as a selector
@@ -489,60 +462,6 @@ func (r *AgentCardNetworkPolicyReconciler) mapWorkloadToAgentCard(apiVersion, ki
 	}
 }
 
-// mapAgentToAgentCard maps Agent events to AgentCard reconcile requests
-func (r *AgentCardNetworkPolicyReconciler) mapAgentToAgentCard(ctx context.Context, obj client.Object) []reconcile.Request {
-	agent, ok := obj.(*agentv1alpha1.Agent)
-	if !ok {
-		return nil
-	}
-
-	if agent.Labels == nil || agent.Labels[LabelAgentType] != LabelValueAgent {
-		return nil
-	}
-
-	agentCardList := &agentv1alpha1.AgentCardList{}
-	if err := r.List(ctx, agentCardList, client.InNamespace(agent.Namespace)); err != nil {
-		networkPolicyLogger.Error(err, "Failed to list AgentCards for mapping")
-		return nil
-	}
-
-	var requests []reconcile.Request
-	for _, agentCard := range agentCardList.Items {
-		// Check targetRef
-		if agentCard.Spec.TargetRef != nil &&
-			agentCard.Spec.TargetRef.Name == agent.Name &&
-			agentCard.Spec.TargetRef.Kind == "Agent" {
-			requests = append(requests, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      agentCard.Name,
-					Namespace: agentCard.Namespace,
-				},
-			})
-			continue
-		}
-		// Check selector
-		if agentCard.Spec.Selector != nil && agent.Labels != nil {
-			match := true
-			for key, value := range agentCard.Spec.Selector.MatchLabels {
-				if agent.Labels[key] != value {
-					match = false
-					break
-				}
-			}
-			if match {
-				requests = append(requests, reconcile.Request{
-					NamespacedName: types.NamespacedName{
-						Name:      agentCard.Name,
-						Namespace: agentCard.Namespace,
-					},
-				})
-			}
-		}
-	}
-
-	return requests
-}
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *AgentCardNetworkPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
@@ -560,15 +479,6 @@ func (r *AgentCardNetworkPolicyReconciler) SetupWithManager(mgr ctrl.Manager) er
 			handler.EnqueueRequestsFromMapFunc(r.mapWorkloadToAgentCard("apps/v1", "StatefulSet")),
 			builder.WithPredicates(agentLabelPredicate()),
 		)
-
-	// Optionally watch legacy Agent CRDs if enabled
-	if r.EnableLegacyAgentCRD {
-		controllerBuilder = controllerBuilder.Watches(
-			&agentv1alpha1.Agent{},
-			handler.EnqueueRequestsFromMapFunc(r.mapAgentToAgentCard),
-			builder.WithPredicates(agentLabelPredicate()),
-		)
-	}
 
 	return controllerBuilder.
 		Named("AgentCardNetworkPolicy").
