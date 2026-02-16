@@ -33,6 +33,19 @@ import (
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 )
 
+// mockBuilder is a no-op Builder for unit tests that don't exercise build logic.
+type mockBuilder struct{}
+
+func (m *mockBuilder) Build(_ context.Context, _ *agentv1alpha1.AgentBuild) error   { return nil }
+func (m *mockBuilder) Cancel(_ context.Context, _ *agentv1alpha1.AgentBuild) error  { return nil }
+func (m *mockBuilder) Cleanup(_ context.Context, _ *agentv1alpha1.AgentBuild) error { return nil }
+func (m *mockBuilder) CheckStatus(_ context.Context, _ *agentv1alpha1.AgentBuild) error {
+	return nil
+}
+func (m *mockBuilder) GetStatus(_ context.Context, _ *agentv1alpha1.AgentBuild) (agentv1alpha1.AgentBuildStatus, error) {
+	return agentv1alpha1.AgentBuildStatus{}, nil
+}
+
 var _ = Describe("AgentBuild Controller", func() {
 	const (
 		AgentBuildName      = "test-agentbuild"
@@ -81,8 +94,19 @@ var _ = Describe("AgentBuild Controller", func() {
 			resource := &agentv1alpha1.AgentBuild{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			if err == nil {
+				// Remove finalizer so the resource can be fully deleted
+				if controllerutil.ContainsFinalizer(resource, AGENT_FINALIZER) {
+					controllerutil.RemoveFinalizer(resource, AGENT_FINALIZER)
+					Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+				}
 				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 			}
+
+			// Wait for the AgentBuild to be fully removed
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, typeNamespacedName, &agentv1alpha1.AgentBuild{})
+				return errors.IsNotFound(err)
+			}, timeout, interval).Should(BeTrue())
 
 			By("Cleanup test secrets")
 			sourceSecret := &corev1.Secret{
@@ -174,6 +198,7 @@ var _ = Describe("AgentBuild Controller", func() {
 			controllerReconciler := &AgentBuildReconciler{
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
+				Builder:  &mockBuilder{},
 				Recorder: record.NewFakeRecorder(10),
 			}
 
