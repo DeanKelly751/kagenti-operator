@@ -36,30 +36,13 @@ type AgentSpec struct {
 	// Metadata specifies labels and annotations to be added to the agent
 	// +optional
 	MetadataSpec `json:",inline"`
-	// ImageSource specifies the container image or build reference for the agent
+	// Image specifies the container image to use for the agent
 	// +required
-	ImageSource ImageSource `json:"imageSource"`
+	Image string `json:"image"`
 	// ServicePorts specifies the service ports to expose for the agent
 	// +optional
 	// +kubebuilder:default={{name: "http", port: 8080, protocol: "TCP"}}
 	ServicePorts []corev1.ServicePort `json:"servicePorts,omitempty"`
-}
-
-// +kubebuilder:validation:Union
-//
-//	ImageSource specifies the container image or build reference for the agent
-type ImageSource struct {
-	// Image is the container image to use for the agent. This is used when BuildRef is not specified.
-	// +optional
-	Image *string `json:"image,omitempty"`
-	// BuildRef specifies the AgentBuild used for building the agent image from source code.
-	// +optional
-	BuildRef *BuildRef `json:"buildRef,omitempty"`
-}
-type BuildRef struct {
-	// Name of the AgentBuild resource to use for building the agent image
-	// +optional
-	Name string `json:"name,omitempty"`
 }
 
 type MetadataSpec struct {
