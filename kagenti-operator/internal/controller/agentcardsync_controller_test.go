@@ -211,9 +211,7 @@ var _ = Describe("AgentCardSync Controller", func() {
 							},
 						},
 					},
-					ImageSource: agentv1alpha1.ImageSource{
-						Image: ptr.To("test-image:latest"),
-					},
+					Image: "test-image:latest",
 				},
 			}
 			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
