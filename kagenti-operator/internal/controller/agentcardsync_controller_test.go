@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
+	"k8s.io/utils/ptr"
 )
 
 var _ = Describe("AgentCardSync Controller", func() {
@@ -100,6 +101,7 @@ var _ = Describe("AgentCardSync Controller", func() {
 				Client:               k8sClient,
 				Scheme:               k8sClient.Scheme(),
 				EnableLegacyAgentCRD: true,
+				AutoSyncGracePeriod:  -1, // disable grace period in tests
 			}
 
 			_, err := reconciler.ReconcileAgent(ctx, reconcile.Request{
@@ -139,7 +141,6 @@ var _ = Describe("AgentCardSync Controller", func() {
 					Namespace: namespace,
 					Labels: map[string]string{
 						LabelAgentType: LabelValueAgent,
-						// No protocol label
 					},
 				},
 				Spec: agentv1alpha1.AgentSpec{
@@ -163,6 +164,7 @@ var _ = Describe("AgentCardSync Controller", func() {
 				Client:               k8sClient,
 				Scheme:               k8sClient.Scheme(),
 				EnableLegacyAgentCRD: true,
+				AutoSyncGracePeriod:  -1,
 			}
 
 			_, err := reconciler.ReconcileAgent(ctx, reconcile.Request{
@@ -183,6 +185,150 @@ var _ = Describe("AgentCardSync Controller", func() {
 
 			By("cleaning up the test Agent")
 			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
+		})
+
+		It("should create AgentCard for agents with the new protocol label (kagenti.io/protocol)", func() {
+			const agentNewLabel = "test-new-protocol-label-agent"
+
+			By("creating an Agent with the new kagenti.io/protocol label")
+			agent := &agentv1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      agentNewLabel,
+					Namespace: namespace,
+					Labels: map[string]string{
+						"app.kubernetes.io/name": agentNewLabel,
+						LabelAgentType:           LabelValueAgent,
+						LabelKagentiProtocol:     "a2a", // New label
+					},
+				},
+				Spec: agentv1alpha1.AgentSpec{
+					PodTemplateSpec: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "agent",
+									Image: "test-image:latest",
+								},
+							},
+						},
+					},
+					Image: "test-image:latest",
+				},
+			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+
+			By("reconciling the Agent")
+			reconciler := &AgentCardSyncReconciler{
+				Client:               k8sClient,
+				Scheme:               k8sClient.Scheme(),
+				EnableLegacyAgentCRD: true,
+				AutoSyncGracePeriod:  -1,
+			}
+
+			_, err := reconciler.ReconcileAgent(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      agentNewLabel,
+					Namespace: namespace,
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("checking that an AgentCard was created")
+			agentCard := &agentv1alpha1.AgentCard{}
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      agentNewLabel + "-agent-card",
+					Namespace: namespace,
+				}, agentCard)
+				return err == nil
+			}).Should(BeTrue())
+
+			By("verifying the AgentCard targets the Agent via TargetRef")
+			Expect(agentCard.Spec.TargetRef).NotTo(BeNil())
+			Expect(agentCard.Spec.TargetRef.Kind).To(Equal("Agent"))
+			Expect(agentCard.Spec.TargetRef.Name).To(Equal(agentNewLabel))
+			Expect(agentCard.Spec.TargetRef.APIVersion).To(Equal("agent.kagenti.dev/v1alpha1"))
+			// The reconciler now uses TargetRef instead of Selector; ensure no selector is set.
+			Expect(agentCard.Spec.Selector).To(BeNil())
+
+			By("verifying the AgentCard has owner reference")
+			Expect(agentCard.OwnerReferences).NotTo(BeEmpty())
+			Expect(agentCard.OwnerReferences[0].Kind).To(Equal("Agent"))
+			Expect(agentCard.OwnerReferences[0].Name).To(Equal(agentNewLabel))
+
+			By("cleaning up the test Agent and AgentCard")
+			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, agentCard)).To(Succeed())
+		})
+
+		It("should create AgentCard for agents with both old and new protocol labels", func() {
+			const agentBothLabels = "test-both-protocol-labels-agent"
+
+			By("creating an Agent with both old and new protocol labels")
+			agent := &agentv1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      agentBothLabels,
+					Namespace: namespace,
+					Labels: map[string]string{
+						"app.kubernetes.io/name": agentBothLabels,
+						LabelAgentType:           LabelValueAgent,
+						LabelKagentiProtocol:     "a2a", // New label (should be used)
+						LabelAgentProtocol:       "mcp", // Old label (should be ignored)
+					},
+				},
+				Spec: agentv1alpha1.AgentSpec{
+					PodTemplateSpec: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "agent",
+									Image: "test-image:latest",
+								},
+							},
+						},
+					},
+					Image: "test-image:latest",
+				},
+			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+
+			By("reconciling the Agent")
+			reconciler := &AgentCardSyncReconciler{
+				Client:               k8sClient,
+				Scheme:               k8sClient.Scheme(),
+				EnableLegacyAgentCRD: true,
+				AutoSyncGracePeriod:  -1,
+			}
+
+			_, err := reconciler.ReconcileAgent(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      agentBothLabels,
+					Namespace: namespace,
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("checking that an AgentCard was created")
+			agentCard := &agentv1alpha1.AgentCard{}
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      agentBothLabels + "-agent-card",
+					Namespace: namespace,
+				}, agentCard)
+				return err == nil
+			}).Should(BeTrue())
+
+			By("verifying the AgentCard has correct TargetRef and owner reference")
+			Expect(agentCard.Spec.TargetRef).NotTo(BeNil())
+			Expect(agentCard.Spec.TargetRef.Kind).To(Equal("Agent"))
+			Expect(agentCard.Spec.TargetRef.Name).To(Equal(agentBothLabels))
+			Expect(agentCard.Spec.TargetRef.APIVersion).To(Equal("agent.kagenti.dev/v1alpha1"))
+			Expect(agentCard.OwnerReferences).NotTo(BeEmpty())
+			Expect(agentCard.OwnerReferences[0].Name).To(Equal(agentBothLabels))
+
+			By("cleaning up the test Agent and AgentCard")
+			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, agentCard)).To(Succeed())
 		})
 	})
 
@@ -261,8 +407,9 @@ var _ = Describe("AgentCardSync Controller", func() {
 		It("should automatically create an AgentCard with targetRef for Deployment", func() {
 			By("reconciling the Deployment")
 			reconciler := &AgentCardSyncReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				Client:              k8sClient,
+				Scheme:              k8sClient.Scheme(),
+				AutoSyncGracePeriod: -1,
 			}
 
 			_, err := reconciler.ReconcileDeployment(ctx, reconcile.Request{
@@ -333,8 +480,9 @@ var _ = Describe("AgentCardSync Controller", func() {
 
 			By("reconciling the Deployment")
 			reconciler := &AgentCardSyncReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				Client:              k8sClient,
+				Scheme:              k8sClient.Scheme(),
+				AutoSyncGracePeriod: -1,
 			}
 
 			_, err := reconciler.ReconcileDeployment(ctx, reconcile.Request{
@@ -434,8 +582,9 @@ var _ = Describe("AgentCardSync Controller", func() {
 		It("should automatically create an AgentCard with targetRef for StatefulSet", func() {
 			By("reconciling the StatefulSet")
 			reconciler := &AgentCardSyncReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				Client:              k8sClient,
+				Scheme:              k8sClient.Scheme(),
+				AutoSyncGracePeriod: -1,
 			}
 
 			_, err := reconciler.ReconcileStatefulSet(ctx, reconcile.Request{
@@ -561,8 +710,9 @@ var _ = Describe("AgentCardSync Controller", func() {
 		It("should migrate AgentCard from selector to targetRef", func() {
 			By("reconciling the Deployment")
 			reconciler := &AgentCardSyncReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				Client:              k8sClient,
+				Scheme:              k8sClient.Scheme(),
+				AutoSyncGracePeriod: -1,
 			}
 
 			_, err := reconciler.ReconcileDeployment(ctx, reconcile.Request{
