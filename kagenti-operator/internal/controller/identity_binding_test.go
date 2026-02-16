@@ -103,9 +103,7 @@ var _ = Describe("Identity Binding", func() {
 							},
 						},
 					},
-					ImageSource: agentv1alpha1.ImageSource{
-						Image: ptr.To("test-image:latest"),
-					},
+					Image: "test-image:latest",
 				},
 			}
 			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
@@ -272,9 +270,7 @@ var _ = Describe("Identity Binding", func() {
 							},
 						},
 					},
-					ImageSource: agentv1alpha1.ImageSource{
-						Image: ptr.To("test-image:latest"),
-					},
+					Image: "test-image:latest",
 				},
 			}
 			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
@@ -424,9 +420,7 @@ var _ = Describe("Identity Binding", func() {
 							},
 						},
 					},
-					ImageSource: agentv1alpha1.ImageSource{
-						Image: ptr.To("test-image:latest"),
-					},
+					Image: "test-image:latest",
 				},
 			}
 			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
@@ -586,9 +580,7 @@ var _ = Describe("Identity Binding", func() {
 							},
 						},
 					},
-					ImageSource: agentv1alpha1.ImageSource{
-						Image: ptr.To("test-image:latest"),
-					},
+					Image: "test-image:latest",
 				},
 			}
 			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
