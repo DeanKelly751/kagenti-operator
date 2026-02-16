@@ -26,7 +26,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
@@ -84,9 +83,7 @@ var _ = Describe("AgentCard Controller", func() {
 							},
 						},
 					},
-					ImageSource: agentv1alpha1.ImageSource{
-						Image: ptr.To("test-image:latest"),
-					},
+					Image: "test-image:latest",
 				},
 			}
 			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
@@ -604,9 +601,7 @@ var _ = Describe("AgentCard Controller - findMatchingWorkloadBySelector", func()
 							},
 						},
 					},
-					ImageSource: agentv1alpha1.ImageSource{
-						Image: ptr.To("test-image:latest"),
-					},
+					Image: "test-image:latest",
 				},
 			}
 			Expect(k8sClient.Create(ctx, agent)).To(Succeed())

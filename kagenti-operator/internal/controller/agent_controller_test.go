@@ -68,9 +68,7 @@ var _ = Describe("Agent Controller", func() {
 								},
 							},
 						},
-						ImageSource: agentv1alpha1.ImageSource{
-							Image: ptr.To("test-image:latest"),
-						},
+						Image: "test-image:latest",
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -165,9 +163,7 @@ func TestSecurityContextByDistribution(t *testing.T) {
 							},
 						},
 					},
-					ImageSource: agentv1alpha1.ImageSource{
-						Image: ptr.To("test-image:latest"),
-					},
+					Image: "test-image:latest",
 				},
 			}
 
@@ -278,9 +274,7 @@ func TestSecurityContextUserOverride(t *testing.T) {
 					},
 				},
 			},
-			ImageSource: agentv1alpha1.ImageSource{
-				Image: ptr.To("test-image:latest"),
-			},
+			Image: "test-image:latest",
 		},
 	}
 

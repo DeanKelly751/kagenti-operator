@@ -106,24 +106,6 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		}
 		return ctrl.Result{}, nil
 	}
-	// if image is not set in the spec, try to fetch it from the AgentBuild object
-	image := agent.Spec.ImageSource.Image
-	if image == nil {
-		// Get the image for the main container
-		containerImage, err := r.getContainerImage(ctx, agent)
-		if err != nil {
-			logger.Error(err, "Failed to get container image",
-				"agent", agent.Name,
-				"hasImage", agent.Spec.ImageSource.Image != nil,
-				"hasBuildRef", agent.Spec.ImageSource.BuildRef != nil)
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-		}
-		if containerImage == "" {
-			logger.Error(fmt.Errorf("empty image returned"), "No image available")
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-		}
-		image = &containerImage
-	}
 
 	deploymentResult, err := r.reconcileAgentDeployment(ctx, agent)
 	if err != nil {
@@ -425,82 +407,6 @@ func mergeStringMaps(dst, src map[string]string) map[string]string {
 	return dst
 }
 
-func (r *AgentReconciler) fetchImageFromAgentBuild(ctx context.Context, agent *agentv1alpha1.Agent, agentBuildRef string) (string, error) {
-	logger.Info("Fetching image from AgentBuild", "buildRef", agentBuildRef, "namespace", agent.Namespace)
-
-	agentBuild := &agentv1alpha1.AgentBuild{}
-	err := r.Get(ctx, types.NamespacedName{Name: agentBuildRef, Namespace: agent.Namespace}, agentBuild)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return "", fmt.Errorf("AgentBuild %s not found in namespace %s", agentBuildRef, agent.Namespace)
-		}
-		return "", fmt.Errorf("failed to get AgentBuild %s: %w", agentBuildRef, err)
-	}
-
-	// Check build phase with specific error messages
-	switch agentBuild.Status.Phase {
-	case agentv1alpha1.BuildPhaseSucceeded:
-		// Build succeeded, check for image
-		if agentBuild.Status.BuiltImage == "" {
-			return "", fmt.Errorf("AgentBuild %s succeeded but BuiltImage is empty", agentBuildRef)
-		}
-		logger.Info("Using image from AgentBuild",
-			"buildRef", agentBuildRef,
-			"image", agentBuild.Status.BuiltImage)
-		return agentBuild.Status.BuiltImage, nil
-
-	case agentv1alpha1.PhaseBuilding:
-		return "", fmt.Errorf("AgentBuild %s is still building (phase: %s)",
-			agentBuildRef, agentBuild.Status.Phase)
-
-	case agentv1alpha1.BuildPhaseFailed:
-		return "", fmt.Errorf("AgentBuild %s failed: %s",
-			agentBuildRef, agentBuild.Status.Message)
-
-	case agentv1alpha1.BuildPhasePending, "":
-		return "", fmt.Errorf("AgentBuild %s is pending (not started yet)", agentBuildRef)
-
-	default:
-		return "", fmt.Errorf("AgentBuild %s has unknown phase: %s",
-			agentBuildRef, agentBuild.Status.Phase)
-	}
-}
-
-func (r *AgentReconciler) getContainerImage(ctx context.Context, agent *agentv1alpha1.Agent) (string, error) {
-	if agent.Spec.ImageSource.BuildRef != nil {
-		image, err := r.fetchImageFromAgentBuild(ctx, agent, agent.Spec.ImageSource.BuildRef.Name)
-		if err != nil {
-			logger.Error(err, "Unable to fetch image from AgentBuild",
-				"buildRef", agent.Spec.ImageSource.BuildRef.Name)
-
-			meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
-				Type:               "ImageReady",
-				Status:             metav1.ConditionFalse,
-				LastTransitionTime: metav1.Now(),
-				Reason:             "WaitingForBuild",
-				Message:            err.Error(),
-			})
-
-			// Update status (best effort)
-			_ = r.Status().Update(ctx, agent)
-			return "", err
-		}
-		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
-			Type:               "ImageReady",
-			Status:             metav1.ConditionTrue,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "ImageAvailable",
-			Message:            fmt.Sprintf("Using image from AgentBuild: %s", image),
-		})
-
-		return image, nil
-
-	} else if agent.Spec.ImageSource.Image != nil && *agent.Spec.ImageSource.Image != "" {
-		return *agent.Spec.ImageSource.Image, nil
-	}
-
-	return "", fmt.Errorf("no image source specified: must provide either image or buildRef")
-}
 func (r *AgentReconciler) createDeploymentForAgent(ctx context.Context, agent *agentv1alpha1.Agent) (*appsv1.Deployment, error) {
 	if len(agent.Spec.PodTemplateSpec.Spec.Containers) == 0 {
 		return nil, fmt.Errorf("no containers defined in PodTemplateSpec")
@@ -532,8 +438,10 @@ func (r *AgentReconciler) createDeploymentForAgent(ctx context.Context, agent *a
 	for i := range podTemplateSpec.Spec.Containers {
 		container := &podTemplateSpec.Spec.Containers[i]
 
-		if i == 0 && agent.Spec.ImageSource.Image != nil {
-			container.Image = *agent.Spec.ImageSource.Image
+		// Set the image for the first container (main agent container)
+		if i == 0 {
+			container.Image = agent.Spec.Image
+			logger.Info("Using image for Agent", "image", agent.Spec.Image)
 		}
 
 		if len(container.Ports) == 0 {
@@ -545,29 +453,6 @@ func (r *AgentReconciler) createDeploymentForAgent(ctx context.Context, agent *a
 				},
 			}
 		}
-	}
-	// Get the image for the main container
-	image, err := r.getContainerImage(ctx, agent)
-	if err != nil {
-		return nil, fmt.Errorf("no valid image found for Agent %s", agent.Name)
-	}
-	if agent.Spec.ImageSource.BuildRef != nil {
-		logger.Info("Using image from AgentBuild", "buildRef", agent.Spec.ImageSource.BuildRef.Name, "image", image)
-
-		mainContainerFound := false
-		for inx := range podTemplateSpec.Spec.Containers {
-			if podTemplateSpec.Spec.Containers[inx].Name == "agent" {
-				podTemplateSpec.Spec.Containers[inx].Image = image
-				mainContainerFound = true
-				break
-			}
-		}
-		if !mainContainerFound && len(podTemplateSpec.Spec.Containers) > 0 {
-			logger.Info("No container named 'agent' found, using first container")
-			podTemplateSpec.Spec.Containers[0].Image = image
-		}
-	} else {
-		logger.Info("Using static image for Agent", "image", image)
 	}
 
 	r.addVolumesAndMounts(podTemplateSpec)

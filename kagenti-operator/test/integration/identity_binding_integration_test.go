@@ -541,9 +541,7 @@ func createTestAgent(t *testing.T, ctx context.Context, name, saName string) *ag
 					},
 				},
 			},
-			ImageSource: agentv1alpha1.ImageSource{
-				Image: ptr.To("test-image:latest"),
-			},
+			Image: "test-image:latest",
 		},
 	}
 
