@@ -38,6 +38,8 @@ import (
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 	"github.com/kagenti/operator/internal/controller"
 	"github.com/kagenti/operator/internal/distribution"
+	"github.com/kagenti/operator/internal/signature"
+	webhookv1alpha1 "github.com/kagenti/operator/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -254,6 +256,30 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
+	}
+
+	// Initialize signature verification provider
+	var sigProvider signature.Provider
+	if requireA2ASignature {
+		sigConfig := &signature.Config{
+			Type:            signature.ProviderType(signatureProvider),
+			SecretName:      signatureSecretName,
+			SecretNamespace: signatureSecretNamespace,
+			SecretKey:       signatureSecretKey,
+			JWKSURL:         signatureJWKSURL,
+			AuditMode:       signatureAuditMode,
+		}
+
+		var providerErr error
+		sigProvider, providerErr = signature.NewProvider(sigConfig)
+		if providerErr != nil {
+			setupLog.Error(providerErr, "unable to create signature provider")
+			os.Exit(1)
+		}
+		setupLog.Info("Signature verification enabled",
+			"provider", signatureProvider,
+			"auditMode", signatureAuditMode,
+			"requireSignature", requireA2ASignature)
 	}
 
 	if err = (&controller.AgentCardReconciler{
