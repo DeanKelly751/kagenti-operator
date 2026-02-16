@@ -261,7 +261,7 @@ func main() {
 		Scheme:               mgr.GetScheme(),
 		Recorder:             mgr.GetEventRecorderFor("agentcard-controller"),
 		EnableLegacyAgentCRD: enableLegacyAgentCRD,
-		SignatureProvider:     sigProvider,
+		SignatureProvider:    sigProvider,
 		RequireSignature:     requireA2ASignature,
 		SignatureAuditMode:   signatureAuditMode,
 	}).SetupWithManager(mgr); err != nil {

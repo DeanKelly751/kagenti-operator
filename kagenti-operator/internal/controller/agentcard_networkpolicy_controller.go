@@ -574,4 +574,3 @@ func (r *AgentCardNetworkPolicyReconciler) SetupWithManager(mgr ctrl.Manager) er
 		Named("AgentCardNetworkPolicy").
 		Complete(r)
 }
-

@@ -83,8 +83,7 @@ spec:
                 properties:
                   allowedSpiffeIDs:
                     description: |-
-                      AllowedSpiffeIDs is the allowlist of SPIFFE IDs that can bind to this agent.
-                      Each ID must be a valid SPIFFE ID in the format spiffe://<trust-domain>/<path>.
+                      AllowedSpiffeIDs is the allowlist of SPIFFE IDs permitted to bind to this agent.
                       The SPIFFE ID from the JWS protected header must match one of these entries.
                     items:
                       description: SpiffeID represents a SPIFFE identity in the format
@@ -94,38 +93,27 @@ spec:
                     minItems: 1
                     type: array
                   expectedSpiffeID:
-                    description: |-
-                      Deprecated: ExpectedSpiffeID is no longer used. The SPIFFE ID now comes exclusively
-                      from the JWS protected header (sign with --spiffe-id). This ensures all identity
-                      claims are cryptographically bound to the signature.
-                      This field is retained for backward compatibility and will be removed in a future release.
+                    description: 'Deprecated: No longer used; SPIFFE ID comes from
+                      the JWS protected header.'
                     pattern: ^spiffe://[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9](/[a-zA-Z0-9\-\._~%!$&'()*+,;=:@]+)*$
                     type: string
                   strict:
                     default: false
                     description: |-
-                      Strict enables strict enforcement mode for identity binding.
-                      When true, binding failures result in network isolation: the signature-verified
-                      label is removed from pods, and NetworkPolicy restricts all ingress/egress.
-                      When false (audit mode), binding results are recorded in status but network
-                      access is not affected.
-                      NOTE: Scale-to-zero enforcement is only available via the legacy Agent CRD controller.
+                      Strict enables enforcement mode: binding failures trigger network isolation.
+                      When false (default), results are recorded in status only (audit mode).
                     type: boolean
                   trustDomain:
-                    description: |-
-                      Deprecated: TrustDomain is no longer used. The trust domain is determined
-                      from the SPIFFE ID in the JWS protected header.
-                      This field is retained for backward compatibility and will be removed in a future release.
+                    description: 'Deprecated: No longer used; trust domain comes from
+                      the JWS protected header.'
                     pattern: ^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$
                     type: string
                 required:
                 - allowedSpiffeIDs
                 type: object
               selector:
-                description: |-
-                  Selector identifies the Agent to index using label matching.
-                  Deprecated: Use TargetRef instead. Selector is kept for backward compatibility.
-                  If both TargetRef and Selector are specified, TargetRef takes precedence.
+                description: 'Deprecated: Use TargetRef instead. If both are set,
+                  TargetRef takes precedence.'
                 properties:
                   matchLabels:
                     additionalProperties:
@@ -143,9 +131,8 @@ spec:
                 type: string
               targetRef:
                 description: |-
-                  TargetRef identifies the workload backing this agent using duck typing.
-                  The referenced workload must have the required Kagenti labels (kagenti.io/type=agent).
-                  This is the preferred way to reference agent workloads.
+                  TargetRef identifies the workload backing this agent (duck typing).
+                  The workload must have the kagenti.io/type=agent label.
                 properties:
                   apiVersion:
                     description: APIVersion is the API version of the target resource
@@ -175,7 +162,7 @@ spec:
                   evaluation
                 properties:
                   bound:
-                    description: Bound indicates whether the expected SPIFFE ID is
+                    description: Bound indicates whether the verified SPIFFE ID is
                       in the allowlist
                     type: boolean
                   lastEvaluationTime:
@@ -228,14 +215,10 @@ spec:
                     description: Name is the human-readable name of the agent
                     type: string
                   signatures:
-                    description: |-
-                      Signatures contains JWS signatures per A2A spec section 8.4.2.
-                      Each element uses JWS JSON Serialization with protected header containing
-                      the algorithm (alg), key ID (kid), and optional SPIFFE ID (spiffe_id).
+                    description: Signatures contains JWS signatures per A2A spec §8.4.2.
                     items:
-                      description: |-
-                        AgentCardSignature represents a JWS signature on an AgentCard.
-                        Follows the A2A specification section 8.4.2 — JWS JSON Serialization.
+                      description: AgentCardSignature represents a JWS signature on
+                        an AgentCard (A2A spec §8.4.2).
                       properties:
                         header:
                           description: Header contains optional unprotected JWS header
@@ -247,14 +230,12 @@ spec:
                               type: string
                           type: object
                         protected:
-                          description: |-
-                            Protected is the base64url-encoded JWS protected header.
-                            Decoded, it contains {"alg":"RS256","kid":"key-1","spiffe_id":"spiffe://..."}.
+                          description: Protected is the base64url-encoded JWS protected
+                            header (contains alg, kid, spiffe_id).
                           type: string
                         signature:
-                          description: |-
-                            Signature is the base64url-encoded JWS signature value.
-                            The signing input is: BASE64URL(protected) || '.' || BASE64URL(canonical_payload)
+                          description: Signature is the base64url-encoded JWS signature
+                            value.
                           type: string
                       required:
                       - protected
@@ -401,18 +382,16 @@ spec:
                 description: Protocol is the detected agent protocol (e.g., "a2a")
                 type: string
               signatureIdentityMatch:
-                description: |-
-                  SignatureIdentityMatch indicates if both signature AND identity binding pass.
-                  true only when ValidSignature is true AND BindingStatus.Bound is true.
+                description: SignatureIdentityMatch is true when both signature and
+                  identity binding pass.
                 type: boolean
               signatureKeyId:
                 description: SignatureKeyID is the key ID used for verification (from
                   JWS protected header kid)
                 type: string
               signatureSpiffeId:
-                description: |-
-                  SignatureSpiffeID is the SPIFFE ID extracted from the JWS protected header.
-                  This enables cross-referencing the signer's identity with the identity binding evaluation.
+                description: SignatureSpiffeID is the SPIFFE ID from the JWS protected
+                  header (set only when valid).
                 type: string
               signatureVerificationDetails:
                 description: SignatureVerificationDetails contains details about the
