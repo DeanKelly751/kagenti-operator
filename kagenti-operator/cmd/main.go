@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
+	"github.com/kagenti/operator/internal/agentcard"
 	"github.com/kagenti/operator/internal/controller"
 	"github.com/kagenti/operator/internal/distribution"
 	"github.com/kagenti/operator/internal/signature"
@@ -255,6 +256,12 @@ func main() {
 	}
 
 	// Initialize signature verification provider
+	if !requireA2ASignature {
+		setupLog.Info("WARNING: --require-a2a-signature is false. Identity binding requires " +
+			"--require-a2a-signature=true to function. AgentCards with spec.identityBinding " +
+			"will always report NotBound.")
+	}
+
 	var sigProvider signature.Provider
 	if requireA2ASignature {
 		sigConfig := &signature.Config{
@@ -282,6 +289,7 @@ func main() {
 		Client:             mgr.GetClient(),
 		Scheme:             mgr.GetScheme(),
 		Recorder:           mgr.GetEventRecorderFor("agentcard-controller"),
+		AgentFetcher:       agentcard.NewFetcher(),
 		SignatureProvider:  sigProvider,
 		RequireSignature:   requireA2ASignature,
 		SignatureAuditMode: signatureAuditMode,
