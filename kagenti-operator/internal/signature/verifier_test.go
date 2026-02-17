@@ -28,6 +28,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"math/big"
 	"testing"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
@@ -866,6 +867,471 @@ func TestVerifyJWS_ECDSA_CurveMismatch(t *testing.T) {
 	}
 	if indexOf(err.Error(), "curve mismatch") == -1 {
 		t.Errorf("Expected 'curve mismatch' in error, got: %v", err)
+	}
+}
+
+// --- Test: bool(false) preserved in canonical JSON (#8) ---
+
+func TestCanonicalJSON_BoolFalse_Preserved(t *testing.T) {
+	streaming := false
+	push := false
+	cardData := &agentv1alpha1.AgentCardData{
+		Name: "Agent",
+		Capabilities: &agentv1alpha1.AgentCapabilities{
+			Streaming:         &streaming,
+			PushNotifications: &push,
+		},
+	}
+
+	canonical, err := createCanonicalCardJSON(cardData)
+	if err != nil {
+		t.Fatalf("createCanonicalCardJSON failed: %v", err)
+	}
+
+	got := string(canonical)
+	// ptr(false) must appear in canonical output, not be stripped
+	if indexOf(got, `"streaming":false`) < 0 {
+		t.Errorf("Expected '\"streaming\":false' in canonical JSON, got: %s", got)
+	}
+	if indexOf(got, `"pushNotifications":false`) < 0 {
+		t.Errorf("Expected '\"pushNotifications\":false' in canonical JSON, got: %s", got)
+	}
+}
+
+// --- Test: ECDSA raw R||S format (primary JWS path) (#1) ---
+
+// buildJWSSignatureECDSARawRS creates a JWS signature using ECDSA raw R||S encoding,
+// which is the spec-compliant primary path per RFC 7518 §3.4.
+func buildJWSSignatureECDSARawRS(t *testing.T, cardData *agentv1alpha1.AgentCardData, privKey *ecdsa.PrivateKey, kid, alg string) agentv1alpha1.AgentCardSignature {
+	t.Helper()
+	header := &ProtectedHeader{
+		Algorithm: alg,
+		Type:      "JOSE",
+		KeyID:     kid,
+	}
+	protectedB64, err := EncodeProtectedHeader(header)
+	if err != nil {
+		t.Fatalf("Failed to encode protected header: %v", err)
+	}
+
+	payload, err := createCanonicalCardJSON(cardData)
+	if err != nil {
+		t.Fatalf("Failed to create canonical JSON: %v", err)
+	}
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
+	signingInput := []byte(protectedB64 + "." + payloadB64)
+
+	hashFunc, err := hashForAlgorithm(alg)
+	if err != nil {
+		t.Fatalf("hashForAlgorithm(%s) failed: %v", alg, err)
+	}
+	hasher := hashFunc.New()
+	hasher.Write(signingInput)
+	hashed := hasher.Sum(nil)
+
+	r, s, err := ecdsa.Sign(rand.Reader, privKey, hashed)
+	if err != nil {
+		t.Fatalf("Failed to sign with %s: %v", alg, err)
+	}
+
+	// Encode as raw R||S (fixed-length, zero-padded)
+	byteSize := curveByteSize(privKey.Curve)
+	rBytes := r.Bytes()
+	sBytes := s.Bytes()
+	rawSig := make([]byte, 2*byteSize)
+	copy(rawSig[byteSize-len(rBytes):byteSize], rBytes)
+	copy(rawSig[2*byteSize-len(sBytes):], sBytes)
+
+	return agentv1alpha1.AgentCardSignature{
+		Protected: protectedB64,
+		Signature: base64.RawURLEncoding.EncodeToString(rawSig),
+	}
+}
+
+func TestVerifyJWS_ECDSA_RawRS_Format(t *testing.T) {
+	privKey, pubKeyPEM := generateECDSAKeyPair(t)
+	cardData := newCardData("RawRS Agent", "http://rawrs:8000", "1.0.0")
+	jwsSig := buildJWSSignatureECDSARawRS(t, cardData, privKey, "rawrs-key", "ES256")
+
+	result, err := VerifyJWS(cardData, &jwsSig, pubKeyPEM)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !result.Verified {
+		t.Errorf("Expected verified=true for raw R||S ES256, got false. Details: %s", result.Details)
+	}
+}
+
+func TestVerifyJWS_ECDSA_RawRS_P384(t *testing.T) {
+	privKey, pubKeyPEM := generateECDSAKeyPairWithCurve(t, elliptic.P384())
+	cardData := newCardData("P384 RawRS Agent", "http://p384:8000", "1.0.0")
+	jwsSig := buildJWSSignatureECDSARawRS(t, cardData, privKey, "p384-key", "ES384")
+
+	result, err := VerifyJWS(cardData, &jwsSig, pubKeyPEM)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !result.Verified {
+		t.Errorf("Expected verified=true for raw R||S ES384, got false. Details: %s", result.Details)
+	}
+}
+
+// --- Test: RSA minimum key size (#2) ---
+
+func TestVerifyJWS_RSA_MinKeySize_Rejected(t *testing.T) {
+	// Generate a 1024-bit RSA key (below minimum)
+	smallPrivKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatalf("Failed to generate 1024-bit RSA key: %v", err)
+	}
+	pubKeyDER, err := x509.MarshalPKIXPublicKey(&smallPrivKey.PublicKey)
+	if err != nil {
+		t.Fatalf("Failed to marshal public key: %v", err)
+	}
+	smallPubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyDER})
+
+	cardData := newCardData("Agent", "http://agent:8000", "1.0.0")
+
+	// Build a signature with the small key
+	header := &ProtectedHeader{Algorithm: "RS256", Type: "JOSE", KeyID: "small-key"}
+	protectedB64, _ := EncodeProtectedHeader(header)
+	payload, _ := createCanonicalCardJSON(cardData)
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
+	signingInput := []byte(protectedB64 + "." + payloadB64)
+	hash := sha256.Sum256(signingInput)
+	sigBytes, err := rsa.SignPKCS1v15(rand.Reader, smallPrivKey, crypto.SHA256, hash[:])
+	if err != nil {
+		t.Fatalf("Failed to sign: %v", err)
+	}
+	sig := &agentv1alpha1.AgentCardSignature{
+		Protected: protectedB64,
+		Signature: base64.RawURLEncoding.EncodeToString(sigBytes),
+	}
+
+	result, err := VerifyJWS(cardData, sig, smallPubKeyPEM)
+	if err == nil {
+		t.Fatal("Expected error for RSA key smaller than 2048 bits")
+	}
+	if result.Verified {
+		t.Error("Expected verified=false for 1024-bit RSA key")
+	}
+	if indexOf(err.Error(), "RSA key too small") == -1 {
+		t.Errorf("Expected 'RSA key too small' in error, got: %v", err)
+	}
+	if indexOf(result.Details, "RSA key too small") == -1 {
+		t.Errorf("Expected 'RSA key too small' in details, got: %s", result.Details)
+	}
+}
+
+// --- Test: JWKS invalid-curve EC point (#4) ---
+
+func TestJWKSProvider_InvalidCurvePoint(t *testing.T) {
+	// ecJWKToPEM should reject off-curve points
+	provider := &JWKSProvider{}
+
+	// Create a JWK with an off-curve point (invalid X,Y for P-256)
+	// X=1, Y=1 is not on the P-256 curve
+	invalidJWK := &JWK{
+		Kty: "EC",
+		Crv: "P-256",
+		X:   base64.RawURLEncoding.EncodeToString([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}),
+		Y:   base64.RawURLEncoding.EncodeToString([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}),
+	}
+
+	_, err := provider.jwkToPublicKeyPEM(invalidJWK)
+	if err == nil {
+		t.Fatal("Expected error for off-curve EC point")
+	}
+	if indexOf(err.Error(), "not on curve") == -1 {
+		t.Errorf("Expected 'not on curve' in error, got: %v", err)
+	}
+}
+
+// --- Unit tests for algorithm helpers ---
+
+func TestHashForAlgorithm_AllSupported(t *testing.T) {
+	tests := []struct {
+		alg      string
+		expected crypto.Hash
+	}{
+		{"RS256", crypto.SHA256},
+		{"PS256", crypto.SHA256},
+		{"ES256", crypto.SHA256},
+		{"RS384", crypto.SHA384},
+		{"PS384", crypto.SHA384},
+		{"ES384", crypto.SHA384},
+		{"RS512", crypto.SHA512},
+		{"PS512", crypto.SHA512},
+		{"ES512", crypto.SHA512},
+	}
+	for _, tt := range tests {
+		t.Run(tt.alg, func(t *testing.T) {
+			h, err := hashForAlgorithm(tt.alg)
+			if err != nil {
+				t.Fatalf("hashForAlgorithm(%s) unexpected error: %v", tt.alg, err)
+			}
+			if h != tt.expected {
+				t.Errorf("hashForAlgorithm(%s) = %v, want %v", tt.alg, h, tt.expected)
+			}
+		})
+	}
+}
+
+func TestHashForAlgorithm_Unsupported(t *testing.T) {
+	for _, alg := range []string{"HS256", "none", "", "RS1024"} {
+		_, err := hashForAlgorithm(alg)
+		if err == nil {
+			t.Errorf("hashForAlgorithm(%q) expected error, got nil", alg)
+		}
+	}
+}
+
+func TestIsPSSAlgorithm(t *testing.T) {
+	trueAlgs := []string{"PS256", "PS384", "PS512"}
+	falseAlgs := []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "none", "HS256", ""}
+	for _, alg := range trueAlgs {
+		if !isPSSAlgorithm(alg) {
+			t.Errorf("isPSSAlgorithm(%q) = false, want true", alg)
+		}
+	}
+	for _, alg := range falseAlgs {
+		if isPSSAlgorithm(alg) {
+			t.Errorf("isPSSAlgorithm(%q) = true, want false", alg)
+		}
+	}
+}
+
+func TestIsRSAAlgorithm(t *testing.T) {
+	trueAlgs := []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512"}
+	falseAlgs := []string{"ES256", "ES384", "ES512", "none", "HS256", ""}
+	for _, alg := range trueAlgs {
+		if !isRSAAlgorithm(alg) {
+			t.Errorf("isRSAAlgorithm(%q) = false, want true", alg)
+		}
+	}
+	for _, alg := range falseAlgs {
+		if isRSAAlgorithm(alg) {
+			t.Errorf("isRSAAlgorithm(%q) = true, want false", alg)
+		}
+	}
+}
+
+func TestIsECDSAAlgorithm(t *testing.T) {
+	trueAlgs := []string{"ES256", "ES384", "ES512"}
+	falseAlgs := []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "none", "HS256", ""}
+	for _, alg := range trueAlgs {
+		if !isECDSAAlgorithm(alg) {
+			t.Errorf("isECDSAAlgorithm(%q) = false, want true", alg)
+		}
+	}
+	for _, alg := range falseAlgs {
+		if isECDSAAlgorithm(alg) {
+			t.Errorf("isECDSAAlgorithm(%q) = true, want false", alg)
+		}
+	}
+}
+
+func TestValidateAlgorithm_Supported(t *testing.T) {
+	for alg := range supportedAlgorithms {
+		if err := validateAlgorithm(alg); err != nil {
+			t.Errorf("validateAlgorithm(%q) unexpected error: %v", alg, err)
+		}
+	}
+}
+
+func TestValidateAlgorithm_Rejected(t *testing.T) {
+	rejected := []struct {
+		alg       string
+		wantInErr string
+	}{
+		{"", "missing required"},
+		{"none", "not permitted"},
+		{"HS256", "unsupported"},
+		{"RS1024", "unsupported"},
+	}
+	for _, tt := range rejected {
+		t.Run(tt.alg, func(t *testing.T) {
+			err := validateAlgorithm(tt.alg)
+			if err == nil {
+				t.Fatalf("validateAlgorithm(%q) expected error", tt.alg)
+			}
+			if indexOf(err.Error(), tt.wantInErr) == -1 {
+				t.Errorf("validateAlgorithm(%q) error = %v, want substring %q", tt.alg, err, tt.wantInErr)
+			}
+		})
+	}
+}
+
+func TestCurveByteSize(t *testing.T) {
+	tests := []struct {
+		curve    elliptic.Curve
+		expected int
+	}{
+		{elliptic.P256(), 32},
+		{elliptic.P384(), 48},
+		{elliptic.P521(), 66},
+	}
+	for _, tt := range tests {
+		t.Run(tt.curve.Params().Name, func(t *testing.T) {
+			got := curveByteSize(tt.curve)
+			if got != tt.expected {
+				t.Errorf("curveByteSize(%s) = %d, want %d", tt.curve.Params().Name, got, tt.expected)
+			}
+		})
+	}
+}
+
+// --- removeEmptyFields edge cases ---
+
+func TestRemoveEmptyFields_NestedEmptyMapOmitted(t *testing.T) {
+	input := map[string]interface{}{
+		"name": "Agent",
+		"nested": map[string]interface{}{
+			"inner": map[string]interface{}{}, // empty → should be omitted
+		},
+	}
+	result := removeEmptyFields(input)
+	if _, exists := result["nested"]; exists {
+		t.Error("Expected nested empty map to be omitted")
+	}
+	if result["name"] != "Agent" {
+		t.Errorf("Expected name='Agent', got %v", result["name"])
+	}
+}
+
+func TestRemoveEmptyFields_EmptyStringOmitted(t *testing.T) {
+	input := map[string]interface{}{
+		"name":        "Agent",
+		"description": "",
+	}
+	result := removeEmptyFields(input)
+	if _, exists := result["description"]; exists {
+		t.Error("Expected empty string field to be omitted")
+	}
+}
+
+func TestRemoveEmptyFields_NilValueOmitted(t *testing.T) {
+	input := map[string]interface{}{
+		"name":  "Agent",
+		"other": nil,
+	}
+	result := removeEmptyFields(input)
+	if _, exists := result["other"]; exists {
+		t.Error("Expected nil field to be omitted")
+	}
+}
+
+func TestRemoveEmptyFields_EmptySliceOmitted(t *testing.T) {
+	input := map[string]interface{}{
+		"name":  "Agent",
+		"items": []interface{}{},
+	}
+	result := removeEmptyFields(input)
+	if _, exists := result["items"]; exists {
+		t.Error("Expected empty slice field to be omitted")
+	}
+}
+
+func TestRemoveEmptyFields_BoolFalsePreserved(t *testing.T) {
+	input := map[string]interface{}{
+		"name":   "Agent",
+		"active": false,
+	}
+	result := removeEmptyFields(input)
+	val, exists := result["active"]
+	if !exists {
+		t.Fatal("Expected bool(false) to be preserved")
+	}
+	if val != false {
+		t.Errorf("Expected active=false, got %v", val)
+	}
+}
+
+func TestRemoveEmptyFields_NumberZeroPreserved(t *testing.T) {
+	input := map[string]interface{}{
+		"name":  "Agent",
+		"count": float64(0),
+	}
+	result := removeEmptyFields(input)
+	val, exists := result["count"]
+	if !exists {
+		t.Fatal("Expected float64(0) to be preserved")
+	}
+	if val != float64(0) {
+		t.Errorf("Expected count=0, got %v", val)
+	}
+}
+
+func TestRemoveEmptyFields_DeeplyNestedPreservesNonEmpty(t *testing.T) {
+	input := map[string]interface{}{
+		"outer": map[string]interface{}{
+			"middle": map[string]interface{}{
+				"inner": "value",
+			},
+			"empty": map[string]interface{}{},
+		},
+	}
+	result := removeEmptyFields(input)
+	outer, ok := result["outer"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected outer to be a map")
+	}
+	if _, exists := outer["empty"]; exists {
+		t.Error("Expected nested empty map to be omitted")
+	}
+	middle, ok := outer["middle"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected middle to be a map")
+	}
+	if middle["inner"] != "value" {
+		t.Errorf("Expected inner='value', got %v", middle["inner"])
+	}
+}
+
+// --- JWKS: jwkToPublicKeyPEM with unsupported key type ---
+
+func TestJWKSProvider_UnsupportedKeyType(t *testing.T) {
+	provider := &JWKSProvider{}
+	invalidJWK := &JWK{
+		Kty: "OKP", // Ed25519 — not supported
+		Kid: "test-key",
+	}
+	_, err := provider.jwkToPublicKeyPEM(invalidJWK)
+	if err == nil {
+		t.Fatal("Expected error for unsupported key type 'OKP'")
+	}
+	if indexOf(err.Error(), "unsupported") == -1 {
+		t.Errorf("Expected 'unsupported' in error, got: %v", err)
+	}
+}
+
+// --- JWKS: RSA JWK with modulus too small ---
+
+func TestJWKSProvider_RSAKeyTooSmall_JWK(t *testing.T) {
+	provider := &JWKSProvider{}
+
+	// Generate a 1024-bit RSA key and extract N and E
+	smallKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatalf("Failed to generate 1024-bit RSA key: %v", err)
+	}
+
+	nBytes := smallKey.PublicKey.N.Bytes()
+	eBytes := big.NewInt(int64(smallKey.PublicKey.E)).Bytes()
+
+	jwk := &JWK{
+		Kty: "RSA",
+		Kid: "small-key",
+		N:   base64.RawURLEncoding.EncodeToString(nBytes),
+		E:   base64.RawURLEncoding.EncodeToString(eBytes),
+	}
+
+	_, err = provider.jwkToPublicKeyPEM(jwk)
+	if err == nil {
+		t.Fatal("Expected error for RSA JWK with 1024-bit modulus")
+	}
+	if indexOf(err.Error(), "too small") == -1 && indexOf(err.Error(), "below minimum") == -1 {
+		t.Errorf("Expected key-size rejection in error, got: %v", err)
 	}
 }
 

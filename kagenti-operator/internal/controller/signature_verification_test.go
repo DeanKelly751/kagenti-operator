@@ -26,7 +26,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"sort"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -970,13 +969,8 @@ func buildTestJWS(cardData *agentv1alpha1.AgentCardData, privKey *rsa.PrivateKey
 	headerJSON, _ := json.Marshal(header)
 	protectedB64 := base64.RawURLEncoding.EncodeToString(headerJSON)
 
-	// Create canonical payload
-	rawJSON, _ := json.Marshal(cardData)
-	var cardMap map[string]interface{}
-	json.Unmarshal(rawJSON, &cardMap)
-	delete(cardMap, "signatures")
-	cleanMap := removeEmptyFieldsTest(cardMap)
-	payload, _ := marshalCanonicalTest(cleanMap)
+	// Use the production canonical JSON to guarantee test/prod parity
+	payload, _ := signature.CreateCanonicalCardJSON(cardData)
 
 	// Construct signing input
 	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
@@ -1042,66 +1036,4 @@ func createDeploymentWithService(ctx context.Context, name, namespace string) {
 		},
 	}
 	ExpectWithOffset(1, k8sClient.Create(ctx, service)).To(Succeed())
-}
-
-// removeEmptyFieldsTest mirrors the verifier's removeEmptyFields for test signing.
-func removeEmptyFieldsTest(m map[string]interface{}) map[string]interface{} {
-	result := make(map[string]interface{})
-	for k, v := range m {
-		if v == nil {
-			continue
-		}
-		switch val := v.(type) {
-		case map[string]interface{}:
-			cleaned := removeEmptyFieldsTest(val)
-			if len(cleaned) > 0 {
-				result[k] = cleaned
-			}
-		case []interface{}:
-			if len(val) > 0 {
-				result[k] = val
-			}
-		case string:
-			if val != "" {
-				result[k] = val
-			}
-		default:
-			result[k] = v
-		}
-	}
-	return result
-}
-
-// marshalCanonicalTest mirrors the verifier's marshalCanonical for test signing.
-func marshalCanonicalTest(data map[string]interface{}) ([]byte, error) {
-	return json.Marshal(toSortedMap(data))
-}
-
-// toSortedMap produces a deterministic JSON byte slice with sorted keys.
-func toSortedMap(m map[string]interface{}) json.RawMessage {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	result := []byte("{")
-	for i, k := range keys {
-		if i > 0 {
-			result = append(result, ',')
-		}
-		keyJSON, _ := json.Marshal(k)
-		result = append(result, keyJSON...)
-		result = append(result, ':')
-
-		switch val := m[k].(type) {
-		case map[string]interface{}:
-			result = append(result, toSortedMap(val)...)
-		default:
-			valJSON, _ := json.Marshal(val)
-			result = append(result, valJSON...)
-		}
-	}
-	result = append(result, '}')
-	return result
 }

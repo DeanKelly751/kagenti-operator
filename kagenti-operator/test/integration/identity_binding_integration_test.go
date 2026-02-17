@@ -21,6 +21,7 @@ import (
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 	"github.com/kagenti/operator/internal/controller"
+	"github.com/kagenti/operator/internal/signature"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -85,12 +86,37 @@ func cleanupNamespace(t *testing.T, ctx context.Context) {
 	}
 }
 
-// mockFetcher simulates fetching card data (returns nil to exercise the binding path only)
+// mockFetcher returns minimal valid AgentCardData so the reconciler does not
+// panic on nil cardData when it reaches the fetch → verify → bind path.
+//
+// Known limitation: this mock returns hardcoded data regardless of the actual
+// workload, so integration tests exercise the reconciler's verify → bind logic
+// but do NOT exercise the full fetch → sign → verify → bind end-to-end path.
 type mockFetcher struct{}
 
-func (f *mockFetcher) FetchAgentCard(_ context.Context, _ string) (*agentv1alpha1.AgentCardData, error) {
-	return nil, nil
+func (f *mockFetcher) Fetch(_ context.Context, _, _ string) (*agentv1alpha1.AgentCardData, error) {
+	return &agentv1alpha1.AgentCardData{
+		Name: "test-agent",
+		URL:  "http://test:8000",
+	}, nil
 }
+
+// mockSignatureProvider returns a controlled VerificationResult so the reconciler
+// exercises the full binding path without requiring real JWS signatures.
+type mockSignatureProvider struct {
+	spiffeID string
+	verified bool
+}
+
+func (p *mockSignatureProvider) VerifySignature(_ context.Context, _ *agentv1alpha1.AgentCardData, _ []agentv1alpha1.AgentCardSignature) (*signature.VerificationResult, error) {
+	return &signature.VerificationResult{
+		Verified: p.verified,
+		SpiffeID: p.spiffeID,
+		Details:  "mock provider",
+	}, nil
+}
+
+func (p *mockSignatureProvider) Name() string { return "mock" }
 
 func TestIdentityBindingIntegration(t *testing.T) {
 	ctx := context.Background()
@@ -126,11 +152,17 @@ func testMatchingBindingEvaluation(t *testing.T) {
 	agentCard := createTestAgentCard(t, ctx, cardName, deploymentName, []agentv1alpha1.SpiffeID{agentv1alpha1.SpiffeID(expectedSpiffeID)}, false)
 	defer deleteResource(ctx, agentCard)
 
-	// Create and run AgentCard reconciler
+	// Create and run AgentCard reconciler with a mock signature provider that
+	// returns the expected SPIFFE ID, so the reconciler exercises the full
+	// binding evaluation path (not just pre-set status).
 	reconciler := &controller.AgentCardReconciler{
 		Client:       k8sClient,
 		Scheme:       scheme,
 		AgentFetcher: &mockFetcher{},
+		SignatureProvider: &mockSignatureProvider{
+			spiffeID: expectedSpiffeID,
+			verified: true,
+		},
 	}
 
 	// First reconcile adds finalizer
@@ -139,10 +171,7 @@ func testMatchingBindingEvaluation(t *testing.T) {
 	})
 	time.Sleep(100 * time.Millisecond)
 
-	// Simulate a verified signature with SPIFFE ID in JWS protected header
-	simulateJWSSpiffeID(t, ctx, cardName, expectedSpiffeID)
-
-	// Subsequent reconciles evaluate binding (with JWS SPIFFE ID now in status)
+	// Subsequent reconciles evaluate binding via the mock provider
 	for i := 0; i < 2; i++ {
 		_, _ = reconciler.Reconcile(ctx, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: cardName, Namespace: testNamespace},
@@ -196,11 +225,19 @@ func testNonMatchingBindingEvaluation(t *testing.T) {
 	agentCard := createTestAgentCard(t, ctx, cardName, deploymentName, []agentv1alpha1.SpiffeID{agentv1alpha1.SpiffeID(wrongSpiffeID)}, false)
 	defer deleteResource(ctx, agentCard)
 
-	// Create and run AgentCard reconciler
+	// The workload's actual SPIFFE ID (from mock provider) does NOT match the allowlist
+	actualSpiffeID := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, testNamespace, saName)
+
+	// Create and run AgentCard reconciler with a mock provider returning the actual
+	// (non-matching) SPIFFE ID
 	reconciler := &controller.AgentCardReconciler{
 		Client:       k8sClient,
 		Scheme:       scheme,
 		AgentFetcher: &mockFetcher{},
+		SignatureProvider: &mockSignatureProvider{
+			spiffeID: actualSpiffeID,
+			verified: true,
+		},
 	}
 
 	// First reconcile adds finalizer
@@ -208,10 +245,6 @@ func testNonMatchingBindingEvaluation(t *testing.T) {
 		NamespacedName: types.NamespacedName{Name: cardName, Namespace: testNamespace},
 	})
 	time.Sleep(100 * time.Millisecond)
-
-	// Simulate JWS SPIFFE ID that does NOT match the allowlist
-	actualSpiffeID := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, testNamespace, saName)
-	simulateJWSSpiffeID(t, ctx, cardName, actualSpiffeID)
 
 	// Reconcile again to evaluate binding
 	reconciler.Reconcile(ctx, reconcile.Request{
@@ -314,7 +347,7 @@ func createTestDeployment(t *testing.T, ctx context.Context, name, saName string
 				Spec: corev1.PodSpec{
 					ServiceAccountName: saName,
 					Containers: []corev1.Container{
-						{Name: "agent", Image: "test-image:latest"},
+						{Name: "agent", Image: "registry.k8s.io/pause:3.9"},
 					},
 				},
 			},
@@ -328,24 +361,6 @@ func createTestDeployment(t *testing.T, ctx context.Context, name, saName string
 
 	t.Logf("  Created Deployment: %s (replicas=%d)", name, replicas)
 	return deployment
-}
-
-// simulateJWSSpiffeID pre-sets the AgentCard status to simulate a verified signature
-// with a SPIFFE ID in the JWS protected header. This is needed because the integration
-// tests don't perform actual signing — the SPIFFE ID now comes exclusively from the
-// JWS protected header (no fallback paths).
-func simulateJWSSpiffeID(t *testing.T, ctx context.Context, cardName, spiffeID string) {
-	card := &agentv1alpha1.AgentCard{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cardName, Namespace: testNamespace}, card); err != nil {
-		t.Fatalf("Failed to get AgentCard for SPIFFE ID simulation: %v", err)
-	}
-	validSig := true
-	card.Status.ValidSignature = &validSig
-	card.Status.SignatureSpiffeID = spiffeID
-	if err := k8sClient.Status().Update(ctx, card); err != nil {
-		t.Fatalf("Failed to simulate JWS SPIFFE ID: %v", err)
-	}
-	t.Logf("  Simulated JWS SPIFFE ID: %s", spiffeID)
 }
 
 func deleteResource(ctx context.Context, obj client.Object) {

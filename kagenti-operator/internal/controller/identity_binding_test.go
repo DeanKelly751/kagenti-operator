@@ -477,6 +477,68 @@ var _ = Describe("Identity Binding", func() {
 			Expect(result.Bound).To(BeTrue())
 		})
 
+		It("should bind when verified SPIFFE ID matches 2nd entry in allowlist", func() {
+			reconciler := &AgentCardReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			verifiedSpiffeID := "spiffe://example.com/ns/default/sa/second-match"
+
+			agentCard := &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "multi-allowlist-card",
+					Namespace: "default",
+				},
+				Spec: agentv1alpha1.AgentCardSpec{
+					IdentityBinding: &agentv1alpha1.IdentityBinding{
+						AllowedSpiffeIDs: []agentv1alpha1.SpiffeID{
+							"spiffe://example.com/ns/default/sa/first",
+							agentv1alpha1.SpiffeID(verifiedSpiffeID),
+							"spiffe://example.com/ns/default/sa/third",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, agentCard)).To(Succeed())
+			defer func() {
+				cleanupResource(ctx, &agentv1alpha1.AgentCard{}, "multi-allowlist-card", "default")
+			}()
+
+			// Verified SPIFFE ID matches 2nd entry → binding passes
+			result := reconciler.computeBinding(agentCard, verifiedSpiffeID)
+			Expect(result).NotTo(BeNil())
+			Expect(result.Bound).To(BeTrue())
+		})
+
+		It("should not bind when allowedSpiffeIDs is empty (bypassed validation)", func() {
+			reconciler := &AgentCardReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			// Craft an in-memory AgentCard with empty allowedSpiffeIDs — bypassing CRD validation
+			// to simulate a scenario where validation was somehow bypassed.
+			agentCard := &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "empty-allowlist-card",
+					Namespace: "default",
+				},
+				Spec: agentv1alpha1.AgentCardSpec{
+					IdentityBinding: &agentv1alpha1.IdentityBinding{
+						AllowedSpiffeIDs: []agentv1alpha1.SpiffeID{},
+					},
+				},
+			}
+			// Do NOT create via API — CRD enforces minItems=1. Test computeBinding directly.
+
+			// Empty allowlist should always fail binding with BUG log
+			result := reconciler.computeBinding(agentCard, "spiffe://example.com/ns/default/sa/test")
+			Expect(result).NotTo(BeNil())
+			Expect(result.Bound).To(BeFalse())
+			Expect(result.Message).To(ContainSubstring("allowedSpiffeIDs is empty"))
+		})
+
 		It("should not trust JWS SPIFFE ID when signature is invalid", func() {
 			reconciler := &AgentCardReconciler{
 				Client: k8sClient,

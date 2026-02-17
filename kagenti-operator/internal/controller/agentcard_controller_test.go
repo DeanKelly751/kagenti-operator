@@ -728,6 +728,47 @@ var _ = Describe("getWorkloadProtocol", func() {
 	})
 })
 
+var _ = Describe("getServicePort", func() {
+	var reconciler *AgentCardReconciler
+
+	BeforeEach(func() {
+		reconciler = &AgentCardReconciler{}
+	})
+
+	It("should return the first port when multiple ports exist", func() {
+		service := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-svc", Namespace: "default"},
+			Spec: corev1.ServiceSpec{
+				Ports: []corev1.ServicePort{
+					{Name: "http", Port: 9090, Protocol: corev1.ProtocolTCP},
+					{Name: "grpc", Port: 50051, Protocol: corev1.ProtocolTCP},
+				},
+			},
+		}
+		Expect(reconciler.getServicePort(service)).To(Equal(int32(9090)))
+	})
+
+	It("should return a single port", func() {
+		service := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "single-port-svc", Namespace: "default"},
+			Spec: corev1.ServiceSpec{
+				Ports: []corev1.ServicePort{
+					{Name: "api", Port: 3000, Protocol: corev1.ProtocolTCP},
+				},
+			},
+		}
+		Expect(reconciler.getServicePort(service)).To(Equal(int32(3000)))
+	})
+
+	It("should fall back to port 8000 when no ports are defined", func() {
+		service := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "no-ports-svc", Namespace: "default"},
+			Spec:       corev1.ServiceSpec{},
+		}
+		Expect(reconciler.getServicePort(service)).To(Equal(int32(8000)))
+	})
+})
+
 // Helper function to find a condition by type
 func findCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
 	for i := range conditions {
