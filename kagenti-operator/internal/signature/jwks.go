@@ -29,10 +29,12 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
+	"golang.org/x/sync/singleflight"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -51,6 +53,13 @@ type JWKSProvider struct {
 	keysCache map[string]*JWK
 	lastFetch time.Time
 	cacheTTL  time.Duration
+
+	// singleflight prevents concurrent refreshes (thundering herd on cache expiry)
+	refreshGroup singleflight.Group
+
+	// Rate-limit forced refreshes (cache-miss → re-fetch) to prevent a burst of
+	// unknown kid values from hammering the JWKS endpoint.
+	lastForcedRefresh time.Time
 }
 
 // JWK represents a JSON Web Key
@@ -74,6 +83,15 @@ type JWKS struct {
 // DefaultJWKSCacheTTL is the default cache duration for JWKS keys
 const DefaultJWKSCacheTTL = 5 * time.Minute
 
+// maxJWKSResponseSize caps the maximum size of a JWKS response to prevent
+// a malicious endpoint from causing an OOM with an unbounded body.
+const maxJWKSResponseSize = 1 << 20 // 1 MiB
+
+// forcedRefreshCooldown is the minimum interval between forced refreshes
+// triggered by cache misses on unknown kid values. This prevents a burst
+// of requests with bogus kid values from hammering the JWKS endpoint.
+const forcedRefreshCooldown = 30 * time.Second
+
 // NewJWKSProvider creates a new JWKS-based signature verification provider
 func NewJWKSProvider(config *Config) (Provider, error) {
 	if config.JWKSURL == "" {
@@ -83,6 +101,12 @@ func NewJWKSProvider(config *Config) (Provider, error) {
 	cacheTTL := config.JWKSCacheTTL
 	if cacheTTL <= 0 {
 		cacheTTL = DefaultJWKSCacheTTL
+	}
+
+	if !strings.HasPrefix(config.JWKSURL, "https://") {
+		jwksLogger.V(0).Info("SECURITY WARNING: JWKS URL does not use HTTPS — keys may be intercepted in transit. "+
+			"Use an HTTPS endpoint in production.",
+			"url", config.JWKSURL)
 	}
 
 	return &JWKSProvider{
@@ -112,7 +136,6 @@ func (p *JWKSProvider) VerifySignature(ctx context.Context, cardData *agentv1alp
 			result.Details = "AgentCard has no signatures (audit mode: allowed)"
 			return result, nil
 		}
-		result.Error = fmt.Errorf("no signatures provided")
 		return result, nil
 	}
 
@@ -127,7 +150,6 @@ func (p *JWKSProvider) VerifySignature(ctx context.Context, cardData *agentv1alp
 		}
 		return &VerificationResult{
 			Verified: false,
-			Error:    err,
 			Details:  fmt.Sprintf("Failed to fetch JWKS: %v", err),
 		}, err
 	}
@@ -149,12 +171,25 @@ func (p *JWKSProvider) VerifySignature(ctx context.Context, cardData *agentv1alp
 		// Find the key with matching kid
 		jwk := p.findKey(kid)
 		if jwk == nil {
-			// Force refresh in case of key rotation
-			jwksLogger.Info("Key not found in cache, forcing JWKS refresh", "keyID", kid)
-			if refreshErr := p.fetchKeys(ctx); refreshErr != nil {
-				jwksLogger.Error(refreshErr, "Failed to refresh JWKS after cache miss")
+			// Force refresh in case of key rotation, but rate-limit to prevent
+			// a burst of unknown kid values from hammering the JWKS endpoint.
+			p.keysMutex.RLock()
+			canRefresh := time.Since(p.lastForcedRefresh) > forcedRefreshCooldown
+			p.keysMutex.RUnlock()
+
+			if canRefresh {
+				jwksLogger.Info("Key not found in cache, forcing JWKS refresh", "keyID", kid)
+				if refreshErr := p.fetchKeys(ctx); refreshErr != nil {
+					jwksLogger.Error(refreshErr, "Failed to refresh JWKS after cache miss")
+				} else {
+					p.keysMutex.Lock()
+					p.lastForcedRefresh = time.Now()
+					p.keysMutex.Unlock()
+					jwk = p.findKey(kid)
+				}
 			} else {
-				jwk = p.findKey(kid)
+				jwksLogger.Info("Key not found in cache; forced refresh on cooldown",
+					"keyID", kid, "cooldown", forcedRefreshCooldown)
 			}
 		}
 
@@ -188,12 +223,21 @@ func (p *JWKSProvider) VerifySignature(ctx context.Context, cardData *agentv1alp
 	}
 	return &VerificationResult{
 		Verified: false,
-		Error:    err,
 		Details:  err.Error(),
 	}, err
 }
 
-// refreshKeysIfNeeded fetches JWKS keys if cache is stale
+// refreshKeysIfNeeded fetches JWKS keys if cache is stale.
+// Uses singleflight to prevent thundering herd when multiple goroutines
+// see the cache as expired simultaneously.
+//
+// Note on context cancellation: singleflight.Do executes the function once
+// and shares the result across all callers. The context passed here belongs
+// to the first caller; if that caller's context is cancelled, the HTTP request
+// inside fetchKeys will be aborted and all waiters receive the error. This is
+// acceptable because callers will retry on the next reconcile cycle. If this
+// becomes an issue, consider using context.WithoutCancel (Go 1.21+) to
+// detach the fetch from any single caller's lifetime.
 func (p *JWKSProvider) refreshKeysIfNeeded(ctx context.Context) error {
 	p.keysMutex.RLock()
 	needsRefresh := time.Since(p.lastFetch) > p.cacheTTL
@@ -203,7 +247,10 @@ func (p *JWKSProvider) refreshKeysIfNeeded(ctx context.Context) error {
 		return nil
 	}
 
-	return p.fetchKeys(ctx)
+	_, err, _ := p.refreshGroup.Do("jwks-refresh", func() (interface{}, error) {
+		return nil, p.fetchKeys(ctx)
+	})
+	return err
 }
 
 // fetchKeys fetches keys from JWKS endpoint
@@ -222,11 +269,11 @@ func (p *JWKSProvider) fetchKeys(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxJWKSResponseSize))
 		return fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKSResponseSize))
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
@@ -272,16 +319,29 @@ func (p *JWKSProvider) jwkToPublicKeyPEM(jwk *JWK) ([]byte, error) {
 	}
 }
 
-// rsaJWKToPEM converts an RSA JWK to PEM format
+// rsaJWKToPEM converts an RSA JWK to PEM format.
+// Validates that the modulus is at least 2048 bits and the exponent is
+// representable as a Go int to prevent insecure keys and overflows.
 func (p *JWKSProvider) rsaJWKToPEM(jwk *JWK) ([]byte, error) {
 	nBytes, err := base64.RawURLEncoding.DecodeString(jwk.N)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode modulus: %w", err)
 	}
 
+	// Reject RSA keys smaller than 2048 bits — anything less is cryptographically insecure.
+	if len(nBytes) < 256 { // 2048 bits = 256 bytes
+		return nil, fmt.Errorf("RSA modulus too small: %d bits (minimum 2048)", len(nBytes)*8)
+	}
+
 	eBytes, err := base64.RawURLEncoding.DecodeString(jwk.E)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode exponent: %w", err)
+	}
+
+	// Guard against exponent overflow: standard RSA exponents (e.g. 65537)
+	// fit in 3 bytes; anything beyond 8 bytes is malformed.
+	if len(eBytes) > 8 {
+		return nil, fmt.Errorf("RSA exponent too large: %d bytes (maximum 8)", len(eBytes))
 	}
 
 	var eInt int
@@ -297,7 +357,10 @@ func (p *JWKSProvider) rsaJWKToPEM(jwk *JWK) ([]byte, error) {
 	return marshalPublicKeyToPEM(publicKey)
 }
 
-// ecJWKToPEM converts an EC JWK to PEM format
+// ecJWKToPEM converts an EC JWK to PEM format.
+// Validates that the decoded (X, Y) point lies on the specified curve to
+// prevent invalid-curve attacks where a malicious JWKS endpoint serves
+// off-curve points that could cause ecdsa.Verify to behave unpredictably.
 func (p *JWKSProvider) ecJWKToPEM(jwk *JWK) ([]byte, error) {
 	var curve elliptic.Curve
 	switch jwk.Crv {
@@ -321,10 +384,18 @@ func (p *JWKSProvider) ecJWKToPEM(jwk *JWK) ([]byte, error) {
 		return nil, fmt.Errorf("failed to decode EC y coordinate: %w", err)
 	}
 
+	x := new(big.Int).SetBytes(xBytes)
+	y := new(big.Int).SetBytes(yBytes)
+
+	// Reject points not on the curve to prevent invalid-curve attacks.
+	if !curve.IsOnCurve(x, y) {
+		return nil, fmt.Errorf("EC point (X, Y) is not on curve %s — possible invalid-curve attack", jwk.Crv)
+	}
+
 	publicKey := &ecdsa.PublicKey{
 		Curve: curve,
-		X:     new(big.Int).SetBytes(xBytes),
-		Y:     new(big.Int).SetBytes(yBytes),
+		X:     x,
+		Y:     y,
 	}
 
 	return marshalPublicKeyToPEM(publicKey)

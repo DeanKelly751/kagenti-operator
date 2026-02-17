@@ -83,7 +83,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 	if sig == nil {
 		return &VerificationResult{
 			Verified: false,
-			Error:    fmt.Errorf("no signature provided"),
 			Details:  "AgentCard does not contain a signature",
 		}, nil
 	}
@@ -93,7 +92,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 	if err != nil {
 		return &VerificationResult{
 			Verified: false,
-			Error:    err,
 			Details:  fmt.Sprintf("Failed to decode JWS protected header: %v", err),
 		}, err
 	}
@@ -102,7 +100,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 	if err := validateAlgorithm(header.Algorithm); err != nil {
 		return &VerificationResult{
 			Verified: false,
-			Error:    err,
 			Details:  fmt.Sprintf("Algorithm validation failed: %v", err),
 		}, err
 	}
@@ -112,7 +109,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 	if block == nil {
 		return &VerificationResult{
 			Verified: false,
-			Error:    fmt.Errorf("failed to decode PEM block"),
 			Details:  "Invalid PEM format",
 		}, fmt.Errorf("failed to decode PEM block")
 	}
@@ -121,9 +117,20 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 	if err != nil {
 		return &VerificationResult{
 			Verified: false,
-			Error:    err,
 			Details:  fmt.Sprintf("Failed to parse public key: %v", err),
 		}, err
+	}
+
+	// Enforce minimum RSA key size (2048 bits) regardless of provider.
+	// The JWKS provider already checks this during key conversion, but the
+	// SecretProvider does not — centralising the check here protects both paths.
+	if rsaKey, ok := publicKey.(*rsa.PublicKey); ok {
+		if rsaKey.N.BitLen() < 2048 {
+			return &VerificationResult{
+				Verified: false,
+				Details:  fmt.Sprintf("RSA key too small: %d bits (minimum 2048)", rsaKey.N.BitLen()),
+			}, fmt.Errorf("RSA key too small: %d bits (minimum 2048)", rsaKey.N.BitLen())
+		}
 	}
 
 	// Create canonical payload (card JSON excluding "signatures")
@@ -131,7 +138,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 	if err != nil {
 		return &VerificationResult{
 			Verified: false,
-			Error:    err,
 			Details:  fmt.Sprintf("Failed to create canonical JSON payload: %v", err),
 		}, err
 	}
@@ -147,7 +153,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 	if err != nil {
 		return &VerificationResult{
 			Verified: false,
-			Error:    err,
 			Details:  fmt.Sprintf("Hash function lookup failed: %v", err),
 		}, err
 	}
@@ -162,7 +167,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 	if err != nil {
 		return &VerificationResult{
 			Verified: false,
-			Error:    err,
 			Details:  "Failed to decode JWS signature from base64url",
 		}, err
 	}
@@ -174,7 +178,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 		if !isRSAAlgorithm(header.Algorithm) {
 			return &VerificationResult{
 				Verified: false,
-				Error:    fmt.Errorf("algorithm mismatch: header alg=%q but key is RSA", header.Algorithm),
 				Details:  fmt.Sprintf("Algorithm mismatch: protected header specifies %q but public key is RSA (expected RS256/RS384/RS512/PS256/PS384/PS512)", header.Algorithm),
 			}, fmt.Errorf("algorithm mismatch: header alg=%q but key is RSA", header.Algorithm)
 		}
@@ -192,7 +195,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 		if !isECDSAAlgorithm(header.Algorithm) {
 			return &VerificationResult{
 				Verified: false,
-				Error:    fmt.Errorf("algorithm mismatch: header alg=%q but key is ECDSA", header.Algorithm),
 				Details:  fmt.Sprintf("Algorithm mismatch: protected header specifies %q but public key is ECDSA (expected ES256/ES384/ES512)", header.Algorithm),
 			}, fmt.Errorf("algorithm mismatch: header alg=%q but key is ECDSA", header.Algorithm)
 		}
@@ -200,7 +202,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 		if err := validateECDSACurve(pub, header.Algorithm); err != nil {
 			return &VerificationResult{
 				Verified: false,
-				Error:    err,
 				Details:  fmt.Sprintf("ECDSA curve/algorithm mismatch: %v", err),
 			}, err
 		}
@@ -214,7 +215,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 	default:
 		return &VerificationResult{
 			Verified: false,
-			Error:    fmt.Errorf("unsupported key type"),
 			Details:  "Public key type not supported (expected RSA or ECDSA)",
 		}, fmt.Errorf("unsupported key type")
 	}
@@ -227,7 +227,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 
 	if !verified {
 		result.Details = "JWS signature verification failed"
-		result.Error = fmt.Errorf("JWS signature verification failed")
 	} else {
 		result.Details = fmt.Sprintf("JWS signature verified successfully (alg=%s, kid=%s)", header.Algorithm, header.KeyID)
 	}
@@ -344,19 +343,25 @@ func validateECDSACurve(pub *ecdsa.PublicKey, alg string) error {
 	return nil
 }
 
-// parsePublicKey parses a public key from DER format
+// parsePublicKey parses a public key from DER format.
+// Tries PKIX (SubjectPublicKeyInfo) first, then falls back to PKCS#1 RSA format.
 func parsePublicKey(derBytes []byte) (crypto.PublicKey, error) {
-	// Try parsing as PKIX first
 	if key, err := x509.ParsePKIXPublicKey(derBytes); err == nil {
 		return key, nil
 	}
 
-	// Try parsing as PKCS1 RSA public key
-	if key, err := x509.ParsePKCS1PublicKey(derBytes); err == nil {
+	key, err := x509.ParsePKCS1PublicKey(derBytes)
+	if err == nil {
 		return key, nil
 	}
 
-	return nil, fmt.Errorf("failed to parse public key")
+	return nil, fmt.Errorf("failed to parse public key (tried PKIX and PKCS#1): %w", err)
+}
+
+// CreateCanonicalCardJSON is the exported entry point for building the JWS payload.
+// Tests should use this instead of maintaining a parallel canonical JSON implementation.
+func CreateCanonicalCardJSON(cardData *agentv1alpha1.AgentCardData) ([]byte, error) {
+	return createCanonicalCardJSON(cardData)
 }
 
 // createCanonicalCardJSON builds the JWS payload: sorted-key, compact JSON
@@ -386,6 +391,10 @@ func createCanonicalCardJSON(cardData *agentv1alpha1.AgentCardData) ([]byte, err
 
 // removeEmptyFields strips nil values and empty collections to match
 // the Python signer's behavior of omitting absent fields.
+//
+// WARNING: This strips absent/empty fields to match sign-agent-card.py.
+// If the A2A spec changes to require explicit empty values in the payload,
+// this function must be updated alongside sign-agent-card.py.
 func removeEmptyFields(m map[string]interface{}) map[string]interface{} {
 	result := make(map[string]interface{})
 	for k, v := range m {
@@ -407,6 +416,7 @@ func removeEmptyFields(m map[string]interface{}) map[string]interface{} {
 				result[k] = val
 			}
 		default:
+			// bool (false), float64 (0), and other non-nil/non-empty types are preserved.
 			result[k] = v
 		}
 	}
@@ -472,7 +482,10 @@ func marshalValue(v interface{}) ([]byte, error) {
 	}
 }
 
-// toGenericValue converts any value to a generic JSON-compatible type.
+// toGenericValue converts any value to a generic JSON-compatible type via a
+// Marshal → Unmarshal round-trip. This fallback path is only hit for types
+// not handled by marshalValue's explicit type switch (e.g., json.Number or
+// custom types produced by unusual JSON decoders).
 func toGenericValue(v interface{}) (interface{}, error) {
 	jsonBytes, err := json.Marshal(v)
 	if err != nil {

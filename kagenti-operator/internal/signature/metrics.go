@@ -52,12 +52,21 @@ var (
 )
 
 func init() {
-	// Register custom metrics with the global Prometheus registry
-	metrics.Registry.MustRegister(
+	// Register custom metrics with the global Prometheus registry.
+	// Use Register (not MustRegister) and ignore AlreadyRegisteredError to prevent
+	// panics when the package is imported from multiple test suites.
+	// Non-AlreadyRegisteredError errors are re-panicked because they indicate a real problem.
+	for _, c := range []prometheus.Collector{
 		SignatureVerificationTotal,
 		SignatureVerificationDuration,
 		SignatureVerificationErrors,
-	)
+	} {
+		if err := metrics.Registry.Register(c); err != nil {
+			if _, ok := err.(prometheus.AlreadyRegisteredError); !ok {
+				panic(err) // Re-panic for unexpected registration errors
+			}
+		}
+	}
 }
 
 // RecordVerification records a signature verification result

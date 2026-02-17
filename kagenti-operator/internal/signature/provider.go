@@ -24,12 +24,19 @@ import (
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 )
 
-// VerificationResult contains the result of signature verification
+// VerificationResult contains the result of signature verification.
+//
+// Contract:
+//   - The returned error from Provider.VerifySignature signals infrastructure failures
+//     (secret not found, network error, client not initialised). Callers should treat
+//     a non-nil error as a transient/retriable problem.
+//   - Crypto outcomes (wrong key, tampered payload, no signature) are conveyed via
+//     Verified=false + Details. The returned error is nil in these cases.
+//   - When Verified=true, Details carries a human-readable summary of the verification.
 type VerificationResult struct {
 	Verified bool
 	KeyID    string
 	SpiffeID string // SPIFFE ID extracted from the JWS protected header
-	Error    error
 	Details  string
 }
 
