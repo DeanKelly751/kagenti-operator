@@ -64,6 +64,9 @@ func (p *SecretProvider) SetClient(c client.Client) {
 
 // VerifySignature verifies JWS signatures using public keys from a Kubernetes Secret.
 // Iterates over the signatures array; returns success on the first verified signature.
+//
+// IMPORTANT: This method must never log secret key material. Only the secret name,
+// namespace, and key names (not values) are logged.
 func (p *SecretProvider) VerifySignature(ctx context.Context, cardData *agentv1alpha1.AgentCardData, signatures []agentv1alpha1.AgentCardSignature) (*VerificationResult, error) {
 	secretLogger.Info("Verifying JWS signature using Kubernetes Secret",
 		"secret", p.secretName,
@@ -72,7 +75,6 @@ func (p *SecretProvider) VerifySignature(ctx context.Context, cardData *agentv1a
 	if p.client == nil {
 		return &VerificationResult{
 			Verified: false,
-			Error:    fmt.Errorf("kubernetes client not initialized"),
 			Details:  "Internal error: client not set",
 		}, fmt.Errorf("kubernetes client not initialized")
 	}
@@ -88,7 +90,6 @@ func (p *SecretProvider) VerifySignature(ctx context.Context, cardData *agentv1a
 			result.Details = "AgentCard has no signatures (audit mode: allowed)"
 			return result, nil
 		}
-		result.Error = fmt.Errorf("no signatures provided")
 		return result, nil
 	}
 
@@ -108,7 +109,6 @@ func (p *SecretProvider) VerifySignature(ctx context.Context, cardData *agentv1a
 		}
 		return &VerificationResult{
 			Verified: false,
-			Error:    err,
 			Details:  fmt.Sprintf("Failed to fetch secret: %v", err),
 		}, err
 	}
@@ -137,7 +137,12 @@ func (p *SecretProvider) VerifySignature(ctx context.Context, cardData *agentv1a
 				"keyID", kid, "error", verifyErr)
 		}
 
-		// Fallback: try all keys in the secret
+		// Fallback: try all keys in the secret.
+		// Warn if the secret contains many keys — brute-forcing is O(keys × signatures).
+		if len(secret.Data) > 10 {
+			secretLogger.Info("WARNING: Secret contains many keys, brute-force fallback may be slow",
+				"secret", p.secretName, "keyCount", len(secret.Data))
+		}
 		for keyName, data := range secret.Data {
 			if keyErr == nil && string(data) == string(keyData) {
 				continue // skip the key we already tried
@@ -164,7 +169,6 @@ func (p *SecretProvider) VerifySignature(ctx context.Context, cardData *agentv1a
 	}
 	return &VerificationResult{
 		Verified: false,
-		Error:    err,
 		Details:  err.Error(),
 	}, err
 }
@@ -184,7 +188,7 @@ func (p *SecretProvider) getKeyFromSecret(secret *corev1.Secret, keyID string) (
 		if data, ok := secret.Data[keyID]; ok {
 			return data, nil
 		}
-		// Also try with common extensions
+		// Try common PEM key file extensions used by cert-manager, openssl, and ssh-keygen
 		for _, ext := range []string{".pem", ".pub", ".key"} {
 			if data, ok := secret.Data[keyID+ext]; ok {
 				return data, nil

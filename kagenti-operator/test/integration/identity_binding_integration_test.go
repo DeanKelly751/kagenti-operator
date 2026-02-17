@@ -21,6 +21,7 @@ import (
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 	"github.com/kagenti/operator/internal/controller"
+	"github.com/kagenti/operator/internal/signature"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -28,27 +29,19 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 )
 
 var (
-	testNamespace = fmt.Sprintf("ib-test-%d", time.Now().UnixNano()%100000)
-)
-
-const (
-	trustDomain = "cluster.local"
-	timeout     = 30 * time.Second
-	interval    = 500 * time.Millisecond
-)
-
-var (
-	k8sClient client.Client
-	scheme    = runtime.NewScheme()
+	k8sClient     client.Client
+	scheme        = runtime.NewScheme()
+	testNamespace = "identity-binding-test"
+	trustDomain   = "cluster.local"
 )
 
 func init() {
@@ -57,18 +50,12 @@ func init() {
 }
 
 func setupClient(t *testing.T) {
-	// Use KUBECONFIG or default location
-	kubeconfig := os.Getenv("KUBECONFIG")
-	if kubeconfig == "" {
-		kubeconfig = os.Getenv("HOME") + "/.kube/config"
-	}
-
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	cfg, err := config.GetConfig()
 	if err != nil {
-		t.Fatalf("Failed to build config: %v", err)
+		t.Fatalf("Failed to get kubeconfig: %v", err)
 	}
 
-	k8sClient, err = client.New(config, client.Options{Scheme: scheme})
+	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
@@ -81,29 +68,11 @@ func setupNamespace(t *testing.T, ctx context.Context) {
 		},
 	}
 
-	// Check if namespace exists
-	existingNs := &corev1.Namespace{}
-	err := k8sClient.Get(ctx, types.NamespacedName{Name: testNamespace}, existingNs)
-	if err == nil {
-		// Namespace exists, delete it
-		_ = k8sClient.Delete(ctx, existingNs)
-
-		// Wait for namespace to be fully deleted
-		for i := 0; i < 30; i++ {
-			time.Sleep(time.Second)
-			err = k8sClient.Get(ctx, types.NamespacedName{Name: testNamespace}, existingNs)
-			if errors.IsNotFound(err) {
-				break
-			}
-		}
+	err := k8sClient.Create(ctx, ns)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		t.Fatalf("Failed to create test namespace: %v", err)
 	}
-
-	// Create fresh namespace
-	err = k8sClient.Create(ctx, ns)
-	if err != nil {
-		t.Fatalf("Failed to create namespace: %v", err)
-	}
-	t.Logf("✓ Created test namespace: %s", testNamespace)
+	t.Logf("Using test namespace: %s", testNamespace)
 }
 
 func cleanupNamespace(t *testing.T, ctx context.Context) {
@@ -112,21 +81,42 @@ func cleanupNamespace(t *testing.T, ctx context.Context) {
 			Name: testNamespace,
 		},
 	}
-	_ = k8sClient.Delete(ctx, ns)
-	t.Logf("✓ Cleaned up test namespace: %s", testNamespace)
+	if err := k8sClient.Delete(ctx, ns); err != nil {
+		t.Logf("Warning: failed to delete test namespace: %v", err)
+	}
 }
 
-// mockFetcher implements agentcard.Fetcher for testing
+// mockFetcher returns minimal valid AgentCardData so the reconciler does not
+// panic on nil cardData when it reaches the fetch → verify → bind path.
+//
+// Known limitation: this mock returns hardcoded data regardless of the actual
+// workload, so integration tests exercise the reconciler's verify → bind logic
+// but do NOT exercise the full fetch → sign → verify → bind end-to-end path.
 type mockFetcher struct{}
 
-func (m *mockFetcher) Fetch(ctx context.Context, protocol, url string) (*agentv1alpha1.AgentCardData, error) {
+func (f *mockFetcher) Fetch(_ context.Context, _, _ string) (*agentv1alpha1.AgentCardData, error) {
 	return &agentv1alpha1.AgentCardData{
-		Name:        "Test Agent",
-		Description: "Integration test agent",
-		Version:     "1.0.0",
-		URL:         url,
+		Name: "test-agent",
+		URL:  "http://test:8000",
 	}, nil
 }
+
+// mockSignatureProvider returns a controlled VerificationResult so the reconciler
+// exercises the full binding path without requiring real JWS signatures.
+type mockSignatureProvider struct {
+	spiffeID string
+	verified bool
+}
+
+func (p *mockSignatureProvider) VerifySignature(_ context.Context, _ *agentv1alpha1.AgentCardData, _ []agentv1alpha1.AgentCardSignature) (*signature.VerificationResult, error) {
+	return &signature.VerificationResult{
+		Verified: p.verified,
+		SpiffeID: p.spiffeID,
+		Details:  "mock provider",
+	}, nil
+}
+
+func (p *mockSignatureProvider) Name() string { return "mock" }
 
 func TestIdentityBindingIntegration(t *testing.T) {
 	ctx := context.Background()
@@ -137,13 +127,11 @@ func TestIdentityBindingIntegration(t *testing.T) {
 
 	t.Run("Test1_MatchingBindingEvaluation", testMatchingBindingEvaluation)
 	t.Run("Test2_NonMatchingBindingEvaluation", testNonMatchingBindingEvaluation)
-	t.Run("Test3_StrictBindingEnforcement", testStrictBindingEnforcement)
-	t.Run("Test4_BindingRestoration", testBindingRestoration)
 }
 
 func testMatchingBindingEvaluation(t *testing.T) {
 	ctx := context.Background()
-	agentName := "test-match-agent"
+	deploymentName := "test-match-deploy"
 	cardName := "test-match-card"
 	saName := "test-sa"
 
@@ -151,24 +139,30 @@ func testMatchingBindingEvaluation(t *testing.T) {
 	t.Log("TEST 1: Matching Binding Evaluation")
 	t.Log("========================================")
 
-	// Create Agent
-	agent := createTestAgent(t, ctx, agentName, saName)
-	defer deleteResource(ctx, agent)
+	// Create Deployment with agent labels
+	deployment := createTestDeployment(t, ctx, deploymentName, saName, 1)
+	defer deleteResource(ctx, deployment)
 
 	// Create Service
-	service := createTestService(t, ctx, agentName)
+	service := createTestService(t, ctx, deploymentName)
 	defer deleteResource(ctx, service)
 
-	// Create AgentCard with matching SPIFFE ID
+	// Create AgentCard with matching SPIFFE ID using targetRef
 	expectedSpiffeID := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, testNamespace, saName)
-	agentCard := createTestAgentCard(t, ctx, cardName, agentName, []agentv1alpha1.SpiffeID{agentv1alpha1.SpiffeID(expectedSpiffeID)}, false)
+	agentCard := createTestAgentCard(t, ctx, cardName, deploymentName, []agentv1alpha1.SpiffeID{agentv1alpha1.SpiffeID(expectedSpiffeID)}, false)
 	defer deleteResource(ctx, agentCard)
 
-	// Create and run AgentCard reconciler
+	// Create and run AgentCard reconciler with a mock signature provider that
+	// returns the expected SPIFFE ID, so the reconciler exercises the full
+	// binding evaluation path (not just pre-set status).
 	reconciler := &controller.AgentCardReconciler{
 		Client:       k8sClient,
 		Scheme:       scheme,
 		AgentFetcher: &mockFetcher{},
+		SignatureProvider: &mockSignatureProvider{
+			spiffeID: expectedSpiffeID,
+			verified: true,
+		},
 	}
 
 	// First reconcile adds finalizer
@@ -177,10 +171,7 @@ func testMatchingBindingEvaluation(t *testing.T) {
 	})
 	time.Sleep(100 * time.Millisecond)
 
-	// Simulate a verified signature with SPIFFE ID in JWS protected header
-	simulateJWSSpiffeID(t, ctx, cardName, expectedSpiffeID)
-
-	// Subsequent reconciles evaluate binding (with JWS SPIFFE ID now in status)
+	// Subsequent reconciles evaluate binding via the mock provider
 	for i := 0; i < 2; i++ {
 		_, _ = reconciler.Reconcile(ctx, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: cardName, Namespace: testNamespace},
@@ -213,7 +204,7 @@ func testMatchingBindingEvaluation(t *testing.T) {
 
 func testNonMatchingBindingEvaluation(t *testing.T) {
 	ctx := context.Background()
-	agentName := "test-nomatch-agent"
+	deploymentName := "test-nomatch-deploy"
 	cardName := "test-nomatch-card"
 	saName := "test-sa"
 
@@ -221,24 +212,32 @@ func testNonMatchingBindingEvaluation(t *testing.T) {
 	t.Log("TEST 2: Non-Matching Binding Evaluation")
 	t.Log("========================================")
 
-	// Create Agent
-	agent := createTestAgent(t, ctx, agentName, saName)
-	defer deleteResource(ctx, agent)
+	// Create Deployment with agent labels
+	deployment := createTestDeployment(t, ctx, deploymentName, saName, 1)
+	defer deleteResource(ctx, deployment)
 
 	// Create Service
-	service := createTestService(t, ctx, agentName)
+	service := createTestService(t, ctx, deploymentName)
 	defer deleteResource(ctx, service)
 
-	// Create AgentCard with NON-matching SPIFFE ID in allowlist
+	// Create AgentCard with NON-matching SPIFFE ID in allowlist using targetRef
 	wrongSpiffeID := fmt.Sprintf("spiffe://%s/ns/other/sa/other-sa", trustDomain)
-	agentCard := createTestAgentCard(t, ctx, cardName, agentName, []agentv1alpha1.SpiffeID{agentv1alpha1.SpiffeID(wrongSpiffeID)}, false)
+	agentCard := createTestAgentCard(t, ctx, cardName, deploymentName, []agentv1alpha1.SpiffeID{agentv1alpha1.SpiffeID(wrongSpiffeID)}, false)
 	defer deleteResource(ctx, agentCard)
 
-	// Create and run AgentCard reconciler
+	// The workload's actual SPIFFE ID (from mock provider) does NOT match the allowlist
+	actualSpiffeID := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, testNamespace, saName)
+
+	// Create and run AgentCard reconciler with a mock provider returning the actual
+	// (non-matching) SPIFFE ID
 	reconciler := &controller.AgentCardReconciler{
 		Client:       k8sClient,
 		Scheme:       scheme,
 		AgentFetcher: &mockFetcher{},
+		SignatureProvider: &mockSignatureProvider{
+			spiffeID: actualSpiffeID,
+			verified: true,
+		},
 	}
 
 	// First reconcile adds finalizer
@@ -246,10 +245,6 @@ func testNonMatchingBindingEvaluation(t *testing.T) {
 		NamespacedName: types.NamespacedName{Name: cardName, Namespace: testNamespace},
 	})
 	time.Sleep(100 * time.Millisecond)
-
-	// Simulate JWS SPIFFE ID that does NOT match the allowlist
-	actualSpiffeID := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, testNamespace, saName)
-	simulateJWSSpiffeID(t, ctx, cardName, actualSpiffeID)
 
 	// Reconcile again to evaluate binding
 	reconciler.Reconcile(ctx, reconcile.Request{
@@ -278,295 +273,7 @@ func testNonMatchingBindingEvaluation(t *testing.T) {
 	t.Log("✓ TEST 2 PASSED: Non-matching binding evaluated as NotBound")
 }
 
-func testStrictBindingEnforcement(t *testing.T) {
-	ctx := context.Background()
-	agentName := "test-strict-agent"
-	cardName := "test-strict-card"
-	saName := "test-sa"
-
-	t.Log("\n========================================")
-	t.Log("TEST 3: Strict Binding Enforcement")
-	t.Log("========================================")
-
-	// Create Agent
-	agent := createTestAgent(t, ctx, agentName, saName)
-	defer deleteResource(ctx, agent)
-
-	// Create Deployment for the agent (normally created by Agent controller)
-	deployment := createTestDeployment(t, ctx, agentName, 3)
-	defer deleteResource(ctx, deployment)
-
-	// Create AgentCard with STRICT binding and NON-matching SPIFFE ID
-	wrongSpiffeID := fmt.Sprintf("spiffe://%s/ns/other/sa/other-sa", trustDomain)
-	agentCard := createTestAgentCard(t, ctx, cardName, agentName, []agentv1alpha1.SpiffeID{agentv1alpha1.SpiffeID(wrongSpiffeID)}, true)
-	defer deleteResource(ctx, agentCard)
-
-	// First, evaluate binding with AgentCard controller
-	cardReconciler := &controller.AgentCardReconciler{
-		Client:       k8sClient,
-		Scheme:       scheme,
-		AgentFetcher: &mockFetcher{},
-	}
-
-	// Reconcile multiple times to ensure binding is evaluated
-	for i := 0; i < 3; i++ {
-		cardReconciler.Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: cardName, Namespace: testNamespace},
-		})
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// Verify AgentCard shows NotBound
-	card := &agentv1alpha1.AgentCard{}
-	k8sClient.Get(ctx, types.NamespacedName{Name: cardName, Namespace: testNamespace}, card)
-
-	bound := false
-	if card.Status.BindingStatus != nil {
-		bound = card.Status.BindingStatus.Bound
-	}
-	strict := false
-	if card.Spec.IdentityBinding != nil {
-		strict = card.Spec.IdentityBinding.Strict
-	}
-	t.Logf("  AgentCard binding status: Bound=%v, Strict=%v", bound, strict)
-
-	// Now enforce with Agent controller
-	agentReconciler := &controller.AgentReconciler{
-		Client:   k8sClient,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
-	}
-
-	// Reconcile Agent multiple times to handle finalizer and enforcement
-	for i := 0; i < 3; i++ {
-		agentReconciler.Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: agentName, Namespace: testNamespace},
-		})
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// Verify deployment scaled to 0
-	dep := &appsv1.Deployment{}
-	err := k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: testNamespace}, dep)
-	if err != nil {
-		t.Fatalf("Failed to get Deployment: %v", err)
-	}
-
-	if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 0 {
-		replicas := int32(-1)
-		if dep.Spec.Replicas != nil {
-			replicas = *dep.Spec.Replicas
-		}
-		t.Fatalf("❌ Expected replicas=0, got replicas=%d", replicas)
-	}
-
-	t.Logf("✓ Deployment replicas: %d", *dep.Spec.Replicas)
-	t.Logf("✓ Disabled-by annotation: %s", dep.Annotations[controller.AnnotationDisabledBy])
-
-	// Verify Agent status
-	ag := &agentv1alpha1.Agent{}
-	err = k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: testNamespace}, ag)
-	if err != nil {
-		t.Fatalf("Failed to get Agent: %v", err)
-	}
-
-	if ag.Status.BindingEnforcement == nil || !ag.Status.BindingEnforcement.DisabledByBinding {
-		t.Fatal("❌ Agent status should show DisabledByBinding=true")
-	}
-
-	t.Logf("✓ Agent DisabledByBinding: %v", ag.Status.BindingEnforcement.DisabledByBinding)
-	if ag.Status.BindingEnforcement.OriginalReplicas != nil {
-		t.Logf("✓ Agent OriginalReplicas: %d", *ag.Status.BindingEnforcement.OriginalReplicas)
-	}
-	t.Log("✓ TEST 3 PASSED: Strict binding failure scales deployment to 0")
-}
-
-func testBindingRestoration(t *testing.T) {
-	ctx := context.Background()
-	agentName := "test-restore-agent"
-	cardName := "test-restore-card"
-	saName := "test-sa"
-
-	t.Log("\n========================================")
-	t.Log("TEST 4: Binding Restoration")
-	t.Log("========================================")
-
-	// Create Agent with binding enforcement status already set (simulating previous disable)
-	agent := createTestAgent(t, ctx, agentName, saName)
-	defer deleteResource(ctx, agent)
-
-	// Update Agent status to show it was disabled
-	agent.Status.BindingEnforcement = &agentv1alpha1.BindingEnforcementStatus{
-		DisabledByBinding: true,
-		OriginalReplicas:  ptr.To(int32(3)),
-		DisabledReason:    "Previous binding failure",
-	}
-	k8sClient.Status().Update(ctx, agent)
-
-	// Create Deployment scaled to 0 with binding annotations
-	deployment := createTestDeployment(t, ctx, agentName, 0)
-	deployment.Annotations = map[string]string{
-		controller.AnnotationDisabledBy:     controller.DisabledByIdentityBinding,
-		controller.AnnotationDisabledReason: "Previous binding failure",
-	}
-	k8sClient.Update(ctx, deployment)
-	defer deleteResource(ctx, deployment)
-
-	t.Log("  Initial state: Deployment scaled to 0, Agent marked as disabled")
-
-	// Create AgentCard with MATCHING SPIFFE ID (binding should pass now)
-	expectedSpiffeID := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, testNamespace, saName)
-	agentCard := createTestAgentCard(t, ctx, cardName, agentName, []agentv1alpha1.SpiffeID{agentv1alpha1.SpiffeID(expectedSpiffeID)}, true)
-	defer deleteResource(ctx, agentCard)
-
-	// Evaluate binding with AgentCard controller (should be Bound now)
-	cardReconciler := &controller.AgentCardReconciler{
-		Client:       k8sClient,
-		Scheme:       scheme,
-		AgentFetcher: &mockFetcher{},
-	}
-
-	// First reconcile adds finalizer
-	cardReconciler.Reconcile(ctx, reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: cardName, Namespace: testNamespace},
-	})
-	time.Sleep(100 * time.Millisecond)
-
-	// Simulate a verified signature with matching SPIFFE ID in JWS header
-	simulateJWSSpiffeID(t, ctx, cardName, expectedSpiffeID)
-
-	// Subsequent reconciles evaluate binding
-	for i := 0; i < 2; i++ {
-		cardReconciler.Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: cardName, Namespace: testNamespace},
-		})
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// Verify binding is now Bound
-	card := &agentv1alpha1.AgentCard{}
-	k8sClient.Get(ctx, types.NamespacedName{Name: cardName, Namespace: testNamespace}, card)
-	if card.Status.BindingStatus == nil || !card.Status.BindingStatus.Bound {
-		t.Fatal("❌ AgentCard should be Bound after fixing SPIFFE ID")
-	}
-	t.Logf("  AgentCard now Bound: %v", card.Status.BindingStatus.Bound)
-
-	// Restore with Agent controller
-	agentReconciler := &controller.AgentReconciler{
-		Client:   k8sClient,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
-	}
-
-	// Refresh agent from cluster and ensure binding enforcement status is set
-	freshAgent := &agentv1alpha1.Agent{}
-	k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: testNamespace}, freshAgent)
-
-	// Ensure the binding enforcement status persists (may have been cleared by prior reconcile)
-	if freshAgent.Status.BindingEnforcement == nil || !freshAgent.Status.BindingEnforcement.DisabledByBinding {
-		freshAgent.Status.BindingEnforcement = &agentv1alpha1.BindingEnforcementStatus{
-			DisabledByBinding: true,
-			OriginalReplicas:  ptr.To(int32(3)),
-			DisabledReason:    "Previous binding failure",
-		}
-		k8sClient.Status().Update(ctx, freshAgent)
-	}
-
-	// Reconcile Agent - this should restore since all bindings now pass
-	for i := 0; i < 3; i++ {
-		agentReconciler.Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: agentName, Namespace: testNamespace},
-		})
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// Verify deployment restored
-	dep := &appsv1.Deployment{}
-	err := k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: testNamespace}, dep)
-	if err != nil {
-		t.Fatalf("Failed to get Deployment: %v", err)
-	}
-
-	if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
-		replicas := int32(-1)
-		if dep.Spec.Replicas != nil {
-			replicas = *dep.Spec.Replicas
-		}
-		t.Fatalf("❌ Expected replicas=3 (restored), got replicas=%d", replicas)
-	}
-
-	t.Logf("✓ Deployment replicas restored: %d", *dep.Spec.Replicas)
-
-	// Verify annotations removed
-	if _, exists := dep.Annotations[controller.AnnotationDisabledBy]; exists {
-		t.Fatal("❌ Disabled-by annotation should be removed")
-	}
-	t.Log("✓ Binding annotations removed")
-
-	// Verify Agent status cleared
-	ag := &agentv1alpha1.Agent{}
-	k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: testNamespace}, ag)
-
-	if ag.Status.BindingEnforcement != nil {
-		t.Fatal("❌ Agent BindingEnforcement status should be cleared")
-	}
-
-	t.Log("✓ Agent BindingEnforcement status cleared")
-	t.Log("✓ TEST 4 PASSED: Binding restoration works correctly")
-}
-
 // Helper functions
-
-func createTestAgent(t *testing.T, ctx context.Context, name, saName string) *agentv1alpha1.Agent {
-	agent := &agentv1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: testNamespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/name":    name,
-				"kagenti.io/type":           "agent",
-				"kagenti.io/agent-protocol": "a2a",
-			},
-		},
-		Spec: agentv1alpha1.AgentSpec{
-			Replicas: ptr.To(int32(3)),
-			PodTemplateSpec: &corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					ServiceAccountName: saName,
-					Containers: []corev1.Container{
-						{
-							Name:  "agent",
-							Image: "test-image:latest",
-						},
-					},
-				},
-			},
-			Image: "test-image:latest",
-		},
-	}
-
-	err := k8sClient.Create(ctx, agent)
-	if err != nil {
-		t.Fatalf("Failed to create Agent: %v", err)
-	}
-
-	// Fetch the agent to get the resource version
-	freshAgent := &agentv1alpha1.Agent{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNamespace}, freshAgent); err != nil {
-		t.Fatalf("Failed to get Agent for status update: %v", err)
-	}
-
-	// Set status to Ready
-	freshAgent.Status.DeploymentStatus = &agentv1alpha1.DeploymentStatus{
-		Phase: agentv1alpha1.PhaseReady,
-	}
-	if err := k8sClient.Status().Update(ctx, freshAgent); err != nil {
-		t.Fatalf("Failed to update Agent status: %v", err)
-	}
-
-	t.Logf("  Created Agent: %s (SA: %s)", name, saName)
-	return freshAgent
-}
 
 func createTestService(t *testing.T, ctx context.Context, name string) *corev1.Service {
 	service := &corev1.Service{
@@ -591,7 +298,7 @@ func createTestService(t *testing.T, ctx context.Context, name string) *corev1.S
 	return service
 }
 
-func createTestAgentCard(t *testing.T, ctx context.Context, name, agentName string, allowedIDs []agentv1alpha1.SpiffeID, strict bool) *agentv1alpha1.AgentCard {
+func createTestAgentCard(t *testing.T, ctx context.Context, name, deploymentName string, allowedIDs []agentv1alpha1.SpiffeID, strict bool) *agentv1alpha1.AgentCard {
 	agentCard := &agentv1alpha1.AgentCard{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -599,11 +306,10 @@ func createTestAgentCard(t *testing.T, ctx context.Context, name, agentName stri
 		},
 		Spec: agentv1alpha1.AgentCardSpec{
 			SyncPeriod: "30s",
-			Selector: agentv1alpha1.AgentSelector{
-				MatchLabels: map[string]string{
-					"app.kubernetes.io/name": agentName,
-					"kagenti.io/type":        "agent",
-				},
+			TargetRef: &agentv1alpha1.TargetRef{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       deploymentName,
 			},
 			IdentityBinding: &agentv1alpha1.IdentityBinding{
 				AllowedSpiffeIDs: allowedIDs,
@@ -621,8 +327,12 @@ func createTestAgentCard(t *testing.T, ctx context.Context, name, agentName stri
 	return agentCard
 }
 
-func createTestDeployment(t *testing.T, ctx context.Context, name string, replicas int32) *appsv1.Deployment {
-	labels := map[string]string{"app.kubernetes.io/name": name}
+func createTestDeployment(t *testing.T, ctx context.Context, name, saName string, replicas int32) *appsv1.Deployment {
+	labels := map[string]string{
+		"app.kubernetes.io/name": name,
+		"kagenti.io/type":        "agent",
+		"kagenti.io/protocol":    "a2a",
+	}
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -631,12 +341,13 @@ func createTestDeployment(t *testing.T, ctx context.Context, name string, replic
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptr.To(replicas),
-			Selector: &metav1.LabelSelector{MatchLabels: labels},
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": name}},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": name}},
 				Spec: corev1.PodSpec{
+					ServiceAccountName: saName,
 					Containers: []corev1.Container{
-						{Name: "agent", Image: "test-image:latest"},
+						{Name: "agent", Image: "registry.k8s.io/pause:3.9"},
 					},
 				},
 			},
@@ -650,24 +361,6 @@ func createTestDeployment(t *testing.T, ctx context.Context, name string, replic
 
 	t.Logf("  Created Deployment: %s (replicas=%d)", name, replicas)
 	return deployment
-}
-
-// simulateJWSSpiffeID pre-sets the AgentCard status to simulate a verified signature
-// with a SPIFFE ID in the JWS protected header. This is needed because the integration
-// tests don't perform actual signing — the SPIFFE ID now comes exclusively from the
-// JWS protected header (no fallback paths).
-func simulateJWSSpiffeID(t *testing.T, ctx context.Context, cardName, spiffeID string) {
-	card := &agentv1alpha1.AgentCard{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cardName, Namespace: testNamespace}, card); err != nil {
-		t.Fatalf("Failed to get AgentCard for SPIFFE ID simulation: %v", err)
-	}
-	validSig := true
-	card.Status.ValidSignature = &validSig
-	card.Status.SignatureSpiffeID = spiffeID
-	if err := k8sClient.Status().Update(ctx, card); err != nil {
-		t.Fatalf("Failed to simulate JWS SPIFFE ID: %v", err)
-	}
-	t.Logf("  Simulated JWS SPIFFE ID: %s", spiffeID)
 }
 
 func deleteResource(ctx context.Context, obj client.Object) {

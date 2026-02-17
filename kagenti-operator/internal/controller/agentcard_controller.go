@@ -69,10 +69,9 @@ const (
 	DefaultSyncPeriod = 30 * time.Second
 
 	// Binding status reasons
-	ReasonBound                 = "Bound"
-	ReasonNotBound              = "NotBound"
-	ReasonAgentNotFound         = "AgentNotFound"
-	ReasonMultipleAgentsMatched = "MultipleAgentsMatched"
+	ReasonBound         = "Bound"
+	ReasonNotBound      = "NotBound"
+	ReasonAgentNotFound = "AgentNotFound"
 
 	// Signature verification reasons
 	ReasonSignatureValid        = "SignatureValid"
@@ -104,10 +103,10 @@ type WorkloadInfo struct {
 // AgentCardReconciler reconciles an AgentCard object
 type AgentCardReconciler struct {
 	client.Client
-	Scheme               *runtime.Scheme
-	AgentFetcher         agentcard.Fetcher
-	Recorder             record.EventRecorder
-	EnableLegacyAgentCRD bool
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
+
+	AgentFetcher agentcard.Fetcher
 
 	// Signature verification
 	SignatureProvider  signature.Provider
@@ -118,14 +117,13 @@ type AgentCardReconciler struct {
 // +kubebuilder:rbac:groups=agent.kagenti.dev,resources=agentcards,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agent.kagenti.dev,resources=agentcards/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agent.kagenti.dev,resources=agentcards/finalizers,verbs=update
-// +kubebuilder:rbac:groups=agent.kagenti.dev,resources=agents,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
 func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	agentCardLogger.Info("Reconciling AgentCard", "namespacedName", req.NamespacedName)
+	agentCardLogger.V(1).Info("Reconciling AgentCard", "namespacedName", req.NamespacedName)
 
 	agentCard := &agentv1alpha1.AgentCard{}
 	err := r.Get(ctx, req.NamespacedName, agentCard)
@@ -148,18 +146,14 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
-	// Get workload using targetRef (preferred) or selector (legacy)
+	// Get workload via targetRef
 	workload, err := r.getWorkload(ctx, agentCard)
 	if err != nil {
 		agentCardLogger.Error(err, "Failed to get workload", "agentCard", agentCard.Name)
 
 		// Determine the appropriate reason based on error type
 		var reason, message, conditionReason string
-		if errors.Is(err, ErrMultipleAgentsMatched) {
-			reason = ReasonMultipleAgentsMatched
-			message = fmt.Sprintf("Cannot evaluate binding: %s", err.Error())
-			conditionReason = "MultipleAgentsMatched"
-		} else if errors.Is(err, ErrWorkloadNotFound) {
+		if errors.Is(err, ErrWorkloadNotFound) {
 			reason = ReasonAgentNotFound
 			message = "No matching workload found"
 			conditionReason = "WorkloadNotFound"
@@ -329,31 +323,14 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	return ctrl.Result{RequeueAfter: syncPeriod}, nil
 }
 
-// ErrMultipleAgentsMatched is returned when multiple agents match the selector
-var ErrMultipleAgentsMatched = fmt.Errorf("multiple agents match selector")
-
-// getWorkload fetches the workload using targetRef or falls back to selector
+// getWorkload fetches the workload using targetRef.
+// The deprecated selector field is no longer supported — use targetRef for explicit workload references.
 func (r *AgentCardReconciler) getWorkload(ctx context.Context, agentCard *agentv1alpha1.AgentCard) (*WorkloadInfo, error) {
-	// Prefer targetRef if specified
 	if agentCard.Spec.TargetRef != nil {
 		return r.getWorkloadByTargetRef(ctx, agentCard.Namespace, agentCard.Spec.TargetRef)
 	}
 
-	// Fall back to deprecated selector with warning
-	if agentCard.Spec.Selector != nil {
-		// Use V(1) to reduce log noise - this is logged on every reconcile
-		agentCardLogger.V(1).Info("AgentCard uses deprecated 'selector' field, please migrate to 'targetRef'",
-			"agentCard", agentCard.Name,
-			"namespace", agentCard.Namespace)
-		// Emit event for visibility - events are deduplicated by the recorder
-		if r.Recorder != nil {
-			r.Recorder.Event(agentCard, corev1.EventTypeWarning, "DeprecatedSelector",
-				"AgentCard uses deprecated 'selector' field, please migrate to 'targetRef' for explicit workload references")
-		}
-		return r.findMatchingWorkloadBySelector(ctx, agentCard)
-	}
-
-	return nil, fmt.Errorf("neither targetRef nor selector specified")
+	return nil, fmt.Errorf("spec.targetRef is required: specify the workload backing this agent")
 }
 
 // getWorkloadByTargetRef fetches the workload referenced by targetRef using duck typing
@@ -401,113 +378,6 @@ func (r *AgentCardReconciler) getWorkloadByTargetRef(ctx context.Context, namesp
 	}, nil
 }
 
-// findMatchingWorkloadBySelector finds a workload matching the selector (legacy mode)
-// It searches Deployments, StatefulSets, and Agent CRDs
-// Returns ErrMultipleAgentsMatched if more than one unique workload matches
-func (r *AgentCardReconciler) findMatchingWorkloadBySelector(ctx context.Context, agentCard *agentv1alpha1.AgentCard) (*WorkloadInfo, error) {
-	if agentCard.Spec.Selector == nil {
-		return nil, fmt.Errorf("no selector specified")
-	}
-
-	// Build selector that includes the agent label to ensure we only match agent workloads
-	selectorLabels := make(map[string]string)
-	for k, v := range agentCard.Spec.Selector.MatchLabels {
-		selectorLabels[k] = v
-	}
-	selectorLabels[LabelAgentType] = LabelValueAgent
-
-	labelSelector := client.MatchingLabels(selectorLabels)
-	namespace := client.InNamespace(agentCard.Namespace)
-
-	// Use a map to deduplicate by name (Agent CRD creates Deployment with same name)
-	workloadsByName := make(map[string]*WorkloadInfo)
-	var matchedNames []string
-
-	// Search Deployments first (preferred over Agent CRD)
-	deployments := &appsv1.DeploymentList{}
-	if err := r.List(ctx, deployments, namespace, labelSelector); err != nil {
-		return nil, fmt.Errorf("failed to list deployments: %w", err)
-	}
-	for i := range deployments.Items {
-		d := &deployments.Items[i]
-		if _, exists := workloadsByName[d.Name]; !exists {
-			workloadsByName[d.Name] = &WorkloadInfo{
-				Name:        d.Name,
-				Namespace:   d.Namespace,
-				APIVersion:  "apps/v1",
-				Kind:        "Deployment",
-				Labels:      d.Labels,
-				Ready:       isDeploymentReady(d),
-				ServiceName: d.Name,
-			}
-			matchedNames = append(matchedNames, d.Name)
-		}
-	}
-
-	// Search StatefulSets
-	statefulsets := &appsv1.StatefulSetList{}
-	if err := r.List(ctx, statefulsets, namespace, labelSelector); err != nil {
-		return nil, fmt.Errorf("failed to list statefulsets: %w", err)
-	}
-	for i := range statefulsets.Items {
-		s := &statefulsets.Items[i]
-		if _, exists := workloadsByName[s.Name]; !exists {
-			workloadsByName[s.Name] = &WorkloadInfo{
-				Name:        s.Name,
-				Namespace:   s.Namespace,
-				APIVersion:  "apps/v1",
-				Kind:        "StatefulSet",
-				Labels:      s.Labels,
-				Ready:       isStatefulSetReady(s),
-				ServiceName: s.Name,
-			}
-			matchedNames = append(matchedNames, s.Name)
-		}
-	}
-
-	// Search Agent CRDs (fallback if no Deployment/StatefulSet with same name)
-	agents := &agentv1alpha1.AgentList{}
-	if err := r.List(ctx, agents, namespace, labelSelector); err != nil {
-		return nil, fmt.Errorf("failed to list agents: %w", err)
-	}
-	for i := range agents.Items {
-		a := &agents.Items[i]
-		if _, exists := workloadsByName[a.Name]; !exists {
-			workloadsByName[a.Name] = &WorkloadInfo{
-				Name:        a.Name,
-				Namespace:   a.Namespace,
-				APIVersion:  agentv1alpha1.GroupVersion.String(),
-				Kind:        "Agent",
-				Labels:      a.Labels,
-				Ready:       isAgentCRDReady(a),
-				ServiceName: a.Name,
-			}
-			matchedNames = append(matchedNames, a.Name)
-		}
-	}
-
-	// Check results
-	if len(workloadsByName) == 0 {
-		return nil, fmt.Errorf("%w: no matching workload found for selector", ErrWorkloadNotFound)
-	}
-
-	if len(workloadsByName) > 1 {
-		agentCardLogger.Error(ErrMultipleAgentsMatched, "Ambiguous selector - identity binding requires unique selector",
-			"count", len(workloadsByName),
-			"agentCard", agentCard.Name,
-			"matchingWorkloads", matchedNames)
-		return nil, fmt.Errorf("%w: found %d workloads (%v) - use more specific labels in selector or use targetRef",
-			ErrMultipleAgentsMatched, len(workloadsByName), matchedNames)
-	}
-
-	// Return the single match
-	for _, workload := range workloadsByName {
-		return workload, nil
-	}
-
-	return nil, fmt.Errorf("%w: no matching workload found for selector", ErrWorkloadNotFound)
-}
-
 // isWorkloadReady determines if a workload is ready to serve traffic using duck typing
 func (r *AgentCardReconciler) isWorkloadReady(obj *unstructured.Unstructured, kind string) bool {
 	switch kind {
@@ -515,8 +385,6 @@ func (r *AgentCardReconciler) isWorkloadReady(obj *unstructured.Unstructured, ki
 		return isDeploymentReadyFromUnstructured(obj)
 	case "StatefulSet":
 		return isStatefulSetReadyFromUnstructured(obj)
-	case "Agent":
-		return isAgentReadyFromUnstructured(obj)
 	default:
 		// For unknown types, check for common ready conditions
 		return hasReadyCondition(obj)
@@ -526,29 +394,6 @@ func (r *AgentCardReconciler) isWorkloadReady(obj *unstructured.Unstructured, ki
 // isAgentWorkload checks if labels indicate this is a Kagenti agent
 func isAgentWorkload(labels map[string]string) bool {
 	return labels != nil && labels[LabelAgentType] == LabelValueAgent
-}
-
-// isDeploymentReady checks if a Deployment is ready
-func isDeploymentReady(d *appsv1.Deployment) bool {
-	for _, c := range d.Status.Conditions {
-		if c.Type == appsv1.DeploymentAvailable && c.Status == corev1.ConditionTrue {
-			return true
-		}
-	}
-	return false
-}
-
-// isStatefulSetReady checks if a StatefulSet is ready
-func isStatefulSetReady(s *appsv1.StatefulSet) bool {
-	return s.Status.ReadyReplicas == s.Status.Replicas
-}
-
-// isAgentCRDReady checks if an Agent CRD is ready
-func isAgentCRDReady(agent *agentv1alpha1.Agent) bool {
-	if agent.Status.DeploymentStatus == nil {
-		return false
-	}
-	return agent.Status.DeploymentStatus.Phase == agentv1alpha1.PhaseReady
 }
 
 // isDeploymentReadyFromUnstructured checks Deployment readiness from unstructured
@@ -570,7 +415,9 @@ func isDeploymentReadyFromUnstructured(obj *unstructured.Unstructured) bool {
 	return false
 }
 
-// isStatefulSetReadyFromUnstructured checks StatefulSet readiness from unstructured
+// isStatefulSetReadyFromUnstructured checks StatefulSet readiness from unstructured.
+// A StatefulSet is ready when it has at least one running replica and all replicas are ready.
+// Note: A StatefulSet scaled to 0 replicas intentionally returns false (not ready to serve).
 func isStatefulSetReadyFromUnstructured(obj *unstructured.Unstructured) bool {
 	readyReplicas, _, err := unstructured.NestedInt64(obj.Object, "status", "readyReplicas")
 	if err != nil {
@@ -580,16 +427,7 @@ func isStatefulSetReadyFromUnstructured(obj *unstructured.Unstructured) bool {
 	if err != nil {
 		return false
 	}
-	return readyReplicas == replicas
-}
-
-// isAgentReadyFromUnstructured checks Agent CRD readiness from unstructured
-func isAgentReadyFromUnstructured(obj *unstructured.Unstructured) bool {
-	phase, found, err := unstructured.NestedString(obj.Object, "status", "deploymentStatus", "phase")
-	if err != nil || !found {
-		return false
-	}
-	return phase == "Ready"
+	return readyReplicas > 0 && readyReplicas == replicas
 }
 
 // hasReadyCondition is a generic check for workloads with standard conditions
@@ -648,12 +486,15 @@ func (r *AgentCardReconciler) getService(ctx context.Context, namespace, name st
 	return service, nil
 }
 
-// getServicePort extracts the service port (defaults to first port or 8000)
+// getServicePort extracts the service port (defaults to first port or 8000).
+// If no ports are defined on the service, a hardcoded fallback of 8000 is used.
 func (r *AgentCardReconciler) getServicePort(service *corev1.Service) int32 {
 	if len(service.Spec.Ports) > 0 {
 		return service.Spec.Ports[0].Port
 	}
-	return 8000 // default fallback
+	agentCardLogger.Info("Service has no ports defined, using default port 8000",
+		"service", service.Name, "namespace", service.Namespace)
+	return 8000 // default fallback — most A2A agents listen on 8000
 }
 
 // getSyncPeriod parses the sync period from the spec or returns default
@@ -759,8 +600,35 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 			Message:            "Agent index is ready for queries",
 		})
 
-		// Write binding status if computed
+		// Write binding status if computed.
 		if binding != nil {
+			existingBound := meta.FindStatusCondition(latest.Status.Conditions, "Bound")
+
+			// Emit the AllowlistOnly warning once — on the first binding evaluation.
+			if existingBound == nil {
+				agentCardLogger.Info("Identity binding is allowlist-only; SPIFFE trust bundle verification not yet available",
+					"agentCard", latest.Name)
+				if r.Recorder != nil {
+					r.Recorder.Event(agentCard, corev1.EventTypeWarning, "AllowlistOnly",
+						"Identity binding is allowlist-only; SPIFFE trust bundle verification not yet available")
+				}
+			}
+
+			// Emit binding events only on state transitions to avoid flooding the event stream.
+			newConditionStatus := metav1.ConditionFalse
+			if binding.Bound {
+				newConditionStatus = metav1.ConditionTrue
+			}
+			if existingBound == nil || existingBound.Status != newConditionStatus {
+				if r.Recorder != nil {
+					if binding.Bound {
+						r.Recorder.Event(agentCard, corev1.EventTypeNormal, "BindingEvaluated", binding.Message)
+					} else {
+						r.Recorder.Event(agentCard, corev1.EventTypeWarning, "BindingFailed", binding.Message)
+					}
+				}
+			}
+
 			now := metav1.Now()
 			latest.Status.BindingStatus = &agentv1alpha1.BindingStatus{
 				Bound:              binding.Bound,
@@ -771,13 +639,9 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 			if binding.SpiffeID != "" {
 				latest.Status.ExpectedSpiffeID = binding.SpiffeID
 			}
-			conditionStatus := metav1.ConditionFalse
-			if binding.Bound {
-				conditionStatus = metav1.ConditionTrue
-			}
 			meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
 				Type:               "Bound",
-				Status:             conditionStatus,
+				Status:             newConditionStatus,
 				LastTransitionTime: now,
 				Reason:             binding.Reason,
 				Message:            binding.Message,
@@ -829,60 +693,19 @@ func (r *AgentCardReconciler) propagateSignatureLabel(ctx context.Context, workl
 
 	switch workload.Kind {
 	case "Deployment":
-		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			deployment := &appsv1.Deployment{}
-			if err := r.Get(ctx, key, deployment); err != nil {
-				return err
-			}
-			if deployment.Spec.Template.Labels == nil {
-				deployment.Spec.Template.Labels = make(map[string]string)
-			}
-			current := deployment.Spec.Template.Labels[LabelSignatureVerified]
-			// No change needed — avoid unnecessary rollout
-			if verified && current == "true" {
-				return nil
-			}
-			if !verified && current == "" {
-				return nil
-			}
-			if verified {
-				deployment.Spec.Template.Labels[LabelSignatureVerified] = "true"
-			} else {
-				delete(deployment.Spec.Template.Labels, LabelSignatureVerified)
-			}
-			agentCardLogger.Info("Propagating signature-verified label to Deployment pod template",
-				"deployment", workload.Name,
-				"verified", verified)
-			return r.Update(ctx, deployment)
-		})
-
+		return r.propagateLabelToWorkload(ctx, key, workload, verified, &appsv1.Deployment{},
+			func(obj client.Object) map[string]string { return obj.(*appsv1.Deployment).Spec.Template.Labels },
+			func(obj client.Object, labels map[string]string) {
+				obj.(*appsv1.Deployment).Spec.Template.Labels = labels
+			},
+		)
 	case "StatefulSet":
-		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			statefulSet := &appsv1.StatefulSet{}
-			if err := r.Get(ctx, key, statefulSet); err != nil {
-				return err
-			}
-			if statefulSet.Spec.Template.Labels == nil {
-				statefulSet.Spec.Template.Labels = make(map[string]string)
-			}
-			current := statefulSet.Spec.Template.Labels[LabelSignatureVerified]
-			if verified && current == "true" {
-				return nil
-			}
-			if !verified && current == "" {
-				return nil
-			}
-			if verified {
-				statefulSet.Spec.Template.Labels[LabelSignatureVerified] = "true"
-			} else {
-				delete(statefulSet.Spec.Template.Labels, LabelSignatureVerified)
-			}
-			agentCardLogger.Info("Propagating signature-verified label to StatefulSet pod template",
-				"statefulSet", workload.Name,
-				"verified", verified)
-			return r.Update(ctx, statefulSet)
-		})
-
+		return r.propagateLabelToWorkload(ctx, key, workload, verified, &appsv1.StatefulSet{},
+			func(obj client.Object) map[string]string { return obj.(*appsv1.StatefulSet).Spec.Template.Labels },
+			func(obj client.Object, labels map[string]string) {
+				obj.(*appsv1.StatefulSet).Spec.Template.Labels = labels
+			},
+		)
 	default:
 		agentCardLogger.V(1).Info("Cannot propagate signature label to unsupported workload kind",
 			"kind", workload.Kind, "workload", workload.Name)
@@ -890,9 +713,52 @@ func (r *AgentCardReconciler) propagateSignatureLabel(ctx context.Context, workl
 	}
 }
 
-// updateCondition updates a specific condition
-func (r *AgentCardReconciler) updateCondition(ctx context.Context, agentCard *agentv1alpha1.AgentCard, conditionType string, status metav1.ConditionStatus, reason, message string) {
-	_ = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+// propagateLabelToWorkload is a generic helper that adds or removes the signature-verified
+// label on a workload's pod template. It avoids unnecessary updates (and thus rollouts)
+// when the label is already in the desired state.
+func (r *AgentCardReconciler) propagateLabelToWorkload(
+	ctx context.Context,
+	key types.NamespacedName,
+	workload *WorkloadInfo,
+	verified bool,
+	obj client.Object,
+	getLabels func(client.Object) map[string]string,
+	setLabels func(client.Object, map[string]string),
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Get(ctx, key, obj); err != nil {
+			return err
+		}
+		labels := getLabels(obj)
+		if labels == nil {
+			labels = make(map[string]string)
+			setLabels(obj, labels)
+		}
+		current := labels[LabelSignatureVerified]
+		// No change needed — avoid unnecessary rollout
+		if verified && current == "true" {
+			return nil
+		}
+		if !verified && current == "" {
+			return nil
+		}
+		if verified {
+			labels[LabelSignatureVerified] = "true"
+		} else {
+			delete(labels, LabelSignatureVerified)
+		}
+		agentCardLogger.Info("Propagating signature-verified label to pod template",
+			"kind", workload.Kind,
+			"workload", workload.Name,
+			"verified", verified)
+		return r.Update(ctx, obj)
+	})
+}
+
+// updateCondition updates a specific condition on the AgentCard status.
+// Returns an error if the status update fails after retries.
+func (r *AgentCardReconciler) updateCondition(ctx context.Context, agentCard *agentv1alpha1.AgentCard, conditionType string, status metav1.ConditionStatus, reason, message string) error {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &agentv1alpha1.AgentCard{}
 		if err := r.Get(ctx, types.NamespacedName{
 			Name:      agentCard.Name,
@@ -910,7 +776,11 @@ func (r *AgentCardReconciler) updateCondition(ctx context.Context, agentCard *ag
 		})
 
 		return r.Status().Update(ctx, latest)
-	})
+	}); err != nil {
+		agentCardLogger.Error(err, "Failed to update condition", "type", conditionType)
+		return err
+	}
+	return nil
 }
 
 // handleDeletion handles cleanup when an AgentCard is deleted
@@ -943,82 +813,28 @@ func (r *AgentCardReconciler) handleDeletion(ctx context.Context, agentCard *age
 	return ctrl.Result{}, nil
 }
 
-// mapAgentToAgentCard maps Agent events to AgentCard reconcile requests
-func (r *AgentCardReconciler) mapAgentToAgentCard(ctx context.Context, obj client.Object) []reconcile.Request {
-	agent, ok := obj.(*agentv1alpha1.Agent)
-	if !ok {
-		return nil
-	}
-
-	// Only process Agents with the agent type label
-	if agent.Labels == nil || agent.Labels[LabelAgentType] != LabelValueAgent {
-		return nil
-	}
-
-	// Find all AgentCards that might reference this Agent
-	agentCardList := &agentv1alpha1.AgentCardList{}
-	if err := r.List(ctx, agentCardList, client.InNamespace(agent.Namespace)); err != nil {
-		agentCardLogger.Error(err, "Failed to list AgentCards for mapping")
-		return nil
-	}
-
-	var requests []reconcile.Request
-	for _, agentCard := range agentCardList.Items {
-		// Check if this AgentCard references this Agent via targetRef
-		if r.targetRefMatchesWorkload(&agentCard, agent, agentv1alpha1.GroupVersion.String(), "Agent") {
-			requests = append(requests, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      agentCard.Name,
-					Namespace: agentCard.Namespace,
-				},
-			})
-			continue
-		}
-		// Fall back to selector matching
-		if r.selectorMatchesAgent(&agentCard, agent) {
-			requests = append(requests, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      agentCard.Name,
-					Namespace: agentCard.Namespace,
-				},
-			})
-		}
-	}
-
-	return requests
-}
-
 // mapWorkloadToAgentCard maps Deployment/StatefulSet events to AgentCard reconcile requests
 func (r *AgentCardReconciler) mapWorkloadToAgentCard(apiVersion, kind string) handler.MapFunc {
 	return func(ctx context.Context, obj client.Object) []reconcile.Request {
-		labels := obj.GetLabels()
-
-		// Only process workloads with the agent type label
-		if !isAgentWorkload(labels) {
+		if !isAgentWorkload(obj.GetLabels()) {
 			return nil
 		}
 
-		// Find all AgentCards that might reference this workload
+		// Use the field indexer to find AgentCards that reference this workload by name,
+		// scoped to the same namespace. This avoids listing every AgentCard.
 		agentCardList := &agentv1alpha1.AgentCardList{}
-		if err := r.List(ctx, agentCardList, client.InNamespace(obj.GetNamespace())); err != nil {
+		if err := r.List(ctx, agentCardList,
+			client.InNamespace(obj.GetNamespace()),
+			client.MatchingFields{TargetRefNameIndex: obj.GetName()},
+		); err != nil {
 			agentCardLogger.Error(err, "Failed to list AgentCards for mapping")
 			return nil
 		}
 
 		var requests []reconcile.Request
 		for _, agentCard := range agentCardList.Items {
-			// Check if this AgentCard references this workload via targetRef
+			// Double-check apiVersion and kind since the index only matches on name.
 			if r.targetRefMatchesWorkload(&agentCard, obj, apiVersion, kind) {
-				requests = append(requests, reconcile.Request{
-					NamespacedName: types.NamespacedName{
-						Name:      agentCard.Name,
-						Namespace: agentCard.Namespace,
-					},
-				})
-				continue
-			}
-			// Fall back to selector matching
-			if r.selectorMatchesWorkload(&agentCard, labels) {
 				requests = append(requests, reconcile.Request{
 					NamespacedName: types.NamespacedName{
 						Name:      agentCard.Name,
@@ -1032,21 +848,6 @@ func (r *AgentCardReconciler) mapWorkloadToAgentCard(apiVersion, kind string) ha
 	}
 }
 
-// selectorMatchesAgent checks if an AgentCard selector matches an Agent
-func (r *AgentCardReconciler) selectorMatchesAgent(agentCard *agentv1alpha1.AgentCard, agent *agentv1alpha1.Agent) bool {
-	if agentCard.Spec.Selector == nil || agent.Labels == nil {
-		return false
-	}
-
-	for key, value := range agentCard.Spec.Selector.MatchLabels {
-		if agent.Labels[key] != value {
-			return false
-		}
-	}
-
-	return true
-}
-
 // targetRefMatchesWorkload checks if an AgentCard targetRef matches a workload
 func (r *AgentCardReconciler) targetRefMatchesWorkload(agentCard *agentv1alpha1.AgentCard, obj client.Object, apiVersion, kind string) bool {
 	if agentCard.Spec.TargetRef == nil {
@@ -1055,21 +856,6 @@ func (r *AgentCardReconciler) targetRefMatchesWorkload(agentCard *agentv1alpha1.
 	return agentCard.Spec.TargetRef.Name == obj.GetName() &&
 		agentCard.Spec.TargetRef.Kind == kind &&
 		agentCard.Spec.TargetRef.APIVersion == apiVersion
-}
-
-// selectorMatchesWorkload checks if an AgentCard selector matches a workload's labels
-func (r *AgentCardReconciler) selectorMatchesWorkload(agentCard *agentv1alpha1.AgentCard, labels map[string]string) bool {
-	if agentCard.Spec.Selector == nil || labels == nil {
-		return false
-	}
-
-	for key, value := range agentCard.Spec.Selector.MatchLabels {
-		if labels[key] != value {
-			return false
-		}
-	}
-
-	return true
 }
 
 // agentLabelPredicate filters for resources with kagenti.io/type=agent
@@ -1112,18 +898,19 @@ func (r *AgentCardReconciler) computeBinding(agentCard *agentv1alpha1.AgentCard,
 		agentCardLogger.Info("Identity binding failed: no SPIFFE ID in JWS protected header",
 			"agentCard", agentCard.Name,
 			"hint", "Use --spiffe-id when signing to embed the SPIFFE ID in the JWS protected header")
-		if r.Recorder != nil {
-			r.Recorder.Event(agentCard, corev1.EventTypeWarning, "BindingFailed", message)
-		}
 		return &bindingResult{Bound: false, Reason: reason, Message: message}
 	}
 
-	// Warn that binding is allowlist-only until SPIFFE trust bundle verification is available.
-	agentCardLogger.Info("Identity binding is allowlist-only; SPIFFE trust bundle verification not yet available",
-		"agentCard", agentCard.Name)
-	if r.Recorder != nil {
-		r.Recorder.Event(agentCard, corev1.EventTypeWarning, "AllowlistOnly",
-			"Identity binding is allowlist-only; SPIFFE trust bundle verification not yet available")
+	// Defensive: CRD schema enforces minItems=1, but guard against an empty allowlist
+	// to avoid silently failing all bindings if validation is bypassed.
+	if len(binding.AllowedSpiffeIDs) == 0 {
+		agentCardLogger.Error(nil, "BUG: allowedSpiffeIDs is empty — CRD validation may have been bypassed",
+			"agentCard", agentCard.Name)
+		return &bindingResult{
+			Bound:   false,
+			Reason:  ReasonNotBound,
+			Message: "allowedSpiffeIDs is empty: at least one SPIFFE ID must be specified",
+		}
 	}
 
 	// Check if verified SPIFFE ID is in the allowlist
@@ -1152,15 +939,8 @@ func (r *AgentCardReconciler) computeBinding(agentCard *agentv1alpha1.AgentCard,
 		message = fmt.Sprintf("SPIFFE ID %s (source: jws-protected-header) is not in the allowlist", verifiedSpiffeID)
 	}
 
-	// Emit events for immediate kubectl visibility
-	if r.Recorder != nil {
-		if bound {
-			r.Recorder.Event(agentCard, corev1.EventTypeNormal, "BindingEvaluated", message)
-		} else {
-			r.Recorder.Event(agentCard, corev1.EventTypeWarning, "BindingFailed", message)
-		}
-	}
-
+	// Note: binding events are emitted in updateAgentCardStatus only on state transitions
+	// to avoid flooding the event stream on every reconcile cycle.
 	return &bindingResult{Bound: bound, Reason: reason, Message: message, SpiffeID: verifiedSpiffeID}
 }
 
@@ -1203,12 +983,17 @@ func (r *AgentCardReconciler) updateBindingStatus(ctx context.Context, agentCard
 	})
 }
 
-// computeCardId computes a SHA256 hash of the card data for drift detection
+// computeCardId computes a SHA256 hash of the card data for drift detection.
+// json.Marshal on a Go struct produces deterministic output (field order follows
+// the struct definition, not a map). The hash is only compared within this operator.
+//
+// NOTE: Do NOT use this for JWS signing — use signature.CreateCanonicalCardJSON
+// instead, which produces spec-compliant canonical JSON (sorted keys, no whitespace,
+// signatures field excluded).
 func (r *AgentCardReconciler) computeCardId(cardData *agentv1alpha1.AgentCardData) string {
 	if cardData == nil {
 		return ""
 	}
-	// JSON serialization is sufficient — hash is only compared within this operator
 	data, err := json.Marshal(cardData)
 	if err != nil {
 		agentCardLogger.Error(err, "Failed to marshal card data for hash computation")
@@ -1234,6 +1019,11 @@ func (r *AgentCardReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		secretProvider.SetClient(mgr.GetClient())
 	}
 
+	// Register the shared field indexer (safe to call from multiple controllers).
+	if err := RegisterAgentCardTargetRefIndex(mgr); err != nil {
+		return err
+	}
+
 	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&agentv1alpha1.AgentCard{}).
 		// Watch Deployments with agent labels
@@ -1248,18 +1038,6 @@ func (r *AgentCardReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.mapWorkloadToAgentCard("apps/v1", "StatefulSet")),
 			builder.WithPredicates(agentLabelPredicate()),
 		)
-
-	// Optionally watch legacy Agent CRDs if enabled
-	if r.EnableLegacyAgentCRD {
-		agentCardLogger.Info("Legacy Agent CRD support is enabled, watching Agent resources")
-		controllerBuilder = controllerBuilder.Watches(
-			&agentv1alpha1.Agent{},
-			handler.EnqueueRequestsFromMapFunc(r.mapAgentToAgentCard),
-			builder.WithPredicates(agentLabelPredicate()),
-		)
-	} else {
-		agentCardLogger.Info("Legacy Agent CRD support is disabled, not watching Agent resources")
-	}
 
 	return controllerBuilder.
 		Named("AgentCard").

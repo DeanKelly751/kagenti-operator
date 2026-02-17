@@ -54,7 +54,6 @@ type AgentCardNetworkPolicyReconciler struct {
 	client.Client
 	Scheme                 *runtime.Scheme
 	EnforceNetworkPolicies bool
-	EnableLegacyAgentCRD   bool
 }
 
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -109,8 +108,8 @@ func (r *AgentCardNetworkPolicyReconciler) Reconcile(ctx context.Context, req ct
 }
 
 // resolveWorkload resolves the workload name and pod selector labels from the AgentCard.
+// Requires spec.targetRef to identify the backing workload.
 func (r *AgentCardNetworkPolicyReconciler) resolveWorkload(ctx context.Context, agentCard *agentv1alpha1.AgentCard) (string, map[string]string, error) {
-	// Prefer spec.targetRef
 	if agentCard.Spec.TargetRef != nil {
 		ref := agentCard.Spec.TargetRef
 		podLabels, err := r.getPodTemplateLabels(ctx, agentCard.Namespace, ref)
@@ -120,22 +119,7 @@ func (r *AgentCardNetworkPolicyReconciler) resolveWorkload(ctx context.Context, 
 		return ref.Name, podLabels, nil
 	}
 
-	// Try status.targetRef (populated by AgentCardReconciler after resolving selector)
-	if agentCard.Status.TargetRef != nil {
-		ref := agentCard.Status.TargetRef
-		podLabels, err := r.getPodTemplateLabels(ctx, agentCard.Namespace, ref)
-		if err == nil {
-			return ref.Name, podLabels, nil
-		}
-		// Fall through to selector if status targetRef lookup fails
-	}
-
-	// Fall back to selector (legacy)
-	if agentCard.Spec.Selector != nil && len(agentCard.Spec.Selector.MatchLabels) > 0 {
-		return agentCard.Name, agentCard.Spec.Selector.MatchLabels, nil
-	}
-
-	return "", nil, fmt.Errorf("neither targetRef nor selector specified")
+	return "", nil, fmt.Errorf("spec.targetRef is required: specify the workload backing this agent")
 }
 
 // getPodTemplateLabels extracts the pod template labels from a workload using targetRef
@@ -156,17 +140,6 @@ func (r *AgentCardNetworkPolicyReconciler) getPodTemplateLabels(ctx context.Cont
 			return nil, err
 		}
 		return statefulset.Spec.Template.Labels, nil
-
-	case "Agent":
-		agent := &agentv1alpha1.Agent{}
-		if err := r.Get(ctx, key, agent); err != nil {
-			return nil, err
-		}
-		if agent.Spec.PodTemplateSpec != nil {
-			return agent.Spec.PodTemplateSpec.Labels, nil
-		}
-		// Fallback: use agent labels
-		return agent.Labels, nil
 
 	default:
 		// For unknown workload types, use the agent card name as a selector
@@ -200,8 +173,9 @@ func (r *AgentCardNetworkPolicyReconciler) manageNetworkPolicy(ctx context.Conte
 	return r.createRestrictivePolicy(ctx, policyName, agentCard, podSelectorLabels)
 }
 
-// createPermissivePolicy creates a NetworkPolicy that allows verified agents to communicate
-func (r *AgentCardNetworkPolicyReconciler) createPermissivePolicy(ctx context.Context, policyName string, agentCard *agentv1alpha1.AgentCard, podSelectorLabels map[string]string) error {
+// upsertNetworkPolicy creates or updates a NetworkPolicy with the given spec.
+// Shared by createPermissivePolicy and createRestrictivePolicy to avoid duplication.
+func (r *AgentCardNetworkPolicyReconciler) upsertNetworkPolicy(ctx context.Context, policyName string, agentCard *agentv1alpha1.AgentCard, spec netv1.NetworkPolicySpec) error {
 	policy := &netv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      policyName,
@@ -212,202 +186,135 @@ func (r *AgentCardNetworkPolicyReconciler) createPermissivePolicy(ctx context.Co
 				"kagenti.dev/policy-type": "signature-verification",
 			},
 		},
-		Spec: netv1.NetworkPolicySpec{
-			PodSelector: metav1.LabelSelector{
-				MatchLabels: podSelectorLabels,
-			},
-			PolicyTypes: []netv1.PolicyType{
-				netv1.PolicyTypeIngress,
-				netv1.PolicyTypeEgress,
-			},
-			Ingress: []netv1.NetworkPolicyIngressRule{
-				{
-					From: []netv1.NetworkPolicyPeer{
-						{
-							// Allow traffic from other verified agents
-							PodSelector: &metav1.LabelSelector{
-								MatchLabels: map[string]string{
-									LabelSignatureVerified: "true",
-								},
-							},
+		Spec: spec,
+	}
+
+	if err := controllerutil.SetControllerReference(agentCard, policy, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference: %w", err)
+	}
+
+	existingPolicy := &netv1.NetworkPolicy{}
+	err := r.Get(ctx, types.NamespacedName{Name: policyName, Namespace: agentCard.Namespace}, existingPolicy)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			networkPolicyLogger.Info("Creating NetworkPolicy",
+				"agentCard", agentCard.Name, "policy", policyName)
+			return r.Create(ctx, policy)
+		}
+		return err
+	}
+
+	existingPolicy.Spec = spec
+	// Ensure owner references are up-to-date in case the policy was created
+	// by a prior version of the operator without owner references.
+	existingPolicy.OwnerReferences = policy.OwnerReferences
+	networkPolicyLogger.Info("Updating NetworkPolicy",
+		"agentCard", agentCard.Name, "policy", policyName)
+	return r.Update(ctx, existingPolicy)
+}
+
+// dnsEgressPorts returns the standard DNS egress ports (UDP+TCP 53)
+func dnsEgressPorts() []netv1.NetworkPolicyPort {
+	return []netv1.NetworkPolicyPort{
+		{
+			Protocol: func() *corev1.Protocol { p := corev1.ProtocolUDP; return &p }(),
+			Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
+		},
+		{
+			Protocol: func() *corev1.Protocol { p := corev1.ProtocolTCP; return &p }(),
+			Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
+		},
+	}
+}
+
+// createPermissivePolicy creates a NetworkPolicy that allows verified agents to communicate
+func (r *AgentCardNetworkPolicyReconciler) createPermissivePolicy(ctx context.Context, policyName string, agentCard *agentv1alpha1.AgentCard, podSelectorLabels map[string]string) error {
+	spec := netv1.NetworkPolicySpec{
+		PodSelector: metav1.LabelSelector{MatchLabels: podSelectorLabels},
+		PolicyTypes: []netv1.PolicyType{netv1.PolicyTypeIngress, netv1.PolicyTypeEgress},
+		Ingress: []netv1.NetworkPolicyIngressRule{
+			{
+				From: []netv1.NetworkPolicyPeer{
+					{
+						PodSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{LabelSignatureVerified: "true"},
 						},
-						{
-							// Allow traffic from operator/control plane
-							NamespaceSelector: &metav1.LabelSelector{
-								MatchLabels: map[string]string{
-									"control-plane": "kagenti-operator",
-								},
-							},
+					},
+					{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"control-plane": "kagenti-operator"},
 						},
 					},
 				},
 			},
-			Egress: []netv1.NetworkPolicyEgressRule{
-				{
-					// Allow egress to other verified agents
-					To: []netv1.NetworkPolicyPeer{
-						{
-							PodSelector: &metav1.LabelSelector{
-								MatchLabels: map[string]string{
-									LabelSignatureVerified: "true",
-								},
-							},
+		},
+		Egress: []netv1.NetworkPolicyEgressRule{
+			{
+				To: []netv1.NetworkPolicyPeer{
+					{
+						PodSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{LabelSignatureVerified: "true"},
 						},
 					},
 				},
-				{
-					// Allow DNS queries
-					To: []netv1.NetworkPolicyPeer{
-						{
-							NamespaceSelector: &metav1.LabelSelector{
-								MatchLabels: map[string]string{
-									"kubernetes.io/metadata.name": "kube-system",
-								},
-							},
-						},
-					},
-					Ports: []netv1.NetworkPolicyPort{
-						{
-							Protocol: func() *corev1.Protocol { p := corev1.ProtocolUDP; return &p }(),
-							Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
-						},
-						{
-							Protocol: func() *corev1.Protocol { p := corev1.ProtocolTCP; return &p }(),
-							Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
+			},
+			{
+				To: []netv1.NetworkPolicyPeer{
+					{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kube-system"},
 						},
 					},
 				},
-				{
-					// Allow egress to API server
-					To: []netv1.NetworkPolicyPeer{
-						{
-							NamespaceSelector: &metav1.LabelSelector{
-								MatchLabels: map[string]string{
-									"kubernetes.io/metadata.name": "default",
-								},
-							},
-							PodSelector: &metav1.LabelSelector{
-								MatchLabels: map[string]string{
-									"component": "apiserver",
-								},
-							},
+				Ports: dnsEgressPorts(),
+			},
+			{
+				To: []netv1.NetworkPolicyPeer{
+					{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"kubernetes.io/metadata.name": "default"},
+						},
+						PodSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"component": "apiserver"},
 						},
 					},
 				},
 			},
 		},
 	}
-
-	// Set owner reference
-	if err := controllerutil.SetControllerReference(agentCard, policy, r.Scheme); err != nil {
-		return fmt.Errorf("failed to set controller reference: %w", err)
-	}
-
-	// Create or update the policy
-	existingPolicy := &netv1.NetworkPolicy{}
-	err := r.Get(ctx, types.NamespacedName{Name: policyName, Namespace: agentCard.Namespace}, existingPolicy)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			networkPolicyLogger.Info("Creating permissive NetworkPolicy for verified agent",
-				"agentCard", agentCard.Name,
-				"policy", policyName)
-			return r.Create(ctx, policy)
-		}
-		return err
-	}
-
-	existingPolicy.Spec = policy.Spec
-	networkPolicyLogger.Info("Updating NetworkPolicy to permissive for verified agent",
-		"agentCard", agentCard.Name,
-		"policy", policyName)
-	return r.Update(ctx, existingPolicy)
+	return r.upsertNetworkPolicy(ctx, policyName, agentCard, spec)
 }
 
 // createRestrictivePolicy creates a NetworkPolicy that blocks unverified agents
 func (r *AgentCardNetworkPolicyReconciler) createRestrictivePolicy(ctx context.Context, policyName string, agentCard *agentv1alpha1.AgentCard, podSelectorLabels map[string]string) error {
-	policy := &netv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      policyName,
-			Namespace: agentCard.Namespace,
-			Labels: map[string]string{
-				"managed-by":              "kagenti-operator",
-				"kagenti.dev/agentcard":   agentCard.Name,
-				"kagenti.dev/policy-type": "signature-verification",
-			},
-		},
-		Spec: netv1.NetworkPolicySpec{
-			PodSelector: metav1.LabelSelector{
-				MatchLabels: podSelectorLabels,
-			},
-			PolicyTypes: []netv1.PolicyType{
-				netv1.PolicyTypeIngress,
-				netv1.PolicyTypeEgress,
-			},
-			Ingress: []netv1.NetworkPolicyIngressRule{
-				{
-					// Only allow traffic from operator for health checks
-					From: []netv1.NetworkPolicyPeer{
-						{
-							NamespaceSelector: &metav1.LabelSelector{
-								MatchLabels: map[string]string{
-									"control-plane": "kagenti-operator",
-								},
-							},
-						},
-					},
-				},
-			},
-			Egress: []netv1.NetworkPolicyEgressRule{
-				{
-					// Allow DNS queries only
-					To: []netv1.NetworkPolicyPeer{
-						{
-							NamespaceSelector: &metav1.LabelSelector{
-								MatchLabels: map[string]string{
-									"kubernetes.io/metadata.name": "kube-system",
-								},
-							},
-						},
-					},
-					Ports: []netv1.NetworkPolicyPort{
-						{
-							Protocol: func() *corev1.Protocol { p := corev1.ProtocolUDP; return &p }(),
-							Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
-						},
-						{
-							Protocol: func() *corev1.Protocol { p := corev1.ProtocolTCP; return &p }(),
-							Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
+	spec := netv1.NetworkPolicySpec{
+		PodSelector: metav1.LabelSelector{MatchLabels: podSelectorLabels},
+		PolicyTypes: []netv1.PolicyType{netv1.PolicyTypeIngress, netv1.PolicyTypeEgress},
+		Ingress: []netv1.NetworkPolicyIngressRule{
+			{
+				From: []netv1.NetworkPolicyPeer{
+					{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"control-plane": "kagenti-operator"},
 						},
 					},
 				},
 			},
 		},
+		Egress: []netv1.NetworkPolicyEgressRule{
+			{
+				To: []netv1.NetworkPolicyPeer{
+					{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kube-system"},
+						},
+					},
+				},
+				Ports: dnsEgressPorts(),
+			},
+		},
 	}
-
-	// Set owner reference
-	if err := controllerutil.SetControllerReference(agentCard, policy, r.Scheme); err != nil {
-		return fmt.Errorf("failed to set controller reference: %w", err)
-	}
-
-	// Create or update the policy
-	existingPolicy := &netv1.NetworkPolicy{}
-	err := r.Get(ctx, types.NamespacedName{Name: policyName, Namespace: agentCard.Namespace}, existingPolicy)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			networkPolicyLogger.Info("Creating restrictive NetworkPolicy for unverified agent",
-				"agentCard", agentCard.Name,
-				"policy", policyName,
-				"reason", "signature not verified")
-			return r.Create(ctx, policy)
-		}
-		return err
-	}
-
-	existingPolicy.Spec = policy.Spec
-	networkPolicyLogger.Info("Updating NetworkPolicy to restrictive for unverified agent",
-		"agentCard", agentCard.Name,
-		"policy", policyName)
-	return r.Update(ctx, existingPolicy)
+	return r.upsertNetworkPolicy(ctx, policyName, agentCard, spec)
 }
 
 // handleDeletion handles cleanup when an AgentCard is deleted
@@ -415,16 +322,34 @@ func (r *AgentCardNetworkPolicyReconciler) handleDeletion(ctx context.Context, a
 	if controllerutil.ContainsFinalizer(agentCard, NetworkPolicyFinalizer) {
 		networkPolicyLogger.Info("Cleaning up NetworkPolicy for AgentCard", "name", agentCard.Name)
 
-		// Determine the policy name from the resolved targetRef or card name
+		// Determine the policy name: prefer spec.targetRef (source of truth during
+		// creation) over status.targetRef to avoid orphaned policies if spec.targetRef
+		// was updated between creation and deletion.
 		workloadName := agentCard.Name
-		if agentCard.Status.TargetRef != nil {
+		if agentCard.Spec.TargetRef != nil {
+			workloadName = agentCard.Spec.TargetRef.Name
+		} else if agentCard.Status.TargetRef != nil {
 			workloadName = agentCard.Status.TargetRef.Name
+		}
+
+		// Warn if spec and status targetRef diverge — the policy for the old
+		// workload may become orphaned until the owner reference triggers GC.
+		if agentCard.Spec.TargetRef != nil && agentCard.Status.TargetRef != nil &&
+			agentCard.Spec.TargetRef.Name != agentCard.Status.TargetRef.Name {
+			networkPolicyLogger.Info("WARNING: spec.targetRef.name differs from status.targetRef.name; "+
+				"policy for the old workload may be orphaned until owner-reference GC runs",
+				"specTargetRef", agentCard.Spec.TargetRef.Name,
+				"statusTargetRef", agentCard.Status.TargetRef.Name)
 		}
 		policyName := fmt.Sprintf("%s-signature-policy", workloadName)
 
 		// Delete the NetworkPolicy
 		policy := &netv1.NetworkPolicy{}
 		err := r.Get(ctx, types.NamespacedName{Name: policyName, Namespace: agentCard.Namespace}, policy)
+		if err != nil && !apierrors.IsNotFound(err) {
+			networkPolicyLogger.Error(err, "Failed to get NetworkPolicy for deletion")
+			return ctrl.Result{}, err
+		}
 		if err == nil {
 			if err := r.Delete(ctx, policy); err != nil {
 				networkPolicyLogger.Error(err, "Failed to delete NetworkPolicy")
@@ -456,24 +381,27 @@ func (r *AgentCardNetworkPolicyReconciler) handleDeletion(ctx context.Context, a
 	return ctrl.Result{}, nil
 }
 
-// mapWorkloadToAgentCard maps Deployment/StatefulSet events to AgentCard reconcile requests
+// mapWorkloadToAgentCard maps Deployment/StatefulSet events to AgentCard reconcile requests.
+// Uses a field indexer to avoid listing every AgentCard in the namespace.
 func (r *AgentCardNetworkPolicyReconciler) mapWorkloadToAgentCard(apiVersion, kind string) handler.MapFunc {
 	return func(ctx context.Context, obj client.Object) []reconcile.Request {
-		labels := obj.GetLabels()
-		if !isAgentWorkload(labels) {
+		if !isAgentWorkload(obj.GetLabels()) {
 			return nil
 		}
 
 		agentCardList := &agentv1alpha1.AgentCardList{}
-		if err := r.List(ctx, agentCardList, client.InNamespace(obj.GetNamespace())); err != nil {
+		if err := r.List(ctx, agentCardList,
+			client.InNamespace(obj.GetNamespace()),
+			client.MatchingFields{TargetRefNameIndex: obj.GetName()},
+		); err != nil {
 			networkPolicyLogger.Error(err, "Failed to list AgentCards for mapping")
 			return nil
 		}
 
 		var requests []reconcile.Request
 		for _, agentCard := range agentCardList.Items {
+			// Double-check apiVersion and kind since the index only matches on name.
 			if agentCard.Spec.TargetRef != nil &&
-				agentCard.Spec.TargetRef.Name == obj.GetName() &&
 				agentCard.Spec.TargetRef.Kind == kind &&
 				agentCard.Spec.TargetRef.APIVersion == apiVersion {
 				requests = append(requests, reconcile.Request{
@@ -489,62 +417,13 @@ func (r *AgentCardNetworkPolicyReconciler) mapWorkloadToAgentCard(apiVersion, ki
 	}
 }
 
-// mapAgentToAgentCard maps Agent events to AgentCard reconcile requests
-func (r *AgentCardNetworkPolicyReconciler) mapAgentToAgentCard(ctx context.Context, obj client.Object) []reconcile.Request {
-	agent, ok := obj.(*agentv1alpha1.Agent)
-	if !ok {
-		return nil
-	}
-
-	if agent.Labels == nil || agent.Labels[LabelAgentType] != LabelValueAgent {
-		return nil
-	}
-
-	agentCardList := &agentv1alpha1.AgentCardList{}
-	if err := r.List(ctx, agentCardList, client.InNamespace(agent.Namespace)); err != nil {
-		networkPolicyLogger.Error(err, "Failed to list AgentCards for mapping")
-		return nil
-	}
-
-	var requests []reconcile.Request
-	for _, agentCard := range agentCardList.Items {
-		// Check targetRef
-		if agentCard.Spec.TargetRef != nil &&
-			agentCard.Spec.TargetRef.Name == agent.Name &&
-			agentCard.Spec.TargetRef.Kind == "Agent" {
-			requests = append(requests, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      agentCard.Name,
-					Namespace: agentCard.Namespace,
-				},
-			})
-			continue
-		}
-		// Check selector
-		if agentCard.Spec.Selector != nil && agent.Labels != nil {
-			match := true
-			for key, value := range agentCard.Spec.Selector.MatchLabels {
-				if agent.Labels[key] != value {
-					match = false
-					break
-				}
-			}
-			if match {
-				requests = append(requests, reconcile.Request{
-					NamespacedName: types.NamespacedName{
-						Name:      agentCard.Name,
-						Namespace: agentCard.Namespace,
-					},
-				})
-			}
-		}
-	}
-
-	return requests
-}
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *AgentCardNetworkPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Register the shared field indexer (safe to call from multiple controllers).
+	if err := RegisterAgentCardTargetRefIndex(mgr); err != nil {
+		return err
+	}
+
 	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&agentv1alpha1.AgentCard{}).
 		Owns(&netv1.NetworkPolicy{}).
@@ -560,15 +439,6 @@ func (r *AgentCardNetworkPolicyReconciler) SetupWithManager(mgr ctrl.Manager) er
 			handler.EnqueueRequestsFromMapFunc(r.mapWorkloadToAgentCard("apps/v1", "StatefulSet")),
 			builder.WithPredicates(agentLabelPredicate()),
 		)
-
-	// Optionally watch legacy Agent CRDs if enabled
-	if r.EnableLegacyAgentCRD {
-		controllerBuilder = controllerBuilder.Watches(
-			&agentv1alpha1.Agent{},
-			handler.EnqueueRequestsFromMapFunc(r.mapAgentToAgentCard),
-			builder.WithPredicates(agentLabelPredicate()),
-		)
-	}
 
 	return controllerBuilder.
 		Named("AgentCardNetworkPolicy").

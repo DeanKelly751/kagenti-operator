@@ -31,7 +31,13 @@ except ImportError:
 
 
 def load_private_key(key_path):
-    """Load a private key from a PEM file."""
+    """Load a private key from an unencrypted PEM file.
+
+    Note: Only unencrypted PEM keys are supported. For encrypted keys, decrypt
+    first with: openssl rsa -in encrypted.pem -out decrypted.pem
+    In production, store signing keys in a vault (e.g. HashiCorp Vault, AWS KMS)
+    and use a dedicated signing service.
+    """
     try:
         with open(key_path, 'rb') as f:
             private_key = serialization.load_pem_private_key(
@@ -50,6 +56,26 @@ def base64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
 
 
+def _strip_empty(obj):
+    """Recursively remove None, empty strings, empty lists, and empty dicts.
+
+    Mirrors the Go removeEmptyFields helper so that nested structures (e.g.
+    capabilities, skills) are cleaned identically on both sides.  Boolean
+    False and numeric 0 are preserved intentionally.
+    """
+    if isinstance(obj, dict):
+        cleaned = {}
+        for k, v in obj.items():
+            v = _strip_empty(v)
+            if v is None or v == "" or v == [] or v == {}:
+                continue
+            cleaned[k] = v
+        return cleaned
+    if isinstance(obj, list):
+        return [_strip_empty(item) for item in obj]
+    return obj
+
+
 def create_canonical_json(card_data):
     """
     Create canonical JSON payload for JWS signing.
@@ -58,13 +84,14 @@ def create_canonical_json(card_data):
       - "signatures" field excluded
       - Keys sorted alphabetically
       - No whitespace (compact separators)
+      - Empty/None values recursively stripped (matches Go removeEmptyFields)
     """
     card_copy = dict(card_data)
     card_copy.pop('signatures', None)
     card_copy.pop('signature', None)  # Legacy field, just in case
-
-    # Remove empty/None values to match Go canonical JSON behavior
-    card_copy = {k: v for k, v in card_copy.items() if v is not None and v != "" and v != [] and v != {}}
+    
+    # Recursively remove empty/None values to match Go canonical JSON behavior
+    card_copy = _strip_empty(card_copy)
 
     canonical = json.dumps(card_copy, sort_keys=True, separators=(',', ':'))
     return canonical.encode('utf-8')
@@ -125,6 +152,11 @@ def sign_card_jws(card_data, private_key, key_id, spiffe_id=None):
             hashes.SHA256()
         )
     elif algorithm.startswith('ES'):
+        # Note: Python's cryptography library produces DER-encoded (ASN.1) ECDSA
+        # signatures, whereas the JWS spec (RFC 7518 §3.4) requires raw R||S format.
+        # The Go verifier tries raw R||S first, then falls back to DER, so both
+        # formats are accepted. If strict JWS compliance is needed, convert to
+        # raw R||S here using cryptography.hazmat.primitives.asymmetric.utils.decode_dss_signature.
         hash_algo = {
             'ES256': hashes.SHA256(),
             'ES384': hashes.SHA384(),
@@ -137,7 +169,7 @@ def sign_card_jws(card_data, private_key, key_id, spiffe_id=None):
     else:
         print(f"Error: Unsupported algorithm: {algorithm}")
         sys.exit(1)
-
+    
     signature_b64 = base64url_encode(signature_bytes)
 
     # Build signatures array (A2A spec allows multiple signatures)
@@ -162,7 +194,7 @@ def main():
     )
     parser.add_argument(
         'key_file',
-        help='Path to the private key PEM file'
+        help='Path to the private key PEM file (must be unencrypted; see load_private_key docstring)'
     )
     parser.add_argument(
         '--key-id',
@@ -177,9 +209,9 @@ def main():
         '--output',
         help='Output file (default: overwrite input file)'
     )
-
+    
     args = parser.parse_args()
-
+    
     # Load agent card
     try:
         with open(args.card_file, 'r') as f:
@@ -187,13 +219,13 @@ def main():
     except Exception as e:
         print(f"Error loading agent card: {e}")
         sys.exit(1)
-
+    
     # Load private key
     private_key = load_private_key(args.key_file)
-
+    
     # Sign the card in JWS format
     signed_card, algorithm = sign_card_jws(card_data, private_key, args.key_id, args.spiffe_id)
-
+    
     # Write output
     output_file = args.output or args.card_file
     try:

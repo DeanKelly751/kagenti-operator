@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
+	"github.com/kagenti/operator/internal/agentcard"
 	"github.com/kagenti/operator/internal/controller"
 	"github.com/kagenti/operator/internal/distribution"
 	"github.com/kagenti/operator/internal/signature"
@@ -65,7 +66,6 @@ func main() {
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	var enableClientRegistration bool
-	var enableLegacyAgentCRD bool
 
 	// Signature verification flags
 	var requireA2ASignature bool
@@ -96,8 +96,6 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.BoolVar(&enableClientRegistration, "enable-client-registration", true,
 		"If set, Kagenti will register clients (agents and tools) in Keycloak")
-	flag.BoolVar(&enableLegacyAgentCRD, "enable-legacy-agent-crd", true,
-		"Enable support for legacy Agent CRD. Set to false after full migration to workload-based agents (Deployments/StatefulSets).")
 
 	// Signature verification flags
 	flag.BoolVar(&requireA2ASignature, "require-a2a-signature", false,
@@ -252,13 +250,18 @@ func main() {
 		Scheme:                   mgr.GetScheme(),
 		EnableClientRegistration: enableClientRegistration,
 		Distribution:             distType,
-		Recorder:                 mgr.GetEventRecorderFor("agent-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
 	}
 
 	// Initialize signature verification provider
+	if !requireA2ASignature {
+		setupLog.Info("WARNING: --require-a2a-signature is false. Identity binding requires " +
+			"--require-a2a-signature=true to function. AgentCards with spec.identityBinding " +
+			"will always report NotBound.")
+	}
+
 	var sigProvider signature.Provider
 	if requireA2ASignature {
 		sigConfig := &signature.Config{
@@ -283,13 +286,13 @@ func main() {
 	}
 
 	if err = (&controller.AgentCardReconciler{
-		Client:               mgr.GetClient(),
-		Scheme:               mgr.GetScheme(),
-		Recorder:             mgr.GetEventRecorderFor("agentcard-controller"),
-		EnableLegacyAgentCRD: enableLegacyAgentCRD,
-		SignatureProvider:    sigProvider,
-		RequireSignature:     requireA2ASignature,
-		SignatureAuditMode:   signatureAuditMode,
+		Client:             mgr.GetClient(),
+		Scheme:             mgr.GetScheme(),
+		Recorder:           mgr.GetEventRecorderFor("agentcard-controller"),
+		AgentFetcher:       agentcard.NewFetcher(),
+		SignatureProvider:  sigProvider,
+		RequireSignature:   requireA2ASignature,
+		SignatureAuditMode: signatureAuditMode,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentCard")
 		os.Exit(1)
@@ -301,19 +304,17 @@ func main() {
 			Client:                 mgr.GetClient(),
 			Scheme:                 mgr.GetScheme(),
 			EnforceNetworkPolicies: enforceNetworkPolicies,
-			EnableLegacyAgentCRD:   enableLegacyAgentCRD,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "AgentCardNetworkPolicy")
 			os.Exit(1)
 		}
 		setupLog.Info("Network policy enforcement enabled for signature verification")
 	}
-	// AgentCardSync controller now watches Deployments, StatefulSets, and optionally Agent CRDs
+	// AgentCardSync controller watches Deployments and StatefulSets
 	// It automatically creates AgentCards for workloads with agent labels
 	if err = (&controller.AgentCardSyncReconciler{
-		Client:               mgr.GetClient(),
-		Scheme:               mgr.GetScheme(),
-		EnableLegacyAgentCRD: enableLegacyAgentCRD,
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentCardSync")
 		os.Exit(1)
