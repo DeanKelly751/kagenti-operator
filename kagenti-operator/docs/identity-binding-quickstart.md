@@ -277,7 +277,7 @@ spec:
         - name: app-dir
           mountPath: /app
       containers:
-      - name: agent
+        - name: agent
         image: python:3.11-slim
         command: ["python3", "-m", "http.server", "8000"]
         workingDir: /app
