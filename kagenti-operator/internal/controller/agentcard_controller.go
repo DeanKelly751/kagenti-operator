@@ -103,9 +103,10 @@ type WorkloadInfo struct {
 // AgentCardReconciler reconciles an AgentCard object
 type AgentCardReconciler struct {
 	client.Client
-	Scheme               *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
+
 	AgentFetcher agentcard.Fetcher
-	Recorder     record.EventRecorder
 
 	// Signature verification
 	SignatureProvider  signature.Provider
@@ -122,7 +123,7 @@ type AgentCardReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
 func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	agentCardLogger.Info("Reconciling AgentCard", "namespacedName", req.NamespacedName)
+	agentCardLogger.V(1).Info("Reconciling AgentCard", "namespacedName", req.NamespacedName)
 
 	agentCard := &agentv1alpha1.AgentCard{}
 	err := r.Get(ctx, req.NamespacedName, agentCard)
@@ -414,7 +415,9 @@ func isDeploymentReadyFromUnstructured(obj *unstructured.Unstructured) bool {
 	return false
 }
 
-// isStatefulSetReadyFromUnstructured checks StatefulSet readiness from unstructured
+// isStatefulSetReadyFromUnstructured checks StatefulSet readiness from unstructured.
+// A StatefulSet is ready when it has at least one running replica and all replicas are ready.
+// Note: A StatefulSet scaled to 0 replicas intentionally returns false (not ready to serve).
 func isStatefulSetReadyFromUnstructured(obj *unstructured.Unstructured) bool {
 	readyReplicas, _, err := unstructured.NestedInt64(obj.Object, "status", "readyReplicas")
 	if err != nil {
@@ -424,7 +427,7 @@ func isStatefulSetReadyFromUnstructured(obj *unstructured.Unstructured) bool {
 	if err != nil {
 		return false
 	}
-	return readyReplicas == replicas
+	return readyReplicas > 0 && readyReplicas == replicas
 }
 
 // hasReadyCondition is a generic check for workloads with standard conditions
@@ -483,12 +486,15 @@ func (r *AgentCardReconciler) getService(ctx context.Context, namespace, name st
 	return service, nil
 }
 
-// getServicePort extracts the service port (defaults to first port or 8000)
+// getServicePort extracts the service port (defaults to first port or 8000).
+// If no ports are defined on the service, a hardcoded fallback of 8000 is used.
 func (r *AgentCardReconciler) getServicePort(service *corev1.Service) int32 {
 	if len(service.Spec.Ports) > 0 {
 		return service.Spec.Ports[0].Port
 	}
-	return 8000 // default fallback
+	agentCardLogger.Info("Service has no ports defined, using default port 8000",
+		"service", service.Name, "namespace", service.Namespace)
+	return 8000 // default fallback — most A2A agents listen on 8000
 }
 
 // getSyncPeriod parses the sync period from the spec or returns default
@@ -594,8 +600,35 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 			Message:            "Agent index is ready for queries",
 		})
 
-		// Write binding status if computed
+		// Write binding status if computed.
 		if binding != nil {
+			existingBound := meta.FindStatusCondition(latest.Status.Conditions, "Bound")
+
+			// Emit the AllowlistOnly warning once — on the first binding evaluation.
+			if existingBound == nil {
+				agentCardLogger.Info("Identity binding is allowlist-only; SPIFFE trust bundle verification not yet available",
+					"agentCard", latest.Name)
+				if r.Recorder != nil {
+					r.Recorder.Event(agentCard, corev1.EventTypeWarning, "AllowlistOnly",
+						"Identity binding is allowlist-only; SPIFFE trust bundle verification not yet available")
+				}
+			}
+
+			// Emit binding events only on state transitions to avoid flooding the event stream.
+			newConditionStatus := metav1.ConditionFalse
+			if binding.Bound {
+				newConditionStatus = metav1.ConditionTrue
+			}
+			if existingBound == nil || existingBound.Status != newConditionStatus {
+				if r.Recorder != nil {
+					if binding.Bound {
+						r.Recorder.Event(agentCard, corev1.EventTypeNormal, "BindingEvaluated", binding.Message)
+					} else {
+						r.Recorder.Event(agentCard, corev1.EventTypeWarning, "BindingFailed", binding.Message)
+					}
+				}
+			}
+
 			now := metav1.Now()
 			latest.Status.BindingStatus = &agentv1alpha1.BindingStatus{
 				Bound:              binding.Bound,
@@ -606,13 +639,9 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 			if binding.SpiffeID != "" {
 				latest.Status.ExpectedSpiffeID = binding.SpiffeID
 			}
-			conditionStatus := metav1.ConditionFalse
-			if binding.Bound {
-				conditionStatus = metav1.ConditionTrue
-			}
 			meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
 				Type:               "Bound",
-				Status:             conditionStatus,
+				Status:             newConditionStatus,
 				LastTransitionTime: now,
 				Reason:             binding.Reason,
 				Message:            binding.Message,
@@ -664,60 +693,19 @@ func (r *AgentCardReconciler) propagateSignatureLabel(ctx context.Context, workl
 
 	switch workload.Kind {
 	case "Deployment":
-		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			deployment := &appsv1.Deployment{}
-			if err := r.Get(ctx, key, deployment); err != nil {
-				return err
-			}
-			if deployment.Spec.Template.Labels == nil {
-				deployment.Spec.Template.Labels = make(map[string]string)
-			}
-			current := deployment.Spec.Template.Labels[LabelSignatureVerified]
-			// No change needed — avoid unnecessary rollout
-			if verified && current == "true" {
-				return nil
-			}
-			if !verified && current == "" {
-				return nil
-			}
-			if verified {
-				deployment.Spec.Template.Labels[LabelSignatureVerified] = "true"
-			} else {
-				delete(deployment.Spec.Template.Labels, LabelSignatureVerified)
-			}
-			agentCardLogger.Info("Propagating signature-verified label to Deployment pod template",
-				"deployment", workload.Name,
-				"verified", verified)
-			return r.Update(ctx, deployment)
-		})
-
+		return r.propagateLabelToWorkload(ctx, key, workload, verified, &appsv1.Deployment{},
+			func(obj client.Object) map[string]string { return obj.(*appsv1.Deployment).Spec.Template.Labels },
+			func(obj client.Object, labels map[string]string) {
+				obj.(*appsv1.Deployment).Spec.Template.Labels = labels
+			},
+		)
 	case "StatefulSet":
-		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			statefulSet := &appsv1.StatefulSet{}
-			if err := r.Get(ctx, key, statefulSet); err != nil {
-				return err
-			}
-			if statefulSet.Spec.Template.Labels == nil {
-				statefulSet.Spec.Template.Labels = make(map[string]string)
-			}
-			current := statefulSet.Spec.Template.Labels[LabelSignatureVerified]
-			if verified && current == "true" {
-				return nil
-			}
-			if !verified && current == "" {
-				return nil
-			}
-			if verified {
-				statefulSet.Spec.Template.Labels[LabelSignatureVerified] = "true"
-			} else {
-				delete(statefulSet.Spec.Template.Labels, LabelSignatureVerified)
-			}
-			agentCardLogger.Info("Propagating signature-verified label to StatefulSet pod template",
-				"statefulSet", workload.Name,
-				"verified", verified)
-			return r.Update(ctx, statefulSet)
-		})
-
+		return r.propagateLabelToWorkload(ctx, key, workload, verified, &appsv1.StatefulSet{},
+			func(obj client.Object) map[string]string { return obj.(*appsv1.StatefulSet).Spec.Template.Labels },
+			func(obj client.Object, labels map[string]string) {
+				obj.(*appsv1.StatefulSet).Spec.Template.Labels = labels
+			},
+		)
 	default:
 		agentCardLogger.V(1).Info("Cannot propagate signature label to unsupported workload kind",
 			"kind", workload.Kind, "workload", workload.Name)
@@ -725,9 +713,52 @@ func (r *AgentCardReconciler) propagateSignatureLabel(ctx context.Context, workl
 	}
 }
 
-// updateCondition updates a specific condition
-func (r *AgentCardReconciler) updateCondition(ctx context.Context, agentCard *agentv1alpha1.AgentCard, conditionType string, status metav1.ConditionStatus, reason, message string) {
-	_ = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+// propagateLabelToWorkload is a generic helper that adds or removes the signature-verified
+// label on a workload's pod template. It avoids unnecessary updates (and thus rollouts)
+// when the label is already in the desired state.
+func (r *AgentCardReconciler) propagateLabelToWorkload(
+	ctx context.Context,
+	key types.NamespacedName,
+	workload *WorkloadInfo,
+	verified bool,
+	obj client.Object,
+	getLabels func(client.Object) map[string]string,
+	setLabels func(client.Object, map[string]string),
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Get(ctx, key, obj); err != nil {
+			return err
+		}
+		labels := getLabels(obj)
+		if labels == nil {
+			labels = make(map[string]string)
+			setLabels(obj, labels)
+		}
+		current := labels[LabelSignatureVerified]
+		// No change needed — avoid unnecessary rollout
+		if verified && current == "true" {
+			return nil
+		}
+		if !verified && current == "" {
+			return nil
+		}
+		if verified {
+			labels[LabelSignatureVerified] = "true"
+		} else {
+			delete(labels, LabelSignatureVerified)
+		}
+		agentCardLogger.Info("Propagating signature-verified label to pod template",
+			"kind", workload.Kind,
+			"workload", workload.Name,
+			"verified", verified)
+		return r.Update(ctx, obj)
+	})
+}
+
+// updateCondition updates a specific condition on the AgentCard status.
+// Returns an error if the status update fails after retries.
+func (r *AgentCardReconciler) updateCondition(ctx context.Context, agentCard *agentv1alpha1.AgentCard, conditionType string, status metav1.ConditionStatus, reason, message string) error {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &agentv1alpha1.AgentCard{}
 		if err := r.Get(ctx, types.NamespacedName{
 			Name:      agentCard.Name,
@@ -745,7 +776,11 @@ func (r *AgentCardReconciler) updateCondition(ctx context.Context, agentCard *ag
 		})
 
 		return r.Status().Update(ctx, latest)
-	})
+	}); err != nil {
+		agentCardLogger.Error(err, "Failed to update condition", "type", conditionType)
+		return err
+	}
+	return nil
 }
 
 // handleDeletion handles cleanup when an AgentCard is deleted
@@ -785,14 +820,20 @@ func (r *AgentCardReconciler) mapWorkloadToAgentCard(apiVersion, kind string) ha
 			return nil
 		}
 
+		// Use the field indexer to find AgentCards that reference this workload by name,
+		// scoped to the same namespace. This avoids listing every AgentCard.
 		agentCardList := &agentv1alpha1.AgentCardList{}
-		if err := r.List(ctx, agentCardList, client.InNamespace(obj.GetNamespace())); err != nil {
+		if err := r.List(ctx, agentCardList,
+			client.InNamespace(obj.GetNamespace()),
+			client.MatchingFields{TargetRefNameIndex: obj.GetName()},
+		); err != nil {
 			agentCardLogger.Error(err, "Failed to list AgentCards for mapping")
 			return nil
 		}
 
 		var requests []reconcile.Request
 		for _, agentCard := range agentCardList.Items {
+			// Double-check apiVersion and kind since the index only matches on name.
 			if r.targetRefMatchesWorkload(&agentCard, obj, apiVersion, kind) {
 				requests = append(requests, reconcile.Request{
 					NamespacedName: types.NamespacedName{
@@ -857,18 +898,19 @@ func (r *AgentCardReconciler) computeBinding(agentCard *agentv1alpha1.AgentCard,
 		agentCardLogger.Info("Identity binding failed: no SPIFFE ID in JWS protected header",
 			"agentCard", agentCard.Name,
 			"hint", "Use --spiffe-id when signing to embed the SPIFFE ID in the JWS protected header")
-		if r.Recorder != nil {
-			r.Recorder.Event(agentCard, corev1.EventTypeWarning, "BindingFailed", message)
-		}
 		return &bindingResult{Bound: false, Reason: reason, Message: message}
 	}
 
-	// Warn that binding is allowlist-only until SPIFFE trust bundle verification is available.
-	agentCardLogger.Info("Identity binding is allowlist-only; SPIFFE trust bundle verification not yet available",
-		"agentCard", agentCard.Name)
-	if r.Recorder != nil {
-		r.Recorder.Event(agentCard, corev1.EventTypeWarning, "AllowlistOnly",
-			"Identity binding is allowlist-only; SPIFFE trust bundle verification not yet available")
+	// Defensive: CRD schema enforces minItems=1, but guard against an empty allowlist
+	// to avoid silently failing all bindings if validation is bypassed.
+	if len(binding.AllowedSpiffeIDs) == 0 {
+		agentCardLogger.Error(nil, "BUG: allowedSpiffeIDs is empty — CRD validation may have been bypassed",
+			"agentCard", agentCard.Name)
+		return &bindingResult{
+			Bound:   false,
+			Reason:  ReasonNotBound,
+			Message: "allowedSpiffeIDs is empty: at least one SPIFFE ID must be specified",
+		}
 	}
 
 	// Check if verified SPIFFE ID is in the allowlist
@@ -897,15 +939,8 @@ func (r *AgentCardReconciler) computeBinding(agentCard *agentv1alpha1.AgentCard,
 		message = fmt.Sprintf("SPIFFE ID %s (source: jws-protected-header) is not in the allowlist", verifiedSpiffeID)
 	}
 
-	// Emit events for immediate kubectl visibility
-	if r.Recorder != nil {
-		if bound {
-			r.Recorder.Event(agentCard, corev1.EventTypeNormal, "BindingEvaluated", message)
-		} else {
-			r.Recorder.Event(agentCard, corev1.EventTypeWarning, "BindingFailed", message)
-		}
-	}
-
+	// Note: binding events are emitted in updateAgentCardStatus only on state transitions
+	// to avoid flooding the event stream on every reconcile cycle.
 	return &bindingResult{Bound: bound, Reason: reason, Message: message, SpiffeID: verifiedSpiffeID}
 }
 
@@ -948,12 +983,17 @@ func (r *AgentCardReconciler) updateBindingStatus(ctx context.Context, agentCard
 	})
 }
 
-// computeCardId computes a SHA256 hash of the card data for drift detection
+// computeCardId computes a SHA256 hash of the card data for drift detection.
+// json.Marshal on a Go struct produces deterministic output (field order follows
+// the struct definition, not a map). The hash is only compared within this operator.
+//
+// NOTE: Do NOT use this for JWS signing — use signature.CreateCanonicalCardJSON
+// instead, which produces spec-compliant canonical JSON (sorted keys, no whitespace,
+// signatures field excluded).
 func (r *AgentCardReconciler) computeCardId(cardData *agentv1alpha1.AgentCardData) string {
 	if cardData == nil {
 		return ""
 	}
-	// JSON serialization is sufficient — hash is only compared within this operator
 	data, err := json.Marshal(cardData)
 	if err != nil {
 		agentCardLogger.Error(err, "Failed to marshal card data for hash computation")
@@ -977,6 +1017,11 @@ func (r *AgentCardReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Inject the Kubernetes client into providers that need it
 	if secretProvider, ok := r.SignatureProvider.(*signature.SecretProvider); ok {
 		secretProvider.SetClient(mgr.GetClient())
+	}
+
+	// Register the shared field indexer (safe to call from multiple controllers).
+	if err := RegisterAgentCardTargetRefIndex(mgr); err != nil {
+		return err
 	}
 
 	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
