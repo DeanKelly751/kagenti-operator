@@ -24,16 +24,15 @@ The agent deployments in this guide are configured with the following environmen
 
 ## Intent
 
-This guide provides step-by-step instructions for deploying and testing AI agents with the Kagenti platform. By following this guide, you will learn how to deploy agents, build custom agent images, and integrate MCP (Model Context Protocol) servers to extend agent capabilities.
+This guide provides step-by-step instructions for deploying and testing AI agents with the Kagenti platform. By following this guide, you will learn how to deploy agents and integrate MCP (Model Context Protocol) servers to extend agent capabilities.
 
 ## Scenario
 
 In this guide, you will:
 
 1. Deploy a weather agent that can answer weather-related queries
-2. Optionally build a custom agent image from GitHub source code
-3. Deploy an MCP server that provides tools and resources to the agent
-4. Test the end-to-end flow by sending a weather query ("What is the weather in New York?") to the agent, which will communicate with the MCP server and return a response
+2. Deploy an MCP server that provides tools and resources to the agent
+3. Test the end-to-end flow by sending a weather query ("What is the weather in New York?") to the agent, which will communicate with the MCP server and return a response
 
 This scenario demonstrates the complete lifecycle of an AI agent deployment on the Kagenti platform, from initial deployment to integration with external tools via MCP servers.
 
@@ -41,10 +40,9 @@ This scenario demonstrates the complete lifecycle of an AI agent deployment on t
 ## Overview
 
 ### Kagenti Operator
-The Kagenti Operator manages AI Agent deployments through two Custom Resources:
+The Kagenti Operator discovers, indexes, and secures AI agents deployed in Kubernetes. Agents are deployed as standard Kubernetes **Deployments** or **StatefulSets** with the `kagenti.io/type: agent` label. The operator automatically creates **AgentCard** resources for discovered workloads to enable Kubernetes-native agent discovery.
 
-- **Agent**: Deploys an AI agent (required)
-- **AgentBuild**: Builds container images from GitHub source (optional - only needed for build-from-source)
+> **Note:** The `Agent` Custom Resource is deprecated and will be removed in a future release. Use standard Kubernetes Deployments or StatefulSets with the `kagenti.io/type: agent` label instead.
 
 ### Stacklok ToolHive Operator
 
@@ -54,35 +52,38 @@ The Stacklok ToolHive Operator is deployed as part of the Kagenti platform insta
 
 ---
 
-## Deploy an Agent from Existing Image
+## Deploy an Agent
+
+Deploy an agent as a standard Kubernetes Deployment with the required `kagenti.io/type: agent` label. The operator will automatically discover the workload and create an AgentCard for it.
 
 ### Quick Example Deployment
 
 ```yaml
 kubectl apply -f - <<EOF
-apiVersion: agent.kagenti.dev/v1alpha1
-kind: Agent
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: weather-agent
   namespace: team1
   labels:
-    kagenti.io/framework: LangGraph
-    kagenti.io/protocol: a2a
-    kagenti.io/type: agent
-    kagenti-enabled: "true"
     app.kubernetes.io/name: weather-agent
+    kagenti.io/type: agent
+    kagenti.io/protocol: a2a
+    kagenti.io/framework: LangGraph
 spec:
-  imageSource:
-    image: "ghcr.io/kagenti/agent-examples/weather_service:v0.0.1-alpha.3"
-  servicePorts:
-    - port: 8000
-      targetPort: 8000
-      protocol: TCP
-      name: http  
-  podTemplateSpec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: weather-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: weather-agent
+        kagenti.io/type: agent
     spec:
       containers:
       - name: agent
+        image: "ghcr.io/kagenti/agent-examples/weather_service:v0.0.1-alpha.3"
         ports:
         - containerPort: 8000
         imagePullPolicy: Always
@@ -98,7 +99,20 @@ spec:
         - name: LLM_API_KEY
           value: dummy
         - name: LLM_MODEL
-          value: llama3.2:3b-instruct-fp16     
+          value: llama3.2:3b-instruct-fp16
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-agent
+  namespace: team1
+spec:
+  selector:
+    app.kubernetes.io/name: weather-agent
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
 EOF
 
 ```
@@ -106,159 +120,18 @@ EOF
 **Check Status**:
 ```bash
 
-# Check status
-kubectl get agent weather-agent -n team1
+# Check discovered agent cards
+kubectl get agentcards -n team1
+
+# Check deployment status
+kubectl get deployment weather-agent -n team1
 
 # View logs
 kubectl logs -l app.kubernetes.io/name=weather-agent -n team1
 ```
-## Next Steps: Choose Your Path
-
-After deploying the Agent from an existing image, you have two options:
-
-### Option 1: Skip to MCP Server Deployment (Recommended for Quick Testing)
-If you want to proceed directly with testing the agent with an MCP server, **skip the next section** and go directly to [Deploy an MCP Server](#deploy-an-mcp-server).
-
-### Option 2: Build from Source (Optional)
-If you want to build a custom agent image from GitHub source code, continue with the next section. **Note:** This involves building from source and deploying a new instance of an Agent that references the AgentBuild to extract the built image. If you choose this path, you must **delete the previous Agent instance** first:
-```bash
-kubectl delete agent weather-agent -n team1
-```
 
 ---
 
----
-
-## Build and Deploy from GitHub Source
-
-### Step 1: Create AgentBuild
-
-This builds a container image weather-service agent from kagenti GitHub repository.
-
-```yaml
-kubectl apply -f - <<EOF
-apiVersion: agent.kagenti.dev/v1alpha1
-kind: AgentBuild
-metadata:
-  name: weather-agent-build
-  namespace: team1
-spec:
-  pipeline:
-     namespace: kagenti-system
-     parameters:
-       - name: PYTHON_VERSION
-         value: "3.13"
-  source:
-    sourceRepository: "github.com/kagenti/agent-examples"
-    sourceRevision: "main"
-    sourceSubfolder: a2a/weather_service
-    # For private repos (optional):
-    # sourceCredentials:
-    #   name: github-token-secret
-  
-  buildOutput:
-    image: "weather-service"
-    imageTag: "v1.0.0"
-    imageRegistry: "registry.cr-system.svc.cluster.local:5000"
-EOF
-```
-
-**monitor**:
-```bash
-
-# Watch build progress
-kubectl get agentbuild weather-agent-build -n team1 -w
-
-# Check when phase becomes "Succeeded"
-```
-
-### Step 2: Deploy Agent Using Built Image
-
-```yaml
-kubectl apply -f - <<EOF
-apiVersion: agent.kagenti.dev/v1alpha1
-kind: Agent
-metadata:
-  name: weather-agent
-  namespace: team1
-  labels:
-    kagenti.io/framework: LangGraph
-    kagenti.io/protocol: a2a
-    kagenti.io/type: agent
-    kagenti-enabled: "true"
-    app.kubernetes.io/name: weather-agent
-spec:
-  imageSource:
-    buildRef:
-      name: weather-agent-build  # References the AgentBuild above
-  servicePorts:
-    - port: 8000
-      targetPort: 8000
-      protocol: TCP
-      name: http    
-  podTemplateSpec:
-    spec:
-      containers:
-      - name: agent
-        ports:
-        - containerPort: 8000
-        imagePullPolicy: Always
-        env:
-        - name: PORT
-          value: "8000"
-        - name: UV_CACHE_DIR
-          value: /app/.cache/uv
-        - name: MCP_URL
-          value: http://mcp-weather-tool-proxy.team1.svc.cluster.local:8000/mcp
-        - name: LLM_API_BASE
-          value: http://host.docker.internal:11434/v1
-        - name: LLM_API_KEY
-          value: dummy
-        - name: LLM_MODEL
-          value: llama3.2:3b-instruct-fp16     
-
-EOF
-```
-
-**Monitor**:
-```bash
-
-# Verify it's using the built image
-kubectl get agent weather-agent-build -n team1 -o yaml | grep builtImage
-```
----
-## Checking Status
-
-### Agent Status
-
-```bash
-# List agents
-kubectl get agents -n team1
-
-# Detailed status
-kubectl describe agent weather-agent -n team1
-
-# Check deployment phase
-kubectl get agent weather-agent -n team1 -o jsonpath='{.status.deploymentStatus.phase}'
-# Should show: Ready
-```
-
-### AgentBuild Status
-
-```bash
-# List builds
-kubectl get agentbuilds -n team1
-
-# Check build phase
-kubectl get agentbuild weather-agent-build -n team1 -o jsonpath='{.status.phase}'
-# Phases: Pending → Building → Succeeded (or Failed)
-
-# View build logs
-PIPELINE=$(kubectl get agentbuild weather-agent-build -n team1 -o jsonpath='{.status.pipelineRunName}')
-kubectl logs -f $(kubectl get pods -n team1 -l tekton.dev/pipelineRun=$PIPELINE -o name | head -1)
-```
-
----
 ## Deploy an MCP Server
 
 > **Note**: The MCPServer Custom Resource is managed by the Stacklok ToolHive Operator, which is deployed as part of the Kagenti platform installation. This guide shows how to deploy an MCPServer to enable end-to-end testing.
@@ -276,7 +149,7 @@ metadata:
   labels:
     kagenti.io/framework: Python
     kagenti.io/protocol: streamable_http
-    kagenti.io/type: tool  
+    kagenti.io/type: tool
     toolhive-basename: weather-tool
 spec:
   image: "ghcr.io/kagenti/agent-examples/weather_tool:v0.0.1-alpha.3"
@@ -429,60 +302,28 @@ kubectl logs -f -l toolhive-basename=weather-tool -n team1
 
 ## Checking Status
 
-### Agent Status
+### Deployment Status
 ```bash
-# List agents
-kubectl get agents -n team1
+# Check deployment
+kubectl get deployment weather-agent -n team1
 
 # Detailed status
-kubectl describe agent weather-agent -n team1
+kubectl describe deployment weather-agent -n team1
 
-# Check deployment phase
-kubectl get agent weather-agent -n team1 -o jsonpath='{.status.deploymentStatus.phase}'
-# Should show: Ready
+# Check if pods are ready
+kubectl get pods -n team1 -l app.kubernetes.io/name=weather-agent
 ```
 
-### AgentBuild Status
+### AgentCard Status
 ```bash
-# List builds
-kubectl get agentbuilds -n team1
+# List discovered agent cards
+kubectl get agentcards -n team1
 
-# Get the full name of the build (it will have a generated suffix)
-AGENTBUILD_NAME=$(kubectl get agentbuilds -n team1 \
-  -l agent=weather-agent \
-  -o jsonpath='{.items[0].metadata.name}')
+# Get detailed agent card info
+kubectl describe agentcard -n team1
 
-# Check build phase
-kubectl get agentbuild $AGENTBUILD_NAME -n team1 -o jsonpath='{.status.phase}'
-# Phases: Pending → Building → Succeeded (or Failed)
-
-# Check the built image
-kubectl get agentbuild $AGENTBUILD_NAME -n team1 -o jsonpath='{.status.builtImage}'
-
-# View detailed status including conditions
-kubectl get agentbuild $AGENTBUILD_NAME -n team1 -o yaml | grep -A 20 status
-
-# Get the PipelineRun name
-PIPELINE=$(kubectl get agentbuild $AGENTBUILD_NAME -n team1 -o jsonpath='{.status.pipelineRunName}')
-echo "PipelineRun: $PIPELINE"
-
-# Check if build is still running
-kubectl get pipelinerun $PIPELINE -n team1
-
-# View build logs (only available while build is in progress)
-# Note: Pods are cleaned up after successful completion
-kubectl get pods -n team1 -l tekton.dev/pipelineRun=$PIPELINE
-
-# If pods exist (build in progress), view logs:
-PIPELINE_POD=$(kubectl get pods -n team1 -l tekton.dev/pipelineRun=$PIPELINE -o jsonpath='{.items[0].metadata.name}')
-if [ -n "$PIPELINE_POD" ]; then
-  kubectl logs -f $PIPELINE_POD -n team1 --all-containers=true
-else
-  echo "Build completed - pods have been cleaned up. Check status with: kubectl get agentbuild $AGENTBUILD_NAME -n team1 -o yaml"
-fi
-
-# Alternative: Watch build progress in real-time (run this before or during build)
-kubectl get agentbuild $AGENTBUILD_NAME -n team1 -w
+# Check signature verification status
+kubectl get agentcard -n team1 -o jsonpath='{.items[0].status.validSignature}'
 ```
 
 ### MCPServer Status
@@ -506,25 +347,14 @@ kubectl logs -l toolhive-basename=weather-tool -n team1 -f
 
 ### Agent Not Starting
 ```bash
-# Check if using BuildRef 
-kubectl get agent weather-agent -n team1 -o yaml | grep buildRef
-
-# If yes, verify build succeeded
-kubectl get agentbuild  -n team1 -o jsonpath='{.status.phase}'
-# Should show: Succeeded
+# Check deployment status
+kubectl describe deployment weather-agent -n team1
 
 # Check events
 kubectl get events -n team1 --field-selector involvedObject.name=weather-agent
-```
 
-### Build Failing
-```bash
-# Check build status
-kubectl get agentbuild weather-agent-build -n team1 -o yaml | grep -A10 status
-
-# View build logs
-kubectl get pods -n team1 -l app.kubernetes.io/component=weather-agent-build
-kubectl logs $(kubectl get pods -n team1 -l app.kubernetes.io/component=weather-agent-build -o jsonpath='{.items[0].metadata.name}') -n team1
+# Check pod status
+kubectl get pods -n team1 -l app.kubernetes.io/name=weather-agent
 ```
 
 ### MCP Server Not Starting
@@ -579,42 +409,12 @@ kubectl run curl-test --image=curlimages/curl:8.1.2 --rm -i --tty -n team1 -- \
 
 ---
 
-## Secrets (For Private Repos/Registries)
-
-### GitHub Token
-```bash
-kubectl create secret generic github-token-secret \
-  --from-literal=username=myusername \
-  --from-literal=password=ghp_mytoken \
-  -n team1
-```
-
-### Registry Credentials
-```bash
-kubectl create secret docker-registry ghcr-secret \
-  --docker-server=ghcr.io \
-  --docker-username=myusername \
-  --docker-password=ghp_mytoken \
-  -n team1
-```
-
-**Use in AgentBuild**:
-```yaml
-spec:
-  source:
-    sourceCredentials:
-      name: github-token-secret
-  buildOutput:
-    imageRepoCredentials:
-      name: ghcr-secret
-```
-
----
-
 ## Next Steps
 
-- **Custom Pipelines**: TODO: Documentation coming soon.
-- **Advanced Configuration**: TODO: Documentation coming soon.
-- **Webhook Details**: See [AgentBuild Webhook](docs/agentbuild-webhook.md)
+- [Dynamic Agent Discovery](docs/dynamic-agent-discovery.md) — How AgentCard enables agent discovery
+- [Signature Verification](docs/a2a-signature-verification.md) — Set up JWS signature verification
+- [Identity Binding](docs/identity-binding-quickstart.md) — Configure SPIFFE identity binding
+- [Migration Guide](../docs/migration/migrate-agent-crd-to-workloads.md) — Migrating from Agent CRD to workloads
+- [API Reference](docs/api-reference.md) — Full CRD specifications
 
 ---
