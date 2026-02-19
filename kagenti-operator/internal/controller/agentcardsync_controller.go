@@ -92,14 +92,6 @@ func (r *AgentCardSyncReconciler) ReconcileDeployment(ctx context.Context, req c
 		return ctrl.Result{}, nil
 	}
 
-	// Skip Deployments owned by the legacy Agent CRD — the Agent reconciler handles those.
-	// This prevents duplicate AgentCards (one from Agent path, one from Deployment path).
-	if isOwnedByAgentCRD(deployment) {
-		syncLogger.V(1).Info("Skipping Deployment owned by Agent CRD",
-			"deployment", deployment.Name, "namespace", deployment.Namespace)
-		return ctrl.Result{}, nil
-	}
-
 	// Create or update AgentCard with targetRef
 	gvk := appsv1.SchemeGroupVersion.WithKind("Deployment")
 	return r.ensureAgentCard(ctx, deployment, gvk)
@@ -288,23 +280,6 @@ func (r *AgentCardSyncReconciler) findExistingCardForWorkload(ctx context.Contex
 		}
 	}
 	return "", false
-}
-
-// isOwnedByAgentCRD checks if an object (Deployment/StatefulSet) is owned by the
-// legacy Agent CRD. Returns true if any owner reference has kind=Agent in the
-// kagenti API group.
-//
-// TODO(cleanup): Remove this function once the legacy Agent CRD is fully
-// removed from all clusters and the AgentReconciler is deleted. At that point,
-// no Deployments will carry Agent-owned owner references and this guard is
-// unnecessary.
-func isOwnedByAgentCRD(obj client.Object) bool {
-	for _, ref := range obj.GetOwnerReferences() {
-		if ref.Kind == "Agent" && ref.APIVersion == agentv1alpha1.GroupVersion.String() {
-			return true
-		}
-	}
-	return false
 }
 
 // createAgentCardForWorkload creates a new AgentCard for a workload using targetRef

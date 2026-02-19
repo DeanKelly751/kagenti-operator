@@ -16,17 +16,15 @@ This document provides a detailed overview of the Kagenti Operator architecture,
 
 ## Overview
 
-The Kagenti Operator is a Kubernetes controller that implements the [Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/) to automate the discovery, verification, and security of AI agents. Agents are deployed as standard Kubernetes **Deployments** or **StatefulSets** with the `kagenti.io/type: agent` label — the operator automatically discovers labeled workloads and manages their AgentCard lifecycle.
-
-> **Deprecation Notice:** The `Agent` Custom Resource is deprecated and will be removed in a future release. Use standard Kubernetes Deployments or StatefulSets with the `kagenti.io/type: agent` label instead. See the [Migration Guide](../../docs/migration/migrate-agent-crd-to-workloads.md) for details.
+The Kagenti Operator is a Kubernetes controller that implements the [Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/) to automate the discovery and lifecycle management of AI agents. It follows a **Deployment-first model**: users create standard Kubernetes Deployments or StatefulSets, and the operator discovers them via `AgentCard` CRs with `targetRef`. The `AgentBuild` CR handles building container images from source using Tekton pipelines.
 
 ### Design Goals
 
-- **Kubernetes-Native Discovery**: Automatic agent discovery through standard Kubernetes resources
-- **Security by Default**: Cryptographic signature verification and identity binding for agent cards
-- **Flexible Deployment**: Support standard Kubernetes Deployments and StatefulSets as agent workloads
-- **Extensibility**: Duck typing with `targetRef` supports any workload type
-- **Separation of Concerns**: Discovery, verification, and network policy are handled by independent controllers
+- **Deployment-First**: Users create standard Kubernetes workloads; the operator handles discovery
+- **Declarative Configuration**: Infrastructure as Code using Kubernetes CRDs
+- **Extensibility**: Template-based build system supporting custom pipelines
+- **Security**: Signature verification, identity binding, RBAC, and least-privilege principles
+- **Scalability**: Supports multiple agents and builds concurrently
 - **Cloud-Native**: Leverages native Kubernetes primitives and patterns
 
 ---
@@ -35,45 +33,35 @@ The Kagenti Operator is a Kubernetes controller that implements the [Operator Pa
 
 ### Custom Resource Definitions (CRDs)
 
-#### Agent CRD (Deprecated)
-> **Deprecated:** Use standard Kubernetes Deployments or StatefulSets with the `kagenti.io/type: agent` label instead.
-
-- Defines desired state of an AI agent deployment
-- Manages Kubernetes Deployment and Service resources
-- Supports pre-built container images
-- Provides status feedback on deployment health
-
 #### AgentCard CRD
-- Stores cached agent card metadata fetched from running agents
-- References backing workloads via `targetRef` (duck typing)
-- Supports signature verification and identity binding configuration
-- Enables Kubernetes-native agent discovery via `kubectl get agentcards`
+- Provides dynamic discovery of AI agents via `targetRef`-based workload binding
+- Fetches and caches agent metadata (A2A agent cards) from running workloads
+- Supports signature verification and identity binding
+- Stores agent capabilities, skills, and endpoint information
+
+#### AgentBuild CRD
+- Manages container image build pipelines using Tekton
+- Supports multiple build modes (dev, buildpack, custom, etc.)
+- Tracks build status and outputs built image references
 
 ### Controllers
 
-#### Agent Controller (Deprecated)
-> **Deprecated:** The Agent CR and its controller are deprecated. Use standard Kubernetes Deployments or StatefulSets with the `kagenti.io/type: agent` label instead.
-
-- Watches Agent resources
-- Creates and manages Deployments and Services
-- Updates status conditions based on deployment state
-- Handles resource cleanup on deletion via finalizers
-
 #### AgentCard Controller
 - Watches AgentCard resources
-- Resolves the backing workload via `targetRef` (Deployment, StatefulSet, or any workload type)
-- Fetches agent card data from the workload's `/.well-known/agent.json` endpoint
-- Verifies JWS signatures when signature verification is enabled
-- Evaluates SPIFFE identity binding when configured
-- Propagates `signature-verified` labels to workload pod templates
-- Updates AgentCard status with card data, sync time, and verification results
+- Resolves workloads via `targetRef` (Deployments, StatefulSets)
+- Fetches agent cards from running workloads
+- Verifies signatures and evaluates identity bindings
+- Updates status with cached card data and conditions
 
-#### AgentCard Sync Controller
-- Watches Deployments and StatefulSets with `kagenti.io/type=agent` labels
-- Automatically creates AgentCard resources for discovered agent workloads
-- Sets owner references for automatic garbage collection
-- Skips Deployments owned by the Agent CRD (those are handled by the Agent path)
-- Uses a grace period to avoid duplicate cards when resources are applied together
+#### AgentCardSync Controller
+- Watches Deployments and StatefulSets with agent labels
+- Automatically creates AgentCard resources for discovered workloads
+- Sets owner references for garbage collection
+
+#### AgentBuild Controller
+- Watches AgentBuild resources
+- Creates and manages Tekton Pipelines and PipelineRuns
+- Tracks build status and updates AgentBuild status
 
 #### AgentCard NetworkPolicy Controller
 - Watches AgentCard resources when `--enforce-network-policies` is enabled
@@ -84,13 +72,10 @@ The Kagenti Operator is a Kubernetes controller that implements the [Operator Pa
 ### Supporting Components
 
 #### Webhook
-- Validates AgentCard resources
-- Prevents invalid configurations
-
-#### RBAC Manager
-- Creates ServiceAccounts for agents deployed via Agent CRD (deprecated path)
-- Manages Roles and RoleBindings
-- Implements least-privilege access control
+- Validates AgentCard and AgentBuild resources
+- Ensures `targetRef` is set on AgentCards
+- Mutates resources with default values
+- Injects pipeline templates based on mode
 
 #### Signature Providers
 - **Secret Provider**: Reads public keys from Kubernetes Secrets
@@ -105,51 +90,70 @@ The Kagenti Operator is a Kubernetes controller that implements the [Operator Pa
 graph TB
     subgraph "User Interaction"
         User[User/Developer]
-        User -->|Creates| Workload["Deployment/StatefulSet\n(with kagenti labels)"]
+        User -->|Creates| Deployment[Deployment/StatefulSet]
+        User -->|Creates| CardCR[AgentCard CR]
+        User -->|Creates| BuildCR[AgentBuild CR]
     end
 
     subgraph "Kagenti Operator"
-        AgentCardSync[AgentCard Sync Controller]
-        AgentCardController[AgentCard Controller]
-        NetworkPolicyCtrl[NetworkPolicy Controller]
-        SigProvider[Signature Provider]
+        Webhook[Admission Webhook]
+        CardController[AgentCard Controller]
+        SyncController[AgentCardSync Controller]
+        BuildController[AgentBuild Controller]
 
-        Workload -->|Watches labels| AgentCardSync
-        AgentCardSync -->|Auto-creates| AgentCardCR[AgentCard CR]
+        CardCR -->|Validates| Webhook
+        BuildCR -->|Validates/Mutates| Webhook
 
-        AgentCardCR -->|Reconciles| AgentCardController
-        AgentCardController -->|Verifies| SigProvider
-        AgentCardCR -->|Reconciles| NetworkPolicyCtrl
+        Webhook -->|Valid CR| CardController
+        Webhook -->|Valid CR| BuildController
     end
 
     subgraph "Kubernetes Resources"
-        NetPol[NetworkPolicy]
+        ConfigMap[ConfigMaps<br/>Pipeline Templates]
+    end
 
-        NetworkPolicyCtrl -->|Creates| NetPol
+    subgraph "Tekton Pipelines"
+        Pipeline[Pipeline]
+        PipelineRun[PipelineRun]
+        Task[Tasks]
+
+        BuildController -->|Creates| Pipeline
+        BuildController -->|Creates| PipelineRun
+        Pipeline -->|Composed of| Task
+        PipelineRun -->|Executes| Pipeline
+
+        PipelineRun -->|Updates| BuildCR
+    end
+
+    subgraph "Build Workflow"
+        Git[Git Repository]
+        Registry[Container Registry]
+
+        Task -->|Clones from| Git
+        Task -->|Pushes to| Registry
     end
 
     subgraph "Runtime"
         Pod[Agent Pods]
-        Workload -->|Creates| Pod
-        AgentCardController -->|"Fetches /.well-known/agent.json"| Pod
-        AgentCardController -->|"Propagates signature-verified label"| Workload
+
+        Deployment -->|Creates| Pod
+        Pod -->|Uses image from| Registry
+        CardController -->|Fetches agent card from| Pod
     end
 
-    subgraph "Key Sources"
-        Secret[K8s Secret]
-        JWKS[JWKS Endpoint]
-        SigProvider -->|Reads| Secret
-        SigProvider -->|Fetches| JWKS
-    end
+    SyncController -->|Watches| Deployment
+    SyncController -->|Auto-creates| CardCR
+    CardCR -->|targetRef| Deployment
 
     style User fill:#ffecb3
-    style Workload fill:#e1f5fe
-    style AgentCardCR fill:#e1f5fe
-    style AgentCardSync fill:#ffe0b2
-    style AgentCardController fill:#ffe0b2
-    style NetworkPolicyCtrl fill:#ffe0b2
+    style CardCR fill:#e1f5fe
+    style BuildCR fill:#e1f5fe
+    style Webhook fill:#fff3e0
+    style CardController fill:#ffe0b2
+    style SyncController fill:#ffe0b2
+    style BuildController fill:#ffe0b2
+    style Deployment fill:#d1c4e9
     style Pod fill:#c8e6c9
-    style NetPol fill:#ffcdd2
 ```
 
 ---
@@ -158,34 +162,36 @@ graph TB
 
 ### AgentCard Controller
 
-The AgentCard Controller fetches, verifies, and caches agent metadata from running workloads.
-> **Deprecated:** The Agent CR and its controller are deprecated. Use standard Kubernetes Deployments or StatefulSets with the `kagenti.io/type: agent` label instead.
-
-
-### AgentCard Sync Controller
-
-The AgentCard Sync Controller automatically discovers agent workloads and creates AgentCard resources.
+The AgentCard Controller reconciles AgentCard CRs by resolving the backing workload via `targetRef`, fetching the agent card from the running agent, and storing the result in status.
 
 #### Reconciliation Flow
 
 ```
-1. Watch Deployments and StatefulSets with kagenti.io/type=agent label
-2. Skip Deployments owned by Agent CRD (those are handled separately)
-3. Check for existing AgentCard targeting this workload
-4. Apply grace period for newly created workloads (avoids duplicates)
-5. Create AgentCard with targetRef pointing to the workload
-6. Set owner reference for garbage collection
+1. Watch for AgentCard CR changes
+2. Resolve workload via spec.targetRef (Deployment or StatefulSet)
+3. Construct service URL for the agent
+4. Fetch agent card from /.well-known/agent.json
+5. Optionally verify signature (if --require-a2a-signature)
+6. Evaluate identity binding (if spec.identityBinding configured)
+7. Update AgentCard status:
+   a. Store cached card data
+   b. Set sync conditions
+   c. Record signature verification result
+8. Requeue after syncPeriod for next fetch
 ```
 
 #### AgentCard Naming Convention
 
-```
-<workload-name>-<workload-kind-lowercase>-card
-```
+The controller maintains several conditions:
+
+| Condition | Meaning |
+|-----------|---------|
+| `Synced` | Agent card fetched successfully from the workload |
+| `Ready` | Agent card is available for discovery queries |
 
 Examples:
-- Deployment `weather-agent` → AgentCard `weather-agent-deployment-card`
-- StatefulSet `weather-agent` → AgentCard `weather-agent-statefulset-card`
+- Deployment `weather-agent` -> AgentCard `weather-agent-deployment-card`
+- StatefulSet `weather-agent` -> AgentCard `weather-agent-statefulset-card`
 
 ### NetworkPolicy Controller
 
@@ -230,29 +236,142 @@ Supported algorithms: RS256, RS384, RS512, ES256, ES384, ES512.
 
 When `spec.identityBinding` is configured on an AgentCard:
 
-1. The SPIFFE ID is extracted from the JWS protected header (`spiffe_id` claim)
-2. The SPIFFE ID is checked against the `allowedSpiffeIDs` allowlist
-3. Both signature AND binding must pass for the `signature-verified=true` label
-4. NetworkPolicy enforcement uses this label for traffic control
+```
+ConfigMap (step-<name>)
+└── task-spec.yaml: Complete Tekton TaskSpec
+    ├── params: step parameters
+    ├── workspaces: required workspaces
+    └── steps: container commands
+```
+
+### Build Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `dev` | Basic build with Dockerfile | Development with internal registry |
+| `buildpack-dev` | Cloud Native Buildpacks | Development without Dockerfile |
+| `dev-external` | Basic build, external registry | Development with external registry |
+| `preprod` | Adds security scanning | Pre-production validation |
+| `prod` | Full compliance checks | Production deployments |
+| `custom` | User-defined steps | Advanced customization |
+
+### Parameter Resolution
+
+Parameters are resolved in this order (highest to lowest priority):
+
+1. User-provided parameters in AgentBuild CR
+2. Step-specific parameters
+3. Global template parameters
+4. Step default parameters
+
+```yaml
+# User provides minimal config
+parameters:
+  - name: SOURCE_REPO_URL
+    value: "github.com/myorg/myapp"
+
+# System merges with defaults
+# Final pipeline gets:
+#   SOURCE_REPO_URL: "github.com/myorg/myapp" (user)
+#   SOURCE_REVISION: "main" (template default)
+#   BUILD_CONTEXT: "." (step default)
+```
+
+### Build Execution Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Webhook
+    participant Controller
+    participant ConfigMap
+    participant Tekton
+    participant Registry
+
+    User->>Webhook: Create AgentBuild CR
+    Webhook->>Webhook: Validate & inject template
+    Webhook->>Controller: Validated CR
+
+    Controller->>ConfigMap: Load pipeline template
+    ConfigMap-->>Controller: Template definition
+
+    Controller->>ConfigMap: Load step specs
+    ConfigMap-->>Controller: Task specifications
+
+    Controller->>Controller: Merge parameters
+    Controller->>Tekton: Create Pipeline
+    Controller->>Tekton: Create PipelineRun
+
+    Tekton->>Tekton: Clone repository
+    Tekton->>Tekton: Build image
+    Tekton->>Registry: Push image
+
+    Tekton-->>Controller: Build complete
+    Controller->>Controller: Update status
+    Controller-->>User: AgentBuild.status.builtImage
+```
+
+---
+
+## Reconciliation Loops
+
+### AgentBuild Reconciliation
+
+```go
+func (r *AgentBuildReconciler) Reconcile(ctx context.Context, req Request) (Result, error) {
+    // 1. Fetch AgentBuild
+    build := &AgentBuild{}
+    if err := r.Get(ctx, req.NamespacedName, build); err != nil {
+        return Result{}, client.IgnoreNotFound(err)
+    }
+
+    // 2. Check if already complete
+    if build.Status.Phase == PhaseSucceeded || build.Status.Phase == PhaseFailed {
+        return Result{}, nil
+    }
+
+    // 3. Load pipeline template
+    template, err := r.loadTemplate(ctx, build.Spec.Mode)
+    if err != nil {
+        return Result{}, err
+    }
+
+    // 4. Create Pipeline
+    pipeline, err := r.createPipeline(ctx, build, template)
+    if err != nil {
+        return Result{}, err
+    }
+
+    // 5. Create PipelineRun
+    pipelineRun, err := r.createPipelineRun(ctx, build, pipeline)
+    if err != nil {
+        return Result{}, err
+    }
+
+    // 6. Watch PipelineRun status
+    if err := r.updateBuildStatus(ctx, build, pipelineRun); err != nil {
+        return Result{}, err
+    }
+
+    return Result{RequeueAfter: 30*time.Second}, nil
+}
+```
+
+---
+
+## Security Model
 
 ### RBAC
 
 The operator implements least-privilege access control:
 
 #### Operator Permissions
-- Read/Write: Agent, AgentCard CRs and their status/finalizers
-- Read/Write: Deployments, Services, ServiceAccounts
-- Read/Write: Roles, RoleBindings
-- Read/Write: NetworkPolicies (when enforcement enabled)
-- Read: ConfigMaps, Secrets, Pods
+- Read/Write: AgentCard, AgentBuild CRs
+- Read: Deployments, StatefulSets, Services, Pods
+- Read: ConfigMaps, Secrets
 - Create: Events
 
-#### Agent Permissions (per ServiceAccount)
-- Minimal runtime permissions
-- Read access to required ConfigMaps and Secrets
-- No cluster-wide permissions
-
----
+### Secret Management
 
 ## Reconciliation Loops
 
@@ -304,11 +423,35 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req Request) (Resul
 - Suitable for platform teams
 - Single operator instance manages entire cluster
 
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kagenti-operator-manager-role
+rules:
+  - apiGroups: ["agent.kagenti.dev"]
+    resources: ["agentcards", "agentbuilds"]
+    verbs: ["*"]
+```
+
 ### Namespaced Mode
 
 - Operator watches specific namespaces (via `NAMESPACES2WATCH` env var)
 - Uses Role and RoleBinding per namespace
 - Suitable for multi-tenant environments
+- Multiple operator instances possible
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kagenti-operator-manager-role
+  namespace: team1
+rules:
+  - apiGroups: ["agent.kagenti.dev"]
+    resources: ["agentcards", "agentbuilds"]
+    verbs: ["*"]
+```
 
 ---
 

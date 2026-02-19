@@ -111,19 +111,6 @@ spec:
                 required:
                 - allowedSpiffeIDs
                 type: object
-              selector:
-                description: 'Deprecated: Use TargetRef instead. If both are set,
-                  TargetRef takes precedence.'
-                properties:
-                  matchLabels:
-                    additionalProperties:
-                      type: string
-                    description: MatchLabels is a map of {key,value} pairs to match
-                      against Agent labels
-                    type: object
-                required:
-                - matchLabels
-                type: object
               syncPeriod:
                 default: 30s
                 description: SyncPeriod is how often to re-fetch the agent card (e.g.,

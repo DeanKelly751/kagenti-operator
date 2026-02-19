@@ -32,10 +32,6 @@ type AgentCardSpec struct {
 	// +optional
 	TargetRef *TargetRef `json:"targetRef,omitempty"`
 
-	// Deprecated: Use TargetRef instead. If both are set, TargetRef takes precedence.
-	// +optional
-	Selector *AgentSelector `json:"selector,omitempty"`
-
 	// IdentityBinding specifies SPIFFE identity binding configuration
 	// +optional
 	IdentityBinding *IdentityBinding `json:"identityBinding,omitempty"`
@@ -84,14 +80,6 @@ type TargetRef struct {
 	// Name is the name of the target resource
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
-}
-
-// AgentSelector identifies which Agent resource to index using label matching.
-// Deprecated: Use TargetRef instead for explicit workload references.
-type AgentSelector struct {
-	// MatchLabels is a map of {key,value} pairs to match against Agent labels
-	// +required
-	MatchLabels map[string]string `json:"matchLabels"`
 }
 
 // AgentCardStatus defines the observed state of AgentCard.
