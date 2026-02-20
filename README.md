@@ -12,11 +12,8 @@ The Kagenti Operator manages the following Custom Resource Definitions (CRDs):
 | Resource | Purpose |
 |----------|---------|
 | **[AgentCard](./kagenti-operator/docs/api-reference.md#agentcard)** | Discovers, indexes, and verifies agent metadata for Kubernetes-native agent discovery |
-| **[Agent](./kagenti-operator/docs/api-reference.md#agent)** | **(Deprecated)** Deploys and manages AI agent workloads from container images |
 
 Agents are deployed as standard Kubernetes **Deployments** or **StatefulSets** with the `kagenti.io/type: agent` label. The operator automatically discovers labeled workloads and creates AgentCard resources for them.
-
-> **Deprecation Notice:** The `Agent` Custom Resource is deprecated and will be removed in a future release. Use standard Kubernetes Deployments or StatefulSets with the `kagenti.io/type: agent` label instead. See the [Migration Guide](./docs/migration/migrate-agent-crd-to-workloads.md) for details.
 
 ### Key Features
 
@@ -73,11 +70,10 @@ graph TD;
     end
 ```
 
-The operator runs four controllers:
+The operator runs three controllers:
 
 | Controller | Purpose |
 |------------|---------|
-| **Agent Controller** | **(Deprecated)** Reconciles Agent CRs into Deployments and Services |
 | **AgentCard Sync Controller** | Watches Deployments/StatefulSets with agent labels and auto-creates AgentCard resources |
 | **AgentCard Controller** | Fetches agent card data from running agents, verifies signatures, evaluates identity binding |
 | **NetworkPolicy Controller** | Creates permissive or restrictive NetworkPolicies based on signature verification status |
@@ -173,15 +169,12 @@ kubectl logs -l app.kubernetes.io/name=weather-agent
 | **Dynamic Discovery** | [Agent Discovery with AgentCard](./kagenti-operator/docs/dynamic-agent-discovery.md) |
 | **Signature Verification** | [A2A AgentCard Signature Verification](./kagenti-operator/docs/a2a-signature-verification.md) |
 | **Identity Binding** | [Workload Identity Binding](./kagenti-operator/docs/identity-binding-quickstart.md) |
-| **Migration Guide** | [Migrating from Agent CRD to Workloads](./docs/migration/migrate-agent-crd-to-workloads.md) |
 | **Developer Guide** | [Contributing & Development](./kagenti-operator/docs/dev.md) |
 | **Getting Started** | [Detailed Tutorials](./kagenti-operator/GETTING_STARTED.md) |
 
 ## Examples
 
-See the [config/samples](./kagenti-operator/config/samples) directory for complete examples:
-
-- [weather-agent-image-deployment.yaml](./kagenti-operator/config/samples/weather-agent-image-deployment.yaml) — Deploy from existing image using Agent CRD
+See the [config/samples](./kagenti-operator/config/samples) directory for complete examples.
 
 ## Contributing
 
