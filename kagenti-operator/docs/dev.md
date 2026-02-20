@@ -59,7 +59,7 @@ kagenti-operator/
 ├── api/
 │   └── v1alpha1/              # CRD definitions
 │       ├── agent_types.go     # Agent CRD
-│       ├── agentbuild_types.go # AgentBuild CRD
+│       ├── agentcard_types.go # AgentCard CRD
 │       └── ...
 ├── cmd/
 │   └── main.go                # Operator entry point
@@ -73,8 +73,11 @@ kagenti-operator/
 ├── internal/
 │   ├── controller/            # Reconciliation logic
 │   │   ├── agent_controller.go
-│   │   └── agentbuild_controller.go
-│   ├── builder/               # Tekton pipeline builders
+│   │   ├── agentcard_controller.go
+│   │   ├── agentcard_networkpolicy_controller.go
+│   │   └── agentcardsync_controller.go
+│   ├── agentcard/             # Agent card fetching
+│   ├── signature/             # JWS signature verification
 │   ├── distribution/          # K8s distribution detection
 │   ├── rbac/                  # RBAC management
 │   └── webhook/               # Admission webhook handlers
@@ -92,8 +95,9 @@ kagenti-operator/
 | Directory | Purpose |
 |-----------|---------|
 | `api/v1alpha1/` | CRD Go types and schema definitions |
-| `internal/controller/` | Core reconciliation logic |
-| `internal/builder/` | Tekton pipeline generation |
+| `internal/controller/` | Core reconciliation logic (4 controllers) |
+| `internal/agentcard/` | Agent card fetching from A2A endpoints |
+| `internal/signature/` | JWS signature verification (Secret and JWKS providers) |
 | `internal/webhook/` | Admission webhook validation/mutation |
 | `config/` | Kubernetes manifests and kustomize configs |
 | `test/` | Test suites and utilities |
@@ -157,12 +161,12 @@ make install-local-chart
 ### 4. Test Your Changes
 
 ```bash
-# Apply a sample Agent
+# Apply a sample agent workload
 kubectl apply -f config/samples/weather-agent-image-deployment.yaml
 
-# Check status
-kubectl get agents
-kubectl describe agent weather-agent
+# Check agent cards (auto-created for labeled workloads)
+kubectl get agentcards
+kubectl describe agentcard weather-agent
 
 # View logs
 kubectl logs -n kagenti-system -l control-plane=controller-manager
@@ -202,32 +206,49 @@ go test -v ./...
 Example test structure:
 
 ```go
-var _ = Describe("Agent Controller", func() {
-    Context("When reconciling an Agent", func() {
-        It("Should create a Deployment", func() {
+var _ = Describe("AgentCard Sync Controller", func() {
+    Context("When a Deployment with agent labels is created", func() {
+        It("Should create an AgentCard", func() {
             // Setup
-            agent := &agentv1alpha1.Agent{
+            deployment := &appsv1.Deployment{
                 ObjectMeta: metav1.ObjectMeta{
                     Name:      "test-agent",
                     Namespace: "default",
-                },
-                Spec: agentv1alpha1.AgentSpec{
-                    ImageSource: agentv1alpha1.ImageSource{
-                        Image: ptr.To("test:latest"),
+                    Labels: map[string]string{
+                        "kagenti.io/type":     "agent",
+                        "kagenti.io/protocol": "a2a",
                     },
-                    // ...
+                },
+                Spec: appsv1.DeploymentSpec{
+                    Selector: &metav1.LabelSelector{
+                        MatchLabels: map[string]string{"app": "test-agent"},
+                    },
+                    Template: corev1.PodTemplateSpec{
+                        ObjectMeta: metav1.ObjectMeta{
+                            Labels: map[string]string{"app": "test-agent"},
+                        },
+                        Spec: corev1.PodSpec{
+                            Containers: []corev1.Container{{
+                                Name:  "agent",
+                                Image: "test:latest",
+                            }},
+                        },
+                    },
                 },
             }
-            
+
             // Execute
-            Expect(k8sClient.Create(ctx, agent)).To(Succeed())
-            
-            // Verify
-            deployment := &appsv1.Deployment{}
+            Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+            // Verify AgentCard is auto-created
+            agentCard := &agentv1alpha1.AgentCard{}
             Eventually(func() error {
-                return k8sClient.Get(ctx, 
-                    types.NamespacedName{Name: "test-agent", Namespace: "default"},
-                    deployment)
+                return k8sClient.Get(ctx,
+                    types.NamespacedName{
+                        Name:      "test-agent-deployment-card",
+                        Namespace: "default",
+                    },
+                    agentCard)
             }).Should(Succeed())
         })
     })
@@ -248,21 +269,17 @@ make test-e2e
 
 ### Integration Tests
 
-Test with real Tekton pipelines:
+Test with a real cluster:
 
 ```bash
-# Install Tekton Pipelines
-kubectl apply -f https://storage.googleapis.com/tekton-releases/pipeline/latest/release.yaml
-
 # Deploy operator
 make install-local-chart
 
-# Run integration tests
-kubectl apply -f config/samples/weather-agent-build-and-deploy.yaml
+# Deploy a sample agent
+kubectl apply -f config/samples/weather-agent-image-deployment.yaml
 
-# Monitor build
-kubectl get agentbuilds -w
-kubectl logs -f <pipelinerun-pod>
+# Monitor agent and agent cards
+kubectl get agents,agentcards -w
 ```
 
 ---
@@ -396,7 +413,7 @@ Closes #123
 1. Update type definition in `api/v1alpha1/`:
 
 ```go
-type AgentSpec struct {
+type AgentCardSpec struct {
     // NewField description
     // +optional
     NewField string `json:"newField,omitempty"`
@@ -479,9 +496,6 @@ kubectl logs -n kagenti-system -l control-plane=controller-manager -f
 
 # Agent logs
 kubectl logs -l app.kubernetes.io/name=my-agent -f
-
-# Tekton build logs
-kubectl logs -l tekton.dev/pipelineRun=<pipelinerun-name> -f
 ```
 
 ### Common Issues
@@ -500,12 +514,12 @@ make uninstall install
 3. Check resource finalizers
 4. Verify webhook is running (if using admission webhook)
 
-#### Build Failures
+#### AgentCard Not Syncing
 
-1. Check AgentBuild status: `kubectl describe agentbuild <name>`
-2. Check PipelineRun status: `kubectl get pipelineruns`
-3. View build logs: `kubectl logs -l tekton.dev/pipelineRun=<name>`
-4. Verify secrets exist and are correct
+1. Check AgentCard status: `kubectl describe agentcard <name>`
+2. Verify the backing workload has `kagenti.io/type=agent` label
+3. Check workload readiness and service availability
+4. Review controller logs for fetch or signature errors
 
 ---
 
@@ -555,20 +569,20 @@ See [Kubebuilder Book](https://book.kubebuilder.io/) for more markers.
 kubectl get crds | grep agent.kagenti.dev
 
 # View CRD schema
-kubectl explain agent.spec
+kubectl explain agentcard.spec
 
 # Watch resources
-kubectl get agents,agentbuilds -A -w
+kubectl get agentcards -A -w
 
 # Describe with events
-kubectl describe agent my-agent
+kubectl describe agentcard my-agent-deployment-card
 
 # Get raw YAML
-kubectl get agent my-agent -o yaml
+kubectl get agentcard my-agent-deployment-card -o yaml
 
 # Force delete stuck resource
-kubectl patch agent my-agent -p '{"metadata":{"finalizers":[]}}' --type=merge
-kubectl delete agent my-agent --grace-period=0 --force
+kubectl patch agentcard my-agent-deployment-card -p '{"metadata":{"finalizers":[]}}' --type=merge
+kubectl delete agentcard my-agent-deployment-card --grace-period=0 --force
 ```
 
 ---
@@ -579,7 +593,6 @@ kubectl delete agent my-agent --grace-period=0 --force
 - [Architecture](./architecture.md) — Design and components
 - [Kubebuilder Book](https://book.kubebuilder.io/) — Operator development guide
 - [Controller Runtime](https://pkg.go.dev/sigs.k8s.io/controller-runtime) — Framework documentation
-- [Tekton Documentation](https://tekton.dev/docs/) — Pipeline system
 - [Operator Best Practices](https://sdk.operatorframework.io/docs/best-practices/) — Design patterns
 
 ---

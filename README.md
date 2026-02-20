@@ -3,25 +3,29 @@
 [![License](https://img.shields.io/github/license/kagenti/kagenti-operator)](LICENSE)
 ![Contributors](https://img.shields.io/github/contributors/kagenti/kagenti-operator)
 
-**Kagenti Operator** is a Kubernetes operator that automates the complete lifecycle management of AI agents, from building container images from source code to deploying and managing them in Kubernetes clusters.
+**Kagenti Operator** is a Kubernetes operator that automates the deployment, discovery, and security of AI agents in Kubernetes clusters.
 
 ## Overview
 
-The Kagenti Operator simplifies AI agent deployment by managing three Custom Resource Definitions (CRDs):
+The Kagenti Operator manages the following Custom Resource Definitions (CRDs):
 
 | Resource | Purpose |
 |----------|---------|
-| **[Agent](./kagenti-operator/docs/api-reference.md#agent)** | Deploys and manages AI agent workloads from container images or source code |
-| **[AgentBuild](./kagenti-operator/docs/api-reference.md#agentbuild)** | Builds container images from GitHub repositories using Tekton pipelines |
-| **[AgentCard](./kagenti-operator/docs/api-reference.md#agentcard)** | Automatically discovers and indexes agent metadata for Kubernetes-native agent discovery |
+| **[AgentCard](./kagenti-operator/docs/api-reference.md#agentcard)** | Discovers, indexes, and verifies agent metadata for Kubernetes-native agent discovery |
+| **[Agent](./kagenti-operator/docs/api-reference.md#agent)** | **(Deprecated)** Deploys and manages AI agent workloads from container images |
+
+Agents are deployed as standard Kubernetes **Deployments** or **StatefulSets** with the `kagenti.io/type: agent` label. The operator automatically discovers labeled workloads and creates AgentCard resources for them.
+
+> **Deprecation Notice:** The `Agent` Custom Resource is deprecated and will be removed in a future release. Use standard Kubernetes Deployments or StatefulSets with the `kagenti.io/type: agent` label instead. See the [Migration Guide](./docs/migration/migrate-agent-crd-to-workloads.md) for details.
 
 ### Key Features
 
-- **Deploy from Image or Source** — Use pre-built container images or build directly from GitHub repositories
-- **Automated Build Pipelines** — Integrated Tekton pipelines with support for Dockerfile and Cloud Native Buildpacks
-- **Dynamic Agent Discovery** — Kubernetes-native agent discovery through automatic indexing of agent metadata
+- **Agent Deployment** — Deploy agents using standard Kubernetes Deployments or StatefulSets with the `kagenti.io/type: agent` label
+- **Dynamic Agent Discovery** — Automatic indexing of agent metadata via the A2A protocol
+- **Signature Verification** — JWS-based cryptographic verification of agent cards (RSA, ECDSA)
+- **Identity Binding** — SPIFFE-based workload identity binding with allowlist enforcement
+- **Network Policy Enforcement** — Automatic NetworkPolicy creation based on signature verification status
 - **Flexible Configuration** — Complete control over pod specifications, service ports, and environment variables
-- **Security Built-in** — Support for private registries, secret management, and RBAC
 - **Multi-Framework Support** — Works with LangGraph, CrewAI, AG2, and any A2A-compatible framework
 
 ## Architecture
@@ -35,60 +39,48 @@ graph TD;
         User[User/App]
         style User fill:#ffecb3,stroke:#ffa000
 
-        AgentCRD["Agent CR"]
-        style AgentCRD fill:#e1f5fe,stroke:#039be5
+        Workload["Deployment / StatefulSet\n(with kagenti labels)"]
+        style Workload fill:#e1f5fe,stroke:#039be5
 
-        AgentBuildCRD["AgentBuild CR"]
-        style AgentBuildCRD fill:#e1f5fe,stroke:#039be5
+        User -->|Creates| Workload
 
-        User -->|Creates| AgentCRD
-        User -->|Creates| AgentBuildCRD
+        AgentCardSync[AgentCard Sync Controller]
+        style AgentCardSync fill:#ffe0b2,stroke:#fb8c00
 
-        AgentController[Agent Controller]
-        style AgentController fill:#ffe0b2,stroke:#fb8c00
+        AgentCardController[AgentCard Controller]
+        style AgentCardController fill:#ffe0b2,stroke:#fb8c00
 
-        AgentBuildController[AgentBuild Controller]
-        style AgentBuildController fill:#ffe0b2,stroke:#fb8c00
-
-        Service_Service[Service]
-        style Service_Service fill:#dcedc8,stroke:#689f38
-
-        Deployment_Deployment[Deployment]
-        style Deployment_Deployment fill:#d1c4e9,stroke:#7e57c2
+        NetworkPolicyController[NetworkPolicy Controller]
+        style NetworkPolicyController fill:#ffe0b2,stroke:#fb8c00
 
         AgentPod[Agent Pod]
         style AgentPod fill:#c8e6c9,stroke:#66bb6a
 
-        AgentCRD -->|Reconciles| AgentController
-        AgentBuildCRD -->|Reconciles| AgentBuildController
+        AgentCardCRD["AgentCard CR"]
+        style AgentCardCRD fill:#e1f5fe,stroke:#039be5
 
-        AgentController --> |Creates| Service_Service
-        AgentController --> |Creates| Deployment_Deployment
+        NetworkPolicy["NetworkPolicy"]
+        style NetworkPolicy fill:#ffcdd2,stroke:#e57373
 
-        Deployment_Deployment --> |Deploys| AgentPod
-
-        subgraph Tekton_Pipeline
-            direction LR
-            style Tekton_Pipeline fill:#e7f3e7,stroke:#73b473,stroke-width:1px
-
-            Pull[1. Pull Task]
-            style Pull fill:#e8eaf6,stroke:#5c6bc0
-            Build[2. Build Task]
-            style Build fill:#fff3e0,stroke:#ffa726
-            Push[3. Push Image Task]
-            style Push fill:#f3e5f5,stroke:#ab47bc
-            Pull --> Build --> Push
-        end
-
-        AgentBuildController -->|Triggers| Tekton_Pipeline
-        AgentBuildController -->|Saves Image URL on successful build| AgentBuildCRD
-        AgentCRD -->|References| AgentBuildCRD
+        Workload -->|Deploys| AgentPod
+        Workload -->|Watches| AgentCardSync
+        AgentCardSync -->|Auto-creates| AgentCardCRD
+        AgentCardCRD -->|Reconciles| AgentCardController
+        AgentCardController -->|Fetches /.well-known/agent.json| AgentPod
+        AgentCardController -->|Verifies signatures & identity| AgentCardCRD
+        AgentCardCRD -->|Reconciles| NetworkPolicyController
+        NetworkPolicyController -->|Creates| NetworkPolicy
     end
 ```
 
-The operator separates build and deployment concerns:
-- **Agent CR** manages deployment lifecycle and runtime configuration
-- **AgentBuild CR** orchestrates the build process using Tekton pipelines
+The operator runs four controllers:
+
+| Controller | Purpose |
+|------------|---------|
+| **Agent Controller** | **(Deprecated)** Reconciles Agent CRs into Deployments and Services |
+| **AgentCard Sync Controller** | Watches Deployments/StatefulSets with agent labels and auto-creates AgentCard resources |
+| **AgentCard Controller** | Fetches agent card data from running agents, verifies signatures, evaluates identity binding |
+| **NetworkPolicy Controller** | Creates permissive or restrictive NetworkPolicies based on signature verification status |
 
 ## Quick Start
 
@@ -96,8 +88,6 @@ The operator separates build and deployment concerns:
 
 - Kubernetes cluster (v1.28+)
 - kubectl configured to access your cluster
-- Tekton Pipelines installed (for building from source)
-- Container registry access (for building from source)
 
 ### Install the Operator
 
@@ -114,96 +104,64 @@ helm install kagenti-operator \
 
 ### Deploy Your First Agent
 
-**Option 1: From an existing container image**
+Deploy an agent as a standard Kubernetes Deployment with the required `kagenti.io/type: agent` label:
 
 ```bash
 kubectl apply -f - <<EOF
-apiVersion: agent.kagenti.dev/v1alpha1
-kind: Agent
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: my-agent
+  name: weather-agent
   namespace: default
+  labels:
+    app.kubernetes.io/name: weather-agent
+    kagenti.io/type: agent
+    kagenti.io/protocol: a2a
 spec:
-  imageSource:
-    image: "ghcr.io/kagenti/agent-examples/weather_service:v0.0.1-alpha.3"
-  servicePorts:
-    - port: 8000
-      targetPort: 8000
-      protocol: TCP
-      name: http
-  podTemplateSpec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: weather-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: weather-agent
+        kagenti.io/type: agent
     spec:
       containers:
       - name: agent
+        image: "ghcr.io/kagenti/agent-examples/weather_service:v0.0.1-alpha.3"
         ports:
         - containerPort: 8000
         env:
         - name: PORT
           value: "8000"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-agent
+  namespace: default
+spec:
+  selector:
+    app.kubernetes.io/name: weather-agent
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
 EOF
 ```
 
-**Option 2: Build from source code**
-
-```bash
-# First, create a build
-kubectl apply -f - <<EOF
-apiVersion: agent.kagenti.dev/v1alpha1
-kind: AgentBuild
-metadata:
-  name: my-agent-build
-  namespace: default
-spec:
-  mode: dev
-  source:
-    sourceRepository: "github.com/myorg/my-agent.git"
-    sourceRevision: "main"
-    sourceCredentials:
-      name: github-token-secret
-  buildOutput:
-    image: "my-agent"
-    imageTag: "v1.0.0"
-    imageRegistry: "ghcr.io/myorg"
-    imageRepoCredentials:
-      name: ghcr-secret
-EOF
-
-# Then, deploy using the build
-kubectl apply -f - <<EOF
-apiVersion: agent.kagenti.dev/v1alpha1
-kind: Agent
-metadata:
-  name: my-agent
-  namespace: default
-spec:
-  imageSource:
-    buildRef:
-      name: my-agent-build
-  servicePorts:
-    - port: 8000
-      targetPort: 8000
-      protocol: TCP
-      name: http
-  podTemplateSpec:
-    spec:
-      containers:
-      - name: agent
-        ports:
-        - containerPort: 8000
-EOF
-```
+The operator will automatically create an AgentCard for the workload and begin syncing agent metadata.
 
 ### Verify Deployment
 
 ```bash
-# Check agent status
-kubectl get agents
-
-# Check agent build status
-kubectl get agentbuilds
+# Check discovered agent cards
+kubectl get agentcards
 
 # View agent logs
-kubectl logs -l app.kubernetes.io/name=my-agent
+kubectl logs -l app.kubernetes.io/name=weather-agent
 ```
 
 ## Documentation
@@ -213,6 +171,9 @@ kubectl logs -l app.kubernetes.io/name=my-agent
 | **API Reference** | [CRD Specifications & Examples](./kagenti-operator/docs/api-reference.md) |
 | **Architecture** | [Operator Design & Components](./kagenti-operator/docs/architecture.md) |
 | **Dynamic Discovery** | [Agent Discovery with AgentCard](./kagenti-operator/docs/dynamic-agent-discovery.md) |
+| **Signature Verification** | [A2A AgentCard Signature Verification](./kagenti-operator/docs/a2a-signature-verification.md) |
+| **Identity Binding** | [Workload Identity Binding](./kagenti-operator/docs/identity-binding-quickstart.md) |
+| **Migration Guide** | [Migrating from Agent CRD to Workloads](./docs/migration/migrate-agent-crd-to-workloads.md) |
 | **Developer Guide** | [Contributing & Development](./kagenti-operator/docs/dev.md) |
 | **Getting Started** | [Detailed Tutorials](./kagenti-operator/GETTING_STARTED.md) |
 
@@ -220,9 +181,7 @@ kubectl logs -l app.kubernetes.io/name=my-agent
 
 See the [config/samples](./kagenti-operator/config/samples) directory for complete examples:
 
-- [weather-agent-image-deployment.yaml](./kagenti-operator/config/samples/weather-agent-image-deployment.yaml) — Deploy from existing image
-- [weather-agent-build-and-deploy.yaml](./kagenti-operator/config/samples/weather-agent-build-and-deploy.yaml) — Build and deploy from source
-- [helloworld-build-and-deploy-no-dockerfile.yaml](./kagenti-operator/config/samples/helloworld-build-and-deploy-no-dockerfile.yaml) — Use Cloud Native Buildpacks
+- [weather-agent-image-deployment.yaml](./kagenti-operator/config/samples/weather-agent-image-deployment.yaml) — Deploy from existing image using Agent CRD
 
 ## Contributing
 
