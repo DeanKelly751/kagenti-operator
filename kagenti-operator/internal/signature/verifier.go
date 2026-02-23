@@ -22,8 +22,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rsa"
-	_ "crypto/sha256" // Register SHA-256 for crypto.SHA256.New()
-	_ "crypto/sha512" // Register SHA-384 and SHA-512 for crypto.SHA384.New() / crypto.SHA512.New()
+	_ "crypto/sha256"
+	_ "crypto/sha512"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -35,24 +35,14 @@ import (
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 )
 
-// ProtectedHeader represents the decoded JWS protected header.
-// Per A2A spec section 8.4.2, the protected header MUST contain:
-//   - alg: the signature algorithm (e.g. "RS256", "ES256")
-//   - typ: SHOULD be "JOSE" for JWS
-//   - kid: the key identifier
-//
-// And MAY contain:
-//   - jku: URL to JWKS containing the public key
-//   - spiffe_id: SPIFFE identity of the signer (extension for identity binding)
+// ProtectedHeader represents the decoded JWS protected header (A2A spec section 8.4.2).
 type ProtectedHeader struct {
-	Algorithm string `json:"alg"`
-	Type      string `json:"typ,omitempty"`
-	KeyID     string `json:"kid,omitempty"`
-	JWKSURL   string `json:"jku,omitempty"`
-	SpiffeID  string `json:"spiffe_id,omitempty"`
+	Algorithm string   `json:"alg"`
+	Type      string   `json:"typ,omitempty"`
+	KeyID     string   `json:"kid,omitempty"`
+	X5C       []string `json:"x5c,omitempty"` // X.509 certificate chain (base64, NOT base64url) per RFC 7515 §4.1.6
 }
 
-// DecodeProtectedHeader decodes a base64url-encoded JWS protected header.
 func DecodeProtectedHeader(protected string) (*ProtectedHeader, error) {
 	headerJSON, err := base64.RawURLEncoding.DecodeString(protected)
 	if err != nil {
@@ -65,7 +55,6 @@ func DecodeProtectedHeader(protected string) (*ProtectedHeader, error) {
 	return &header, nil
 }
 
-// EncodeProtectedHeader encodes a ProtectedHeader to a base64url string.
 func EncodeProtectedHeader(header *ProtectedHeader) (string, error) {
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
@@ -74,11 +63,7 @@ func EncodeProtectedHeader(header *ProtectedHeader) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(headerJSON), nil
 }
 
-// VerifyJWS verifies a single JWS signature against card data using a public key (PEM format).
-// This follows A2A spec section 8.4.3:
-//
-//	signingInput = BASE64URL(UTF8(JWS Protected Header)) || '.' || BASE64URL(JWS Payload)
-//	where JWS Payload = canonical JSON of card data excluding "signatures"
+// VerifyJWS verifies a JWS signature against card data using a PEM public key.
 func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCardSignature, publicKeyPEM []byte) (*VerificationResult, error) {
 	if sig == nil {
 		return &VerificationResult{
@@ -87,7 +72,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 		}, nil
 	}
 
-	// Decode the protected header to extract alg, kid, spiffe_id
 	header, err := DecodeProtectedHeader(sig.Protected)
 	if err != nil {
 		return &VerificationResult{
@@ -96,7 +80,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 		}, err
 	}
 
-	// Reject "none" and unsupported algorithms (RFC 7515 §5.2).
 	if err := validateAlgorithm(header.Algorithm); err != nil {
 		return &VerificationResult{
 			Verified: false,
@@ -104,7 +87,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 		}, err
 	}
 
-	// Parse the public key
 	block, _ := pem.Decode(publicKeyPEM)
 	if block == nil {
 		return &VerificationResult{
@@ -121,9 +103,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 		}, err
 	}
 
-	// Enforce minimum RSA key size (2048 bits) regardless of provider.
-	// The JWKS provider already checks this during key conversion, but the
-	// SecretProvider does not — centralising the check here protects both paths.
 	if rsaKey, ok := publicKey.(*rsa.PublicKey); ok {
 		if rsaKey.N.BitLen() < 2048 {
 			return &VerificationResult{
@@ -133,8 +112,7 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 		}
 	}
 
-	// Create canonical payload (card JSON excluding "signatures")
-	payload, err := createCanonicalCardJSON(cardData)
+	payload, err := CreateCanonicalCardJSON(cardData)
 	if err != nil {
 		return &VerificationResult{
 			Verified: false,
@@ -142,14 +120,11 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 		}, err
 	}
 
-	// Construct JWS signing input per RFC 7515:
-	//   ASCII(BASE64URL(UTF8(JWS Protected Header))) || '.' || ASCII(BASE64URL(JWS Payload))
+	// JWS signing input per RFC 7515 §5.2
 	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
 	signingInput := []byte(sig.Protected + "." + payloadB64)
 
-	// Select the hash function from the algorithm per RFC 7518:
-	//   *S256 → SHA-256, *S384 → SHA-384, *S512 → SHA-512
-	hashFunc, err := hashForAlgorithm(header.Algorithm)
+	hashFunc, err := HashForAlgorithm(header.Algorithm)
 	if err != nil {
 		return &VerificationResult{
 			Verified: false,
@@ -157,12 +132,10 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 		}, err
 	}
 
-	// Hash the signing input
 	hasher := hashFunc.New()
 	hasher.Write(signingInput)
 	hashed := hasher.Sum(nil)
 
-	// Decode the signature value (base64url, no padding)
 	signatureBytes, err := base64.RawURLEncoding.DecodeString(sig.Signature)
 	if err != nil {
 		return &VerificationResult{
@@ -171,7 +144,7 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 		}, err
 	}
 
-	// Verify signature; also check alg matches key type to prevent algorithm confusion.
+	// Enforce alg-key type match to prevent algorithm confusion.
 	var verified bool
 	switch pub := publicKey.(type) {
 	case *rsa.PublicKey:
@@ -181,8 +154,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 				Details:  fmt.Sprintf("Algorithm mismatch: protected header specifies %q but public key is RSA (expected RS256/RS384/RS512/PS256/PS384/PS512)", header.Algorithm),
 			}, fmt.Errorf("algorithm mismatch: header alg=%q but key is RSA", header.Algorithm)
 		}
-		// RS256/RS384/RS512 → PKCS#1 v1.5 padding
-		// PS256/PS384/PS512 → RSA-PSS padding (RFC 7518 §3.5)
 		if isPSSAlgorithm(header.Algorithm) {
 			err = rsa.VerifyPSS(pub, hashFunc, hashed, signatureBytes, &rsa.PSSOptions{
 				SaltLength: rsa.PSSSaltLengthEqualsHash,
@@ -198,18 +169,15 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 				Details:  fmt.Sprintf("Algorithm mismatch: protected header specifies %q but public key is ECDSA (expected ES256/ES384/ES512)", header.Algorithm),
 			}, fmt.Errorf("algorithm mismatch: header alg=%q but key is ECDSA", header.Algorithm)
 		}
-		// Validate curve matches algorithm (ES256→P-256, ES384→P-384, ES512→P-521)
 		if err := validateECDSACurve(pub, header.Algorithm); err != nil {
 			return &VerificationResult{
 				Verified: false,
 				Details:  fmt.Sprintf("ECDSA curve/algorithm mismatch: %v", err),
 			}, err
 		}
-		// JWS ES256/ES384/ES512 uses raw R||S encoding (not ASN.1 DER).
-		// Try raw R||S first (spec-compliant), fall back to ASN.1 DER.
+		// JWS uses raw R||S encoding; fall back to ASN.1 DER for compatibility.
 		verified = verifyECDSARaw(pub, hashed, signatureBytes)
 		if !verified {
-			// Fallback: try ASN.1 DER encoding for backward compatibility
 			verified = ecdsa.VerifyASN1(pub, hashed, signatureBytes)
 		}
 	default:
@@ -222,7 +190,6 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 	result := &VerificationResult{
 		Verified: verified,
 		KeyID:    header.KeyID,
-		SpiffeID: header.SpiffeID,
 	}
 
 	if !verified {
@@ -234,11 +201,9 @@ func VerifyJWS(cardData *agentv1alpha1.AgentCardData, sig *agentv1alpha1.AgentCa
 	return result, nil
 }
 
-// verifyECDSARaw verifies an ECDSA signature in JWS raw R||S format.
-// Per RFC 7518 section 3.4, ES256 signatures are 64 bytes (32 + 32),
-// ES384 are 96 bytes, ES512 are 132 bytes.
+// verifyECDSARaw verifies ECDSA in JWS raw R||S format (RFC 7518 §3.4).
 func verifyECDSARaw(pub *ecdsa.PublicKey, hash, sig []byte) bool {
-	keySize := curveByteSize(pub.Curve)
+	keySize := CurveByteSize(pub.Curve)
 	if len(sig) != 2*keySize {
 		return false
 	}
@@ -248,21 +213,16 @@ func verifyECDSARaw(pub *ecdsa.PublicKey, hash, sig []byte) bool {
 	return ecdsa.Verify(pub, hash, r, s)
 }
 
-// curveByteSize returns the byte size for a curve's field elements.
-func curveByteSize(curve elliptic.Curve) int {
-	bitSize := curve.Params().BitSize
-	return (bitSize + 7) / 8
+func CurveByteSize(curve elliptic.Curve) int {
+	return (curve.Params().BitSize + 7) / 8
 }
 
-// supportedAlgorithms is the set of JWS algorithms we accept.
-// Per RFC 7515 §5.2, verifiers MUST reject algorithms they don't support.
 var supportedAlgorithms = map[string]bool{
 	"RS256": true, "RS384": true, "RS512": true,
 	"PS256": true, "PS384": true, "PS512": true,
 	"ES256": true, "ES384": true, "ES512": true,
 }
 
-// validateAlgorithm rejects "none" and unsupported algorithms.
 func validateAlgorithm(alg string) error {
 	if alg == "" {
 		return fmt.Errorf("JWS protected header missing required 'alg' field")
@@ -276,7 +236,6 @@ func validateAlgorithm(alg string) error {
 	return nil
 }
 
-// isRSAAlgorithm returns true if the JWS algorithm corresponds to an RSA key.
 func isRSAAlgorithm(alg string) bool {
 	switch alg {
 	case "RS256", "RS384", "RS512", "PS256", "PS384", "PS512":
@@ -285,7 +244,6 @@ func isRSAAlgorithm(alg string) bool {
 	return false
 }
 
-// isECDSAAlgorithm returns true if the JWS algorithm corresponds to an ECDSA key.
 func isECDSAAlgorithm(alg string) bool {
 	switch alg {
 	case "ES256", "ES384", "ES512":
@@ -294,7 +252,6 @@ func isECDSAAlgorithm(alg string) bool {
 	return false
 }
 
-// isPSSAlgorithm returns true if the JWS algorithm uses RSA-PSS padding.
 func isPSSAlgorithm(alg string) bool {
 	switch alg {
 	case "PS256", "PS384", "PS512":
@@ -303,12 +260,7 @@ func isPSSAlgorithm(alg string) bool {
 	return false
 }
 
-// hashForAlgorithm returns the crypto.Hash for a given JWS algorithm per RFC 7518.
-//
-//	RS256/PS256/ES256 → SHA-256
-//	RS384/PS384/ES384 → SHA-384
-//	RS512/PS512/ES512 → SHA-512
-func hashForAlgorithm(alg string) (crypto.Hash, error) {
+func HashForAlgorithm(alg string) (crypto.Hash, error) {
 	switch alg {
 	case "RS256", "PS256", "ES256":
 		return crypto.SHA256, nil
@@ -321,9 +273,7 @@ func hashForAlgorithm(alg string) (crypto.Hash, error) {
 	}
 }
 
-// validateECDSACurve checks that the ECDSA key's curve matches the algorithm per RFC 7518 §3.4:
-//
-//	ES256 → P-256, ES384 → P-384, ES512 → P-521
+// validateECDSACurve enforces ES256→P-256, ES384→P-384, ES512→P-521 (RFC 7518 §3.4).
 func validateECDSACurve(pub *ecdsa.PublicKey, alg string) error {
 	var expectedCurve elliptic.Curve
 	switch alg {
@@ -343,8 +293,21 @@ func validateECDSACurve(pub *ecdsa.PublicKey, alg string) error {
 	return nil
 }
 
-// parsePublicKey parses a public key from DER format.
-// Tries PKIX (SubjectPublicKeyInfo) first, then falls back to PKCS#1 RSA format.
+func MarshalPublicKeyToPEM(publicKey interface{}) ([]byte, error) {
+	pkixBytes, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal public key: %w", err)
+	}
+
+	pemBlock := &pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: pkixBytes,
+	}
+
+	return pem.EncodeToMemory(pemBlock), nil
+}
+
+// parsePublicKey tries PKIX first, then falls back to PKCS#1 RSA.
 func parsePublicKey(derBytes []byte) (crypto.PublicKey, error) {
 	if key, err := x509.ParsePKIXPublicKey(derBytes); err == nil {
 		return key, nil
@@ -358,43 +321,25 @@ func parsePublicKey(derBytes []byte) (crypto.PublicKey, error) {
 	return nil, fmt.Errorf("failed to parse public key (tried PKIX and PKCS#1): %w", err)
 }
 
-// CreateCanonicalCardJSON is the exported entry point for building the JWS payload.
-// Tests should use this instead of maintaining a parallel canonical JSON implementation.
+// CreateCanonicalCardJSON builds the JWS payload: sorted-key, compact JSON
+// with the "signatures" field excluded.
 func CreateCanonicalCardJSON(cardData *agentv1alpha1.AgentCardData) ([]byte, error) {
-	return createCanonicalCardJSON(cardData)
-}
-
-// createCanonicalCardJSON builds the JWS payload: sorted-key, compact JSON
-// of the card data with the "signatures" field excluded.
-func createCanonicalCardJSON(cardData *agentv1alpha1.AgentCardData) ([]byte, error) {
-	// Marshal the full struct to JSON
 	rawJSON, err := json.Marshal(cardData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal card data: %w", err)
 	}
 
-	// Unmarshal to generic map
 	var cardMap map[string]interface{}
 	if err := json.Unmarshal(rawJSON, &cardMap); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal to map: %w", err)
 	}
 
-	// Remove the signatures field — it must not be part of the signed payload
 	delete(cardMap, "signatures")
-
-	// Remove empty/nil fields to match Python behavior where absent fields are not included
 	cleanMap := removeEmptyFields(cardMap)
-
-	// Produce canonical JSON with sorted keys
 	return marshalCanonical(cleanMap)
 }
 
-// removeEmptyFields strips nil values and empty collections to match
-// the Python signer's behavior of omitting absent fields.
-//
-// WARNING: This strips absent/empty fields to match sign-agent-card.py.
-// If the A2A spec changes to require explicit empty values in the payload,
-// this function must be updated alongside sign-agent-card.py.
+// removeEmptyFields strips nil/empty values for canonical JSON.
 func removeEmptyFields(m map[string]interface{}) map[string]interface{} {
 	result := make(map[string]interface{})
 	for k, v := range m {
@@ -416,14 +361,12 @@ func removeEmptyFields(m map[string]interface{}) map[string]interface{} {
 				result[k] = val
 			}
 		default:
-			// bool (false), float64 (0), and other non-nil/non-empty types are preserved.
 			result[k] = v
 		}
 	}
 	return result
 }
 
-// marshalCanonical marshals a map to compact JSON with sorted keys.
 func marshalCanonical(data map[string]interface{}) ([]byte, error) {
 	var buf bytes.Buffer
 
@@ -455,7 +398,6 @@ func marshalCanonical(data map[string]interface{}) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// marshalValue marshals a value with sorted keys if it's a map.
 func marshalValue(v interface{}) ([]byte, error) {
 	switch val := v.(type) {
 	case map[string]interface{}:
@@ -482,10 +424,7 @@ func marshalValue(v interface{}) ([]byte, error) {
 	}
 }
 
-// toGenericValue converts any value to a generic JSON-compatible type via a
-// Marshal → Unmarshal round-trip. This fallback path is only hit for types
-// not handled by marshalValue's explicit type switch (e.g., json.Number or
-// custom types produced by unusual JSON decoders).
+// toGenericValue converts unknown types via a Marshal→Unmarshal round-trip.
 func toGenericValue(v interface{}) (interface{}, error) {
 	jsonBytes, err := json.Marshal(v)
 	if err != nil {
@@ -498,7 +437,6 @@ func toGenericValue(v interface{}) (interface{}, error) {
 	return generic, nil
 }
 
-// marshalArray marshals an array with proper handling of nested objects.
 func marshalArray(arr []interface{}) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteByte('[')

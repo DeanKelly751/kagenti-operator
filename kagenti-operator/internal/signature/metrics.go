@@ -22,40 +22,33 @@ import (
 )
 
 var (
-	// SignatureVerificationTotal tracks the total number of signature verifications
 	SignatureVerificationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "a2a_signature_verification_total",
-			Help: "Total number of A2A signature verifications",
+			Help: "Total A2A signature verifications",
 		},
 		[]string{"provider", "result", "audit_mode"},
 	)
 
-	// SignatureVerificationDuration tracks the duration of signature verifications
 	SignatureVerificationDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "a2a_signature_verification_duration_seconds",
-			Help:    "Duration of A2A signature verifications in seconds",
+			Help:    "Duration of A2A signature verifications",
 			Buckets: prometheus.DefBuckets,
 		},
 		[]string{"provider"},
 	)
 
-	// SignatureVerificationErrors tracks signature verification errors
 	SignatureVerificationErrors = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "a2a_signature_verification_errors_total",
-			Help: "Total number of A2A signature verification errors",
+			Help: "Total A2A signature verification errors",
 		},
 		[]string{"provider", "error_type"},
 	)
 )
 
 func init() {
-	// Register custom metrics with the global Prometheus registry.
-	// Use Register (not MustRegister) and ignore AlreadyRegisteredError to prevent
-	// panics when the package is imported from multiple test suites.
-	// Non-AlreadyRegisteredError errors are re-panicked because they indicate a real problem.
 	for _, c := range []prometheus.Collector{
 		SignatureVerificationTotal,
 		SignatureVerificationDuration,
@@ -63,13 +56,12 @@ func init() {
 	} {
 		if err := metrics.Registry.Register(c); err != nil {
 			if _, ok := err.(prometheus.AlreadyRegisteredError); !ok {
-				panic(err) // Re-panic for unexpected registration errors
+				panic(err)
 			}
 		}
 	}
 }
 
-// RecordVerification records a signature verification result
 func RecordVerification(provider string, verified bool, auditMode bool) {
 	result := "failed"
 	if verified {
@@ -82,7 +74,6 @@ func RecordVerification(provider string, verified bool, auditMode bool) {
 	SignatureVerificationTotal.WithLabelValues(provider, result, audit).Inc()
 }
 
-// RecordError records a signature verification error
 func RecordError(provider string, errorType string) {
 	SignatureVerificationErrors.WithLabelValues(provider, errorType).Inc()
 }

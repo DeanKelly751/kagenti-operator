@@ -17,14 +17,8 @@ limitations under the License.
 package signature
 
 import (
-	"context"
 	"testing"
-	"time"
-
-	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 )
-
-// --- NewProvider factory tests ---
 
 func TestNewProvider_NilConfig(t *testing.T) {
 	_, err := NewProvider(nil)
@@ -40,140 +34,33 @@ func TestNewProvider_UnknownType(t *testing.T) {
 	}
 }
 
-func TestNewProvider_None(t *testing.T) {
-	p, err := NewProvider(&Config{Type: ProviderTypeNone})
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if p.Name() != "noop" {
-		t.Errorf("Expected name 'noop', got '%s'", p.Name())
-	}
-}
-
-func TestNewProvider_Secret_MissingName(t *testing.T) {
+func TestNewProvider_X5C_MissingConfigMapName(t *testing.T) {
 	_, err := NewProvider(&Config{
-		Type:            ProviderTypeSecret,
-		SecretNamespace: "default",
+		Type:                   ProviderTypeX5C,
+		TrustBundleConfigMapNS: "spire-system",
 	})
 	if err == nil {
-		t.Error("Expected error when SecretName is empty")
+		t.Error("Expected error when TrustBundleConfigMapName is empty")
 	}
 }
 
-func TestNewProvider_Secret_MissingNamespace(t *testing.T) {
+func TestNewProvider_X5C_MissingConfigMapNamespace(t *testing.T) {
 	_, err := NewProvider(&Config{
-		Type:       ProviderTypeSecret,
-		SecretName: "my-secret",
+		Type:                     ProviderTypeX5C,
+		TrustBundleConfigMapName: "spire-bundle",
 	})
 	if err == nil {
-		t.Error("Expected error when SecretNamespace is empty")
+		t.Error("Expected error when TrustBundleConfigMapNS is empty")
 	}
 }
 
-func TestNewProvider_Secret_Valid(t *testing.T) {
-	p, err := NewProvider(&Config{
-		Type:            ProviderTypeSecret,
-		SecretName:      "a2a-keys",
-		SecretNamespace: "kagenti-system",
+func TestNewProvider_X5C_MissingClient(t *testing.T) {
+	_, err := NewProvider(&Config{
+		Type:                     ProviderTypeX5C,
+		TrustBundleConfigMapName: "spire-bundle",
+		TrustBundleConfigMapNS:   "spire-system",
 	})
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if p.Name() != "secret" {
-		t.Errorf("Expected name 'secret', got '%s'", p.Name())
-	}
-}
-
-func TestNewProvider_JWKS_MissingURL(t *testing.T) {
-	_, err := NewProvider(&Config{Type: ProviderTypeJWKS})
 	if err == nil {
-		t.Error("Expected error when JWKSURL is empty")
-	}
-}
-
-func TestNewProvider_JWKS_Valid(t *testing.T) {
-	p, err := NewProvider(&Config{
-		Type:    ProviderTypeJWKS,
-		JWKSURL: "https://example.com/.well-known/jwks.json",
-	})
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if p.Name() != "jwks" {
-		t.Errorf("Expected name 'jwks', got '%s'", p.Name())
-	}
-}
-
-func TestNewProvider_JWKS_CustomCacheTTL(t *testing.T) {
-	p, err := NewProvider(&Config{
-		Type:         ProviderTypeJWKS,
-		JWKSURL:      "https://example.com/.well-known/jwks.json",
-		JWKSCacheTTL: 10 * time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	jwksProvider, ok := p.(*JWKSProvider)
-	if !ok {
-		t.Fatal("Expected *JWKSProvider type")
-	}
-	if jwksProvider.cacheTTL != 10*time.Minute {
-		t.Errorf("Expected cacheTTL=10m, got %v", jwksProvider.cacheTTL)
-	}
-}
-
-// --- NoOpProvider tests ---
-
-func TestNoOpProvider_AlwaysVerified(t *testing.T) {
-	p := NewNoOpProvider()
-	ctx := context.Background()
-
-	// With nil signatures
-	result, err := p.VerifySignature(ctx, newCardData("Agent", "http://a:8000", "1.0"), nil)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if !result.Verified {
-		t.Error("NoOpProvider should always return verified=true")
-	}
-
-	// With a JWS signature
-	result, err = p.VerifySignature(ctx, newCardData("Agent", "http://a:8000", "1.0"),
-		[]agentv1alpha1.AgentCardSignature{
-			{Protected: "eyJhbGciOiJSUzI1NiJ9", Signature: "fake-sig"},
-		})
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if !result.Verified {
-		t.Error("NoOpProvider should always return verified=true, even with signatures")
-	}
-}
-
-func TestNoOpProvider_Name(t *testing.T) {
-	p := NewNoOpProvider()
-	if p.Name() != "noop" {
-		t.Errorf("Expected 'noop', got '%s'", p.Name())
-	}
-}
-
-// --- Config validation tests ---
-
-func TestConfig_ProviderTypes(t *testing.T) {
-	tests := []struct {
-		name     string
-		pt       ProviderType
-		expected string
-	}{
-		{"secret", ProviderTypeSecret, "secret"},
-		{"jwks", ProviderTypeJWKS, "jwks"},
-		{"none", ProviderTypeNone, "none"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if string(tt.pt) != tt.expected {
-				t.Errorf("Expected %s, got %s", tt.expected, tt.pt)
-			}
-		})
+		t.Error("Expected error when Client is nil")
 	}
 }
