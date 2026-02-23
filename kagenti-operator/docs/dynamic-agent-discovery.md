@@ -194,8 +194,7 @@ metadata:
     kagenti.io/protocol: a2a
     app.kubernetes.io/name: assistant-agent
 spec:
-  imageSource:
-    image: "ghcr.io/myorg/assistant:v1.0.0"
+  image: "ghcr.io/myorg/assistant:v1.0.0"
   servicePorts:
     - name: http
       port: 8000

@@ -137,11 +137,11 @@ Identifies the workload backing this agent via duck typing. The referenced workl
 
 #### IdentityBinding
 
-Configures workload identity binding for an AgentCard. The SPIFFE ID is extracted from the JWS protected header (`spiffe_id` claim) during signature verification.
+Configures workload identity binding for an AgentCard. The SPIFFE ID is extracted from the leaf certificate's SAN URI in the `x5c` chain during signature verification.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `allowedSpiffeIDs` | []string | Yes | Allowlist of SPIFFE IDs permitted to bind to this agent. Must have at least one entry. |
+| `trustDomain` | string | No | Overrides the operator-level `--spire-trust-domain` for this AgentCard. If empty, the operator flag value is used. |
 | `strict` | boolean | No | Enables enforcement mode: binding failures trigger network isolation. When false (default), results are recorded in status only (audit mode). |
 
 ### Status Fields
@@ -219,7 +219,7 @@ Represents the A2A agent card structure based on the [A2A specification](https:/
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `protected` | string | Base64url-encoded JWS protected header (contains `alg`, `kid`, `spiffe_id`) |
+| `protected` | string | Base64url-encoded JWS protected header (contains `alg`, `kid`, `typ`, `x5c`) |
 | `signature` | string | Base64url-encoded JWS signature value |
 | `header` | object | Optional unprotected JWS header parameters (e.g., `timestamp`) |
 
@@ -304,8 +304,7 @@ spec:
     kind: Deployment
     name: weather-agent
   identityBinding:
-    allowedSpiffeIDs:
-      - "spiffe://cluster.local/ns/default/sa/weather-sa"
+    strict: true
 ```
 
 #### View Discovered Agents

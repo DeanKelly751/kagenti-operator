@@ -11,7 +11,7 @@ The operator manages the `AgentCard` Custom Resource for agent discovery and ver
 * Support deployment of AI agents using standard Kubernetes Deployments and StatefulSets with the `kagenti.io/type: agent` label
 * Automatically discover and index agent metadata via the A2A protocol
 * Provide cryptographic signature verification for agent cards (JWS with RSA/ECDSA)
-* Support SPIFFE-based workload identity binding with allowlist enforcement
+* Support SPIFFE-based workload identity binding with trust-domain validation
 * Enforce network isolation via Kubernetes NetworkPolicies based on verification status
 * Lock down agent pods with read-only filesystem with minimal privileges
 * Support cluster-wide as well as namespaced scope deployment
@@ -81,12 +81,10 @@ Watches AgentCard resources when `--enforce-network-policies` is enabled. Create
 ## Security Features
 
 ### Signature Verification
-The operator verifies JWS signatures embedded in agent cards per A2A spec section 8.4. Two providers are supported:
-- **Secret Provider**: Reads public keys from Kubernetes Secrets
-- **JWKS Provider**: Fetches public keys from a JWKS endpoint (RFC 7517)
+The operator verifies JWS signatures embedded in agent cards per A2A spec section 8.4 using the **X5CProvider**. The `x5c` certificate chain in the JWS protected header is validated against the SPIRE X.509 trust bundle, and the leaf certificate's public key is used for signature verification.
 
 ### Identity Binding
-AgentCards can be configured with `spec.identityBinding.allowedSpiffeIDs` to restrict which workload identities are permitted. The SPIFFE ID is extracted from the JWS protected header during signature verification.
+AgentCards are bound to workload identities via trust-domain validation. The SPIFFE ID is extracted from the leaf certificate's SAN URI (cryptographically proven by the x5c chain) and validated against the configured trust domain.
 
 ### Network Isolation
 When `--enforce-network-policies` is enabled, the NetworkPolicy controller creates:
