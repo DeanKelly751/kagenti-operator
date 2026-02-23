@@ -6,7 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/name: weather-agent
     kagenti.io/type: agent
-    kagenti.io/agent-protocol: a2a
+    kagenti.io/protocol: a2a
 
   annotations:
     description: "Weather data processing agent"
@@ -15,9 +15,7 @@ spec:
 
   replicas: 1
 
-  # Use existing container image
-  imageSource:
-    image: "ghcr.io/kagenti/agent-examples/weather_service:v0.0.1-alpha.2"
+  image: "ghcr.io/kagenti/agent-examples/weather_service:v0.0.1-alpha.2"
 
   # Define service ports to expose
   servicePorts:
@@ -36,7 +34,7 @@ spec:
 
       containers:
       - name: agent # use fixed name "agent" for the main container
-        image:  <will be replaced with imageSource.image above>
+        image: "ghcr.io/kagenti/agent-examples/weather_service:v0.0.1-alpha.2"
         imagePullPolicy: IfNotPresent
 
         # Environment variables

@@ -8269,8 +8269,7 @@ spec:
                     description: Deployment message
                     type: string
                   phase:
-                    description: 'Current deployment phase: PhaseDeploying, PhaseReady,
-                      PhaseFailed'
+                    description: 'Current deployment phase: Deploying, Ready'
                     type: string
                 type: object
             type: object

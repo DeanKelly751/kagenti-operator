@@ -8178,29 +8178,6 @@ spec:
           status:
             description: AgentStatus defines the observed state of Agent.
             properties:
-              bindingEnforcement:
-                description: BindingEnforcement tracks identity binding enforcement
-                  state
-                properties:
-                  disabledAt:
-                    description: DisabledAt is when the agent was disabled due to
-                      binding enforcement
-                    format: date-time
-                    type: string
-                  disabledByBinding:
-                    description: DisabledByBinding indicates the agent was disabled
-                      due to failed identity binding
-                    type: boolean
-                  disabledReason:
-                    description: DisabledReason provides details about why binding
-                      enforcement disabled the agent
-                    type: string
-                  originalReplicas:
-                    description: OriginalReplicas stores the replica count before
-                      binding enforcement disabled the agent
-                    format: int32
-                    type: integer
-                type: object
               conditions:
                 description: Conditions represent overall status
                 items:
@@ -8269,8 +8246,7 @@ spec:
                     description: Deployment message
                     type: string
                   phase:
-                    description: 'Current deployment phase: PhaseDeploying, PhaseReady,
-                      PhaseFailed'
+                    description: 'Current deployment phase: Deploying, Ready'
                     type: string
                 type: object
             type: object
