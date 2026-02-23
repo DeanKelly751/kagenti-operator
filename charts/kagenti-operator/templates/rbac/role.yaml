@@ -104,7 +104,6 @@ rules:
 - apiGroups:
   - agent.kagenti.dev
   resources:
-  - agents
   - agentbuilds
   - agentcards
   verbs:
@@ -118,7 +117,6 @@ rules:
 - apiGroups:
   - agent.kagenti.dev
   resources:
-  - agents/finalizers
   - agentbuilds/finalizers
   - agentcards/finalizers
   verbs:
@@ -126,7 +124,6 @@ rules:
 - apiGroups:
   - agent.kagenti.dev
   resources:
-  - agents/status
   - agentbuilds/status
   - agentcards/status
   verbs:

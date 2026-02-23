@@ -25,6 +25,3 @@ resources:
 - agentbuild_admin_role.yaml
 - agentbuild_editor_role.yaml
 - agentbuild_viewer_role.yaml
-- agent_admin_role.yaml
-- agent_editor_role.yaml
-- agent_viewer_role.yaml
