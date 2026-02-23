@@ -43,7 +43,7 @@ var _ = Describe("Agent Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: "default",
 		}
 		Agent := &agentv1alpha1.Agent{}
 
@@ -74,7 +74,6 @@ var _ = Describe("Agent Controller", func() {
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
 			resource := &agentv1alpha1.Agent{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
@@ -94,8 +93,6 @@ var _ = Describe("Agent Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
 		})
 	})
 })
@@ -164,10 +161,13 @@ func TestSecurityContextByDistribution(t *testing.T) {
 				},
 			}
 
-			// Create deployment
-			deployment, err := reconciler.createDeploymentForAgent(context.Background(), agent)
+			rbacConfig, err := reconciler.ensureRBAC(context.Background(), agent)
 			if err != nil {
-				t.Fatalf("Failed to create deployment: %v", err)
+				t.Fatalf("Failed to ensure RBAC: %v", err)
+			}
+			deployment, err := reconciler.buildDeploymentSpec(agent, rbacConfig)
+			if err != nil {
+				t.Fatalf("Failed to build deployment spec: %v", err)
 			}
 
 			// Verify security context
@@ -274,10 +274,13 @@ func TestSecurityContextUserOverride(t *testing.T) {
 		},
 	}
 
-	// Create deployment
-	deployment, err := reconciler.createDeploymentForAgent(context.Background(), agent)
+	rbacConfig, err := reconciler.ensureRBAC(context.Background(), agent)
 	if err != nil {
-		t.Fatalf("Failed to create deployment: %v", err)
+		t.Fatalf("Failed to ensure RBAC: %v", err)
+	}
+	deployment, err := reconciler.buildDeploymentSpec(agent, rbacConfig)
+	if err != nil {
+		t.Fatalf("Failed to build deployment spec: %v", err)
 	}
 
 	// Verify user-specified values are preserved

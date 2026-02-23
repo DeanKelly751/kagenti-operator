@@ -35,36 +35,24 @@ import (
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 )
 
-var (
-	syncLogger = ctrl.Log.WithName("controller").WithName("AgentCardSync")
-)
+var syncLogger = ctrl.Log.WithName("controller").WithName("AgentCardSync")
 
-// DefaultAutoSyncGracePeriod is the delay before auto-creating an AgentCard for a
-// newly created workload. This prevents duplicate cards when a Deployment and an
-// AgentCard are applied together (e.g. in the same kubectl apply) — the Deployment
-// event can trigger auto-sync before the manually-created card appears in the cache.
-//
-// TODO: Remove when Deployment/StatefulSet auto-sync is dropped in favour of
-// explicit targetRef-based AgentCard creation.
+// DefaultAutoSyncGracePeriod prevents duplicate cards when a Deployment and AgentCard
+// are applied together (the Deployment event may fire before the manual card is cached).
 const DefaultAutoSyncGracePeriod = 5 * time.Second
 
-// AgentCardSyncReconciler automatically creates AgentCard resources for agent workloads
-// (Deployments and StatefulSets)
+// AgentCardSyncReconciler auto-creates AgentCards for labelled agent workloads.
 type AgentCardSyncReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
-	// AutoSyncGracePeriod is the delay before auto-creating an AgentCard for newly
-	// created workloads. Set to 0 in tests to disable. Defaults to DefaultAutoSyncGracePeriod.
-	AutoSyncGracePeriod time.Duration
+	Scheme              *runtime.Scheme
+	AutoSyncGracePeriod time.Duration // 0 = use default; negative = disabled (tests)
 }
 
-// getAutoSyncGracePeriod returns the configured grace period, defaulting to DefaultAutoSyncGracePeriod.
 func (r *AgentCardSyncReconciler) getAutoSyncGracePeriod() time.Duration {
 	if r.AutoSyncGracePeriod > 0 {
 		return r.AutoSyncGracePeriod
 	}
 	if r.AutoSyncGracePeriod < 0 {
-		// Explicitly set to negative = disabled (e.g., tests)
 		return 0
 	}
 	return DefaultAutoSyncGracePeriod
@@ -74,38 +62,32 @@ func (r *AgentCardSyncReconciler) getAutoSyncGracePeriod() time.Duration {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch
 
-// ReconcileDeployment handles Deployment events to create/update AgentCards
 func (r *AgentCardSyncReconciler) ReconcileDeployment(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	syncLogger.V(1).Info("Reconciling Deployment for auto-sync", "namespacedName", req.NamespacedName)
 
 	deployment := &appsv1.Deployment{}
 	if err := r.Get(ctx, req.NamespacedName, deployment); err != nil {
 		if errors.IsNotFound(err) {
-			// Deployment deleted - AgentCard cleanup handled by owner references
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
 
-	// Check if this is an agent deployment
 	if !r.shouldSyncWorkload(deployment.Labels) {
 		return ctrl.Result{}, nil
 	}
 
-	// Skip Deployments owned by the legacy Agent CRD — the Agent reconciler handles those.
-	// This prevents duplicate AgentCards (one from Agent path, one from Deployment path).
+	// Skip Deployments owned by the Agent CRD to avoid duplicate cards.
 	if isOwnedByAgentCRD(deployment) {
 		syncLogger.V(1).Info("Skipping Deployment owned by Agent CRD",
 			"deployment", deployment.Name, "namespace", deployment.Namespace)
 		return ctrl.Result{}, nil
 	}
 
-	// Create or update AgentCard with targetRef
 	gvk := appsv1.SchemeGroupVersion.WithKind("Deployment")
 	return r.ensureAgentCard(ctx, deployment, gvk)
 }
 
-// ReconcileStatefulSet handles StatefulSet events to create/update AgentCards
 func (r *AgentCardSyncReconciler) ReconcileStatefulSet(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	syncLogger.V(1).Info("Reconciling StatefulSet for auto-sync", "namespacedName", req.NamespacedName)
 
@@ -125,42 +107,21 @@ func (r *AgentCardSyncReconciler) ReconcileStatefulSet(ctx context.Context, req 
 	return r.ensureAgentCard(ctx, statefulset, gvk)
 }
 
-// shouldSyncWorkload checks if a workload should have an AgentCard created
 func (r *AgentCardSyncReconciler) shouldSyncWorkload(labels map[string]string) bool {
-	if labels == nil {
+	if labels == nil || labels[LabelAgentType] != LabelValueAgent {
 		return false
 	}
-
-	// Must have kagenti.io/type=agent label
-	if labels[LabelAgentType] != LabelValueAgent {
-		return false
-	}
-
-	// Must have protocol label (new or old format)
-	if labels[LabelKagentiProtocol] != "" {
-		return true
-	}
-
-	// Fall back to old label
-	if labels[LabelAgentProtocol] != "" {
-		return true
-	}
-
-	return false
+	return labels[LabelKagentiProtocol] != "" || labels[LabelAgentProtocol] != ""
 }
 
-// getAgentCardNameFromWorkload generates the AgentCard name from workload name and kind
-// The kind is included to prevent collisions when a Deployment, StatefulSet, and/or
-// legacy Agent CRD share the same name in a namespace.
+// getAgentCardNameFromWorkload includes the kind suffix to prevent name collisions.
 func (r *AgentCardSyncReconciler) getAgentCardNameFromWorkload(workloadName string, kind string) string {
 	return fmt.Sprintf("%s-%s-card", workloadName, strings.ToLower(kind))
 }
 
-// ensureAgentCard creates or updates an AgentCard for a workload using targetRef
 func (r *AgentCardSyncReconciler) ensureAgentCard(ctx context.Context, obj client.Object, gvk schema.GroupVersionKind) (ctrl.Result, error) {
 	cardName := r.getAgentCardNameFromWorkload(obj.GetName(), gvk.Kind)
 
-	// Check if AgentCard already exists
 	existingCard := &agentv1alpha1.AgentCard{}
 	err := r.Get(ctx, types.NamespacedName{
 		Name:      cardName,
@@ -168,7 +129,6 @@ func (r *AgentCardSyncReconciler) ensureAgentCard(ctx context.Context, obj clien
 	}, existingCard)
 
 	if err == nil {
-		// Card exists - ensure owner reference is set and targetRef is correct
 		needsUpdate := false
 
 		if !r.hasOwnerReferenceForObject(existingCard, obj) {
@@ -181,14 +141,12 @@ func (r *AgentCardSyncReconciler) ensureAgentCard(ctx context.Context, obj clien
 			needsUpdate = true
 		}
 
-		// Ensure existing TargetRef matches the current workload.
 		if existingCard.Spec.TargetRef != nil {
 			tr := existingCard.Spec.TargetRef
 			expectedAPIVersion := gvk.GroupVersion().String()
 			expectedKind := gvk.Kind
 			expectedName := obj.GetName()
 
-			// If TargetRef is effectively empty, initialize it to match the workload.
 			if tr.APIVersion == "" && tr.Kind == "" && tr.Name == "" {
 				syncLogger.Info("Initializing empty AgentCard TargetRef to match workload",
 					"agentCard", cardName,
@@ -200,14 +158,7 @@ func (r *AgentCardSyncReconciler) ensureAgentCard(ctx context.Context, obj clien
 				tr.Name = expectedName
 				needsUpdate = true
 			} else if tr.APIVersion != expectedAPIVersion || tr.Kind != expectedKind || tr.Name != expectedName {
-				// Existing TargetRef points at a different workload; surface a clear conflict error.
-				errMsg := fmt.Sprintf(
-					"AgentCard TargetRef conflict for %s/%s: expected targetRef %s/%s %s, found %s/%s %s",
-					obj.GetNamespace(), cardName,
-					expectedAPIVersion, expectedKind, expectedName,
-					tr.APIVersion, tr.Kind, tr.Name,
-				)
-				syncLogger.Error(nil, "AgentCard TargetRef does not match reconciled workload",
+				syncLogger.Error(fmt.Errorf("targetRef mismatch"), "AgentCard TargetRef does not match reconciled workload",
 					"agentCard", cardName,
 					"expectedAPIVersion", expectedAPIVersion,
 					"expectedKind", expectedKind,
@@ -215,7 +166,12 @@ func (r *AgentCardSyncReconciler) ensureAgentCard(ctx context.Context, obj clien
 					"foundAPIVersion", tr.APIVersion,
 					"foundKind", tr.Kind,
 					"foundName", tr.Name)
-				return ctrl.Result{}, fmt.Errorf("%s", errMsg)
+				return ctrl.Result{}, fmt.Errorf(
+					"AgentCard TargetRef conflict for %s/%s: expected targetRef %s/%s %s, found %s/%s %s",
+					obj.GetNamespace(), cardName,
+					expectedAPIVersion, expectedKind, expectedName,
+					tr.APIVersion, tr.Kind, tr.Name,
+				)
 			}
 		}
 		if needsUpdate {
@@ -232,9 +188,6 @@ func (r *AgentCardSyncReconciler) ensureAgentCard(ctx context.Context, obj clien
 		return ctrl.Result{}, err
 	}
 
-	// Before creating, check if another AgentCard already targets this workload.
-	// This prevents duplicates when a user manually creates an AgentCard with a custom name
-	// (e.g. "weather-card") that targets the same Deployment/StatefulSet.
 	if existingCard, found := r.findExistingCardForWorkload(ctx, obj, gvk); found {
 		syncLogger.Info("Skipping auto-creation: another AgentCard already targets this workload",
 			"existingCard", existingCard,
@@ -243,10 +196,6 @@ func (r *AgentCardSyncReconciler) ensureAgentCard(ctx context.Context, obj clien
 		return ctrl.Result{}, nil
 	}
 
-	// Grace period for newly created workloads: when a Deployment and an AgentCard are
-	// applied together (e.g. in the same kubectl apply), the Deployment event can trigger
-	// the sync reconciler before the manually-created AgentCard appears in the informer
-	// cache. Requeue once so the duplicate check above can catch it on the next pass.
 	gracePeriod := r.getAutoSyncGracePeriod()
 	if gracePeriod > 0 && time.Since(obj.GetCreationTimestamp().Time) < gracePeriod {
 		syncLogger.V(1).Info("Workload recently created, requeueing before auto-creating AgentCard",
@@ -255,17 +204,10 @@ func (r *AgentCardSyncReconciler) ensureAgentCard(ctx context.Context, obj clien
 		return ctrl.Result{RequeueAfter: gracePeriod}, nil
 	}
 
-	// Create new AgentCard with targetRef
 	return r.createAgentCardForWorkload(ctx, obj, gvk, cardName)
 }
 
-// findExistingCardForWorkload checks if any AgentCard in the namespace already targets
-// the given workload via targetRef. Returns the card name and true if found. This
-// prevents auto-sync from creating duplicate cards when a user has manually created
-// an AgentCard with a custom name.
-//
-// Uses the shared TargetRefNameIndex to narrow the list to cards referencing the
-// same workload name, then verifies apiVersion and kind.
+// findExistingCardForWorkload returns the name of an existing card targeting this workload, if any.
 func (r *AgentCardSyncReconciler) findExistingCardForWorkload(ctx context.Context, obj client.Object, gvk schema.GroupVersionKind) (string, bool) {
 	cardList := &agentv1alpha1.AgentCardList{}
 	if err := r.List(ctx, cardList,
@@ -290,14 +232,6 @@ func (r *AgentCardSyncReconciler) findExistingCardForWorkload(ctx context.Contex
 	return "", false
 }
 
-// isOwnedByAgentCRD checks if an object (Deployment/StatefulSet) is owned by the
-// legacy Agent CRD. Returns true if any owner reference has kind=Agent in the
-// kagenti API group.
-//
-// TODO(cleanup): Remove this function once the legacy Agent CRD is fully
-// removed from all clusters and the AgentReconciler is deleted. At that point,
-// no Deployments will carry Agent-owned owner references and this guard is
-// unnecessary.
 func isOwnedByAgentCRD(obj client.Object) bool {
 	for _, ref := range obj.GetOwnerReferences() {
 		if ref.Kind == "Agent" && ref.APIVersion == agentv1alpha1.GroupVersion.String() {
@@ -307,7 +241,6 @@ func isOwnedByAgentCRD(obj client.Object) bool {
 	return false
 }
 
-// createAgentCardForWorkload creates a new AgentCard for a workload using targetRef
 func (r *AgentCardSyncReconciler) createAgentCardForWorkload(ctx context.Context, obj client.Object, gvk schema.GroupVersionKind, cardName string) (ctrl.Result, error) {
 	syncLogger.Info("Creating AgentCard for workload",
 		"agentCard", cardName,
@@ -339,7 +272,6 @@ func (r *AgentCardSyncReconciler) createAgentCardForWorkload(ctx context.Context
 		},
 	}
 
-	// Set owner reference for garbage collection
 	if err := controllerutil.SetControllerReference(obj, agentCard, r.Scheme); err != nil {
 		syncLogger.Error(err, "Failed to set controller reference for AgentCard")
 		return ctrl.Result{}, err
@@ -347,8 +279,6 @@ func (r *AgentCardSyncReconciler) createAgentCardForWorkload(ctx context.Context
 
 	if err := r.Create(ctx, agentCard); err != nil {
 		if errors.IsAlreadyExists(err) {
-			// Re-fetch the existing AgentCard and validate/repair it
-			// This handles race conditions and ensures the card belongs to this workload
 			return r.handleAlreadyExistsOnCreate(ctx, obj, gvk, cardName)
 		}
 		syncLogger.Error(err, "Failed to create AgentCard")
@@ -359,9 +289,6 @@ func (r *AgentCardSyncReconciler) createAgentCardForWorkload(ctx context.Context
 	return ctrl.Result{}, nil
 }
 
-// handleAlreadyExistsOnCreate handles the case where an AgentCard already exists during create.
-// It re-fetches the existing card and validates that its targetRef matches the workload we're
-// reconciling. If there's a mismatch, it returns a conflict error to make the misconfiguration visible.
 func (r *AgentCardSyncReconciler) handleAlreadyExistsOnCreate(ctx context.Context, obj client.Object, gvk schema.GroupVersionKind, cardName string) (ctrl.Result, error) {
 	syncLogger.Info("AgentCard already exists, validating ownership", "agentCard", cardName)
 
@@ -370,7 +297,6 @@ func (r *AgentCardSyncReconciler) handleAlreadyExistsOnCreate(ctx context.Contex
 		Name:      cardName,
 		Namespace: obj.GetNamespace(),
 	}, existingCard); err != nil {
-		// Card was deleted between create attempt and re-fetch, requeue to retry
 		if errors.IsNotFound(err) {
 			syncLogger.Info("AgentCard was deleted after AlreadyExists, requeueing", "agentCard", cardName)
 			return ctrl.Result{Requeue: true}, nil
@@ -382,18 +308,10 @@ func (r *AgentCardSyncReconciler) handleAlreadyExistsOnCreate(ctx context.Contex
 	expectedKind := gvk.Kind
 	expectedName := obj.GetName()
 
-	// Check if the existing card's targetRef matches our workload
 	if existingCard.Spec.TargetRef != nil {
 		tr := existingCard.Spec.TargetRef
 		if tr.APIVersion != expectedAPIVersion || tr.Kind != expectedKind || tr.Name != expectedName {
-			// Conflict: existing AgentCard belongs to a different workload
-			errMsg := fmt.Sprintf(
-				"AgentCard %s/%s already exists with conflicting targetRef: expected %s/%s %s, found %s/%s %s",
-				obj.GetNamespace(), cardName,
-				expectedAPIVersion, expectedKind, expectedName,
-				tr.APIVersion, tr.Kind, tr.Name,
-			)
-			syncLogger.Error(nil, "AgentCard targetRef conflict detected",
+			syncLogger.Error(fmt.Errorf("targetRef conflict"), "AgentCard targetRef conflict detected",
 				"agentCard", cardName,
 				"expectedAPIVersion", expectedAPIVersion,
 				"expectedKind", expectedKind,
@@ -401,12 +319,15 @@ func (r *AgentCardSyncReconciler) handleAlreadyExistsOnCreate(ctx context.Contex
 				"foundAPIVersion", tr.APIVersion,
 				"foundKind", tr.Kind,
 				"foundName", tr.Name)
-			return ctrl.Result{}, fmt.Errorf("%s", errMsg)
+			return ctrl.Result{}, fmt.Errorf(
+				"AgentCard %s/%s already exists with conflicting targetRef: expected %s/%s %s, found %s/%s %s",
+				obj.GetNamespace(), cardName,
+				expectedAPIVersion, expectedKind, expectedName,
+				tr.APIVersion, tr.Kind, tr.Name,
+			)
 		}
 	}
 
-	// Card exists and either has no targetRef or matches our workload
-	// Ensure owner reference is set correctly
 	if !r.hasOwnerReferenceForObject(existingCard, obj) {
 		syncLogger.Info("Adding owner reference to existing AgentCard",
 			"agentCard", cardName, "owner", obj.GetName(), "kind", gvk.Kind)
@@ -415,7 +336,6 @@ func (r *AgentCardSyncReconciler) handleAlreadyExistsOnCreate(ctx context.Contex
 			return ctrl.Result{}, err
 		}
 
-		// Update targetRef if not set
 		if existingCard.Spec.TargetRef == nil {
 			existingCard.Spec.TargetRef = &agentv1alpha1.TargetRef{
 				APIVersion: expectedAPIVersion,
@@ -434,7 +354,6 @@ func (r *AgentCardSyncReconciler) handleAlreadyExistsOnCreate(ctx context.Contex
 	return ctrl.Result{}, nil
 }
 
-// hasOwnerReferenceForObject checks if an AgentCard has the correct owner reference for any object
 func (r *AgentCardSyncReconciler) hasOwnerReferenceForObject(agentCard *agentv1alpha1.AgentCard, obj client.Object) bool {
 	for _, ownerRef := range agentCard.OwnerReferences {
 		if ownerRef.UID == obj.GetUID() {
@@ -444,15 +363,11 @@ func (r *AgentCardSyncReconciler) hasOwnerReferenceForObject(agentCard *agentv1a
 	return false
 }
 
-// SetupWithManager sets up the controller with the Manager.
-// It creates separate controllers for Deployments and StatefulSets.
 func (r *AgentCardSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// Register the shared field indexer (safe to call from multiple controllers).
 	if err := RegisterAgentCardTargetRefIndex(mgr); err != nil {
 		return err
 	}
 
-	// Watch Deployments with agent labels
 	if err := ctrl.NewControllerManagedBy(mgr).
 		Named("agentcardsync-deployment").
 		For(&appsv1.Deployment{}).
@@ -461,7 +376,6 @@ func (r *AgentCardSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
-	// Watch StatefulSets with agent labels
 	if err := ctrl.NewControllerManagedBy(mgr).
 		Named("agentcardsync-statefulset").
 		For(&appsv1.StatefulSet{}).
@@ -473,7 +387,6 @@ func (r *AgentCardSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return nil
 }
 
-// deploymentReconcilerAdapter adapts AgentCardSyncReconciler to handle Deployment reconcile requests
 type deploymentReconcilerAdapter struct {
 	*AgentCardSyncReconciler
 }
@@ -482,7 +395,6 @@ func (a *deploymentReconcilerAdapter) Reconcile(ctx context.Context, req ctrl.Re
 	return a.ReconcileDeployment(ctx, req)
 }
 
-// statefulSetReconcilerAdapter adapts AgentCardSyncReconciler to handle StatefulSet reconcile requests
 type statefulSetReconcilerAdapter struct {
 	*AgentCardSyncReconciler
 }

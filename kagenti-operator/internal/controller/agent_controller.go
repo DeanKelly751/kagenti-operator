@@ -24,7 +24,7 @@ import (
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 	"github.com/kagenti/operator/internal/distribution"
-	rbac "github.com/kagenti/operator/internal/rbac"
+	"github.com/kagenti/operator/internal/rbac"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -41,23 +41,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-// AgentReconciler reconciles a Agent object
+// AgentReconciler reconciles Agent CRs into Deployments and Services.
 type AgentReconciler struct {
 	client.Client
-	Scheme                   *runtime.Scheme
-	EnableClientRegistration bool
-	Distribution             distribution.Type
+	Scheme       *runtime.Scheme
+	Distribution distribution.Type
 }
 
-var (
-	logger = ctrl.Log.WithName("controller").WithName("Agent")
-)
+var logger = ctrl.Log.WithName("controller").WithName("Agent")
 
-const (
-	CLIENT_REGISTRATION_NAME = "kagenti-client-registration"
-	SPIFFY_HELPER_NAME       = "spiffe-helper"
-	AGENT_FINALIZER          = "agent.kagenti.dev/finalizer"
-)
+const AgentFinalizer = "agent.kagenti.dev/finalizer"
 
 // +kubebuilder:rbac:groups=agent.kagenti.dev,resources=agents,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agent.kagenti.dev,resources=agents/status,verbs=get;update;patch
@@ -74,7 +67,7 @@ const (
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 
 func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger.Info("Reconciling Agent", "namespacedName", req.NamespacedName)
+	logger.V(1).Info("Reconciling Agent", "namespacedName", req.NamespacedName)
 
 	agent := &agentv1alpha1.Agent{}
 	err := r.Get(ctx, req.NamespacedName, agent)
@@ -86,10 +79,10 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return r.handleDeletion(ctx, agent)
 	}
 
-	if !controllerutil.ContainsFinalizer(agent, AGENT_FINALIZER) {
-		controllerutil.AddFinalizer(agent, AGENT_FINALIZER)
+	if !controllerutil.ContainsFinalizer(agent, AgentFinalizer) {
+		controllerutil.AddFinalizer(agent, AgentFinalizer)
 		if err := r.Update(ctx, agent); err != nil {
-			logger.Error(err, "Unable to add finalizer to Agent")
+			logger.Error(err, "Failed to add finalizer to Agent")
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -111,11 +104,19 @@ func (r *AgentReconciler) reconcileAgentDeployment(ctx context.Context, agent *a
 	deploymentName := agent.Name
 	deployment := &appsv1.Deployment{}
 
-	err := r.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: agent.Namespace}, deployment)
+	rbacConfig, err := r.ensureRBAC(ctx, agent)
+	if err != nil {
+		logger.Error(err, "Failed to ensure RBAC objects",
+			"agent", agent.Name,
+			"namespace", agent.Namespace)
+		return ctrl.Result{}, err
+	}
+
+	err = r.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: agent.Namespace}, deployment)
 	if err != nil && errors.IsNotFound(err) {
-		deployment, err = r.createDeploymentForAgent(ctx, agent)
+		deployment, err = r.buildDeploymentSpec(agent, rbacConfig)
 		if err != nil {
-			logger.Error(err, "Unable to create deployment spec for Agent",
+			logger.Error(err, "Failed to build deployment spec for Agent",
 				"agent", agent.Name,
 				"namespace", agent.Namespace)
 			return ctrl.Result{}, err
@@ -128,21 +129,21 @@ func (r *AgentReconciler) reconcileAgentDeployment(ctx context.Context, agent *a
 		if logger.V(1).Enabled() {
 			data, err := json.MarshalIndent(deployment, "", "  ")
 			if err != nil {
-				logger.V(1).Error(err, "Unable to marshal deployment spec to JSON")
+				logger.V(1).Error(err, "Failed to marshal deployment spec to JSON")
 			} else {
 				logger.V(1).Info("Deployment spec", "spec", string(data))
 			}
 		}
 
 		if err := controllerutil.SetControllerReference(agent, deployment, r.Scheme); err != nil {
-			logger.Error(err, "Unable to set controller reference for Agent Deployment",
+			logger.Error(err, "Failed to set controller reference for Agent Deployment",
 				"agent", agent.Name,
 				"namespace", agent.Namespace)
 			return ctrl.Result{}, err
 		}
 
 		if err := r.Create(ctx, deployment); err != nil {
-			logger.Error(err, "Unable to create Agent Deployment",
+			logger.Error(err, "Failed to create Agent Deployment",
 				"agent", agent.Name,
 				"namespace", agent.Namespace)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, err
@@ -155,22 +156,20 @@ func (r *AgentReconciler) reconcileAgentDeployment(ctx context.Context, agent *a
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, err
 	}
 
-	// Update deployment if spec has changed
-	desiredDeployment, err := r.createDeploymentForAgent(ctx, agent)
+	desiredDeployment, err := r.buildDeploymentSpec(agent, rbacConfig)
 	if err != nil {
-		logger.Error(err, "Unable to create desired deployment spec for Agent",
+		logger.Error(err, "Failed to build desired deployment spec for Agent",
 			"agent", agent.Name,
 			"namespace", agent.Namespace)
 		return ctrl.Result{}, err
 	}
 
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// Fetch the latest version of the deployment before each retry
 		if err := r.Get(ctx, client.ObjectKey{Name: deploymentName, Namespace: agent.Namespace}, deployment); err != nil {
 			return err
 		}
 
-		logger.Info("Updating Agent Deployment", "deploymentName", deploymentName)
+		logger.V(1).Info("Updating Agent Deployment", "deploymentName", deploymentName)
 
 		desiredReplicas := desiredDeployment.Spec.Replicas
 		currentReplicas := deployment.Spec.Replicas
@@ -181,7 +180,6 @@ func (r *AgentReconciler) reconcileAgentDeployment(ctx context.Context, agent *a
 			deployment.Spec.Replicas = desiredReplicas
 		}
 
-		// Build a map of existing named containers and a slice of indices for unnamed ones.
 		existingByName := map[string]int{}
 		var unnamedExisting []int
 		for i := range deployment.Spec.Template.Spec.Containers {
@@ -196,8 +194,6 @@ func (r *AgentReconciler) reconcileAgentDeployment(ctx context.Context, agent *a
 			}
 		}
 
-		// Apply desired changes by container name; append missing containers.
-		// Use a separate index for unnamed desired containers to match them deterministically.
 		unnamedIdx := 0
 		for i := range desiredDeployment.Spec.Template.Spec.Containers {
 			desired := desiredDeployment.Spec.Template.Spec.Containers[i]
@@ -210,19 +206,16 @@ func (r *AgentReconciler) reconcileAgentDeployment(ctx context.Context, agent *a
 					}
 					continue
 				}
-				// not found: append desired container to existing list
 				deployment.Spec.Template.Spec.Containers = append(deployment.Spec.Template.Spec.Containers, desired)
 				logger.Info("Container added", "containerName", desired.Name)
 				continue
 			}
 
-			// Fallback for unnamed desired containers: match to next unnamed existing container by recorded index
 			if unnamedIdx < len(unnamedExisting) {
 				idx := unnamedExisting[unnamedIdx]
 				updateContainerEnv(&deployment.Spec.Template.Spec.Containers[idx], &desired)
 				unnamedIdx++
 			} else {
-				// no unnamed existing left: append desired (unnamed) container
 				deployment.Spec.Template.Spec.Containers = append(deployment.Spec.Template.Spec.Containers, desired)
 			}
 		}
@@ -243,16 +236,13 @@ func (r *AgentReconciler) reconcileAgentDeployment(ctx context.Context, agent *a
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, err
 	}
 
-	logger.Info("Deployment status",
+	logger.V(1).Info("Deployment status",
 		"name", deploymentName,
 		"namespace", agent.Namespace,
 		"desiredReplicas", ptrValueOrDefault(deployment.Spec.Replicas, 1),
-		"statusReplicas", deployment.Status.Replicas,
 		"readyReplicas", deployment.Status.ReadyReplicas,
 		"availableReplicas", deployment.Status.AvailableReplicas,
-		"updatedReplicas", deployment.Status.UpdatedReplicas,
-		"unavailableReplicas", deployment.Status.UnavailableReplicas,
-		"conditions", deployment.Status.Conditions)
+		"unavailableReplicas", deployment.Status.UnavailableReplicas)
 
 	desiredReplicas := ptrValueOrDefault(deployment.Spec.Replicas, 1)
 
@@ -267,7 +257,6 @@ func (r *AgentReconciler) reconcileAgentDeployment(ctx context.Context, agent *a
 	var phase agentv1alpha1.LifecyclePhase
 	var conditions []metav1.Condition
 
-	// DeploymentAvailable condition
 	conditions = append(conditions, metav1.Condition{
 		Type:               "DeploymentAvailable",
 		Status:             metav1.ConditionTrue,
@@ -276,7 +265,6 @@ func (r *AgentReconciler) reconcileAgentDeployment(ctx context.Context, agent *a
 		Message:            fmt.Sprintf("Deployment %s exists with %d desired replicas", deployment.Name, desiredReplicas),
 	})
 
-	// Track pod scheduling and availability
 	if deployment.Status.UnavailableReplicas > 0 {
 		conditions = append(conditions, metav1.Condition{
 			Type:               "PodsScheduled",
@@ -295,7 +283,6 @@ func (r *AgentReconciler) reconcileAgentDeployment(ctx context.Context, agent *a
 		})
 	}
 
-	// Update Ready condition and Phase based on deployment readiness
 	if deployment.Status.ReadyReplicas > 0 && deployment.Status.ReadyReplicas == int32(desiredReplicas) {
 		phase = agentv1alpha1.PhaseReady
 
@@ -343,7 +330,6 @@ func (r *AgentReconciler) reconcileAgentDeployment(ctx context.Context, agent *a
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, err
 	}
 
-	// Continue reconciling if not all replicas are ready
 	if deployment.Status.ReadyReplicas < int32(desiredReplicas) {
 		logger.Info("Requeuing: not all replicas ready",
 			"ready", deployment.Status.ReadyReplicas,
@@ -362,11 +348,8 @@ func ptrValueOrDefault[T any](ptr *T, defaultVal T) T {
 	return *ptr
 }
 
-// Returns true if any field was updated
 func updateContainerEnv(existing, desired *corev1.Container) bool {
 	updated := false
-
-	// Update Env
 	if !equality.Semantic.DeepEqual(existing.Env, desired.Env) {
 		existing.Env = desired.Env
 		updated = true
@@ -374,8 +357,6 @@ func updateContainerEnv(existing, desired *corev1.Container) bool {
 	return updated
 }
 
-// mergeStringMaps overlays src onto dst, returning a map suitable for assigning back.
-// If both are nil, returns nil.
 func mergeStringMaps(dst, src map[string]string) map[string]string {
 	if dst == nil && src == nil {
 		return nil
@@ -389,7 +370,17 @@ func mergeStringMaps(dst, src map[string]string) map[string]string {
 	return dst
 }
 
-func (r *AgentReconciler) createDeploymentForAgent(ctx context.Context, agent *agentv1alpha1.Agent) (*appsv1.Deployment, error) {
+// ensureRBAC creates the ServiceAccount, Role, and RoleBinding for the agent if they don't exist.
+func (r *AgentReconciler) ensureRBAC(ctx context.Context, agent *agentv1alpha1.Agent) (*rbac.RBACConfig, error) {
+	rbacConfig := rbac.GetComponentRBACConfig(agent.Namespace, agent.Name, agent.Labels)
+	rbacManager := rbac.NewRBACManager(r.Client, r.Scheme)
+	if err := rbacManager.CreateRBACObjects(ctx, rbacConfig, agent); err != nil {
+		return nil, fmt.Errorf("failed to create RBAC objects: %w", err)
+	}
+	return rbacConfig, nil
+}
+
+func (r *AgentReconciler) buildDeploymentSpec(agent *agentv1alpha1.Agent, rbacConfig *rbac.RBACConfig) (*appsv1.Deployment, error) {
 	if len(agent.Spec.PodTemplateSpec.Spec.Containers) == 0 {
 		return nil, fmt.Errorf("no containers defined in PodTemplateSpec")
 	}
@@ -402,12 +393,6 @@ func (r *AgentReconciler) createDeploymentForAgent(ctx context.Context, agent *a
 	podTemplateSpec.ObjectMeta.ResourceVersion = ""
 	podTemplateSpec.ObjectMeta.UID = ""
 
-	rbacConfig := rbac.GetComponentRBACConfig(agent.Namespace, agent.Name, agent.Labels)
-	rbacManager := rbac.NewRBACManager(r.Client, r.Scheme)
-	if err := rbacManager.CreateRBACObjects(ctx, rbacConfig, agent); err != nil {
-		logger.Error(err, "failed to create RBAC objects")
-		return nil, fmt.Errorf("failed to create RBAC objects: %w", err)
-	}
 	labels := map[string]string{
 		"app.kubernetes.io/name": agent.Name,
 	}
@@ -420,7 +405,6 @@ func (r *AgentReconciler) createDeploymentForAgent(ctx context.Context, agent *a
 	for i := range podTemplateSpec.Spec.Containers {
 		container := &podTemplateSpec.Spec.Containers[i]
 
-		// Set the image for the first container (main agent container)
 		if i == 0 {
 			container.Image = agent.Spec.Image
 			logger.Info("Using image for Agent", "image", agent.Spec.Image)
@@ -438,12 +422,10 @@ func (r *AgentReconciler) createDeploymentForAgent(ctx context.Context, agent *a
 	}
 
 	r.addVolumesAndMounts(podTemplateSpec)
-	// Set the ServiceAccountName for the pod
 	if podTemplateSpec.Spec.ServiceAccountName == "" {
 		podTemplateSpec.Spec.ServiceAccountName = rbacConfig.ServiceAccountName
 	}
 
-	// Set security context for the pod (if not already specified)
 	if podTemplateSpec.Spec.SecurityContext == nil {
 		podSecCtx := &corev1.PodSecurityContext{
 			RunAsNonRoot: ptr.To(true),
@@ -452,7 +434,7 @@ func (r *AgentReconciler) createDeploymentForAgent(ctx context.Context, agent *a
 			},
 		}
 
-		// On OpenShift, omit these to allow SCC admission controller to inject appropriate values
+		// OpenShift SCC injects RunAsUser/FSGroup; only set them on vanilla Kubernetes.
 		if r.Distribution != distribution.OpenShift {
 			podSecCtx.RunAsUser = ptr.To(int64(1000))
 			podSecCtx.FSGroup = ptr.To(int64(1000))
@@ -461,10 +443,9 @@ func (r *AgentReconciler) createDeploymentForAgent(ctx context.Context, agent *a
 		podTemplateSpec.Spec.SecurityContext = podSecCtx
 	}
 
-	// Set security context for each container (only if not already specified)
-	for inx := range podTemplateSpec.Spec.Containers {
-		if podTemplateSpec.Spec.Containers[inx].SecurityContext == nil {
-			podTemplateSpec.Spec.Containers[inx].SecurityContext = &corev1.SecurityContext{
+	for i := range podTemplateSpec.Spec.Containers {
+		if podTemplateSpec.Spec.Containers[i].SecurityContext == nil {
+			podTemplateSpec.Spec.Containers[i].SecurityContext = &corev1.SecurityContext{
 				AllowPrivilegeEscalation: ptr.To(false),
 				Privileged:               ptr.To(false),
 				ReadOnlyRootFilesystem:   ptr.To(true),
@@ -500,7 +481,6 @@ func (r *AgentReconciler) createDeploymentForAgent(ctx context.Context, agent *a
 }
 
 func (r *AgentReconciler) volumeExists(podTemplateSpec *corev1.PodTemplateSpec, volumeName string) bool {
-
 	for _, vol := range podTemplateSpec.Spec.Volumes {
 		if vol.Name == volumeName {
 			return true
@@ -528,7 +508,6 @@ func (r *AgentReconciler) addVolumesAndMounts(podTemplateSpec *corev1.PodTemplat
 			},
 		})
 	}
-
 }
 
 func hasVolumeMounts(podSpec *corev1.PodSpec, volumeMountName string) bool {
@@ -575,16 +554,14 @@ func (r *AgentReconciler) createServiceForAgent(agent *agentv1alpha1.Agent) *cor
 	labels := map[string]string{
 		"app.kubernetes.io/name": agent.Name,
 	}
-	servicePorts := []corev1.ServicePort{}
-	if agent.Spec.ServicePorts == nil {
-		servicePorts = append(servicePorts, corev1.ServicePort{
+	servicePorts := agent.Spec.ServicePorts
+	if len(servicePorts) == 0 {
+		servicePorts = []corev1.ServicePort{{
 			Name:       "http",
 			Protocol:   corev1.ProtocolTCP,
 			Port:       8000,
 			TargetPort: intstr.FromInt(8000),
-		})
-	} else {
-		servicePorts = agent.Spec.ServicePorts
+		}}
 	}
 
 	return &corev1.Service{
@@ -602,7 +579,7 @@ func (r *AgentReconciler) createServiceForAgent(agent *agentv1alpha1.Agent) *cor
 }
 
 func (r *AgentReconciler) handleDeletion(ctx context.Context, agent *agentv1alpha1.Agent) (ctrl.Result, error) {
-	if controllerutil.ContainsFinalizer(agent, AGENT_FINALIZER) {
+	if controllerutil.ContainsFinalizer(agent, AgentFinalizer) {
 		deployment := &appsv1.Deployment{}
 		deploymentName := agent.Name
 		err := r.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: agent.Namespace}, deployment)
@@ -636,7 +613,7 @@ func (r *AgentReconciler) handleDeletion(ctx context.Context, agent *agentv1alph
 				return err
 			}
 
-			controllerutil.RemoveFinalizer(latestAgent, AGENT_FINALIZER)
+			controllerutil.RemoveFinalizer(latestAgent, AgentFinalizer)
 			return r.Update(ctx, latestAgent)
 		}); err != nil {
 			logger.Error(err, "Failed to remove finalizer from Agent after retries")
@@ -648,7 +625,6 @@ func (r *AgentReconciler) handleDeletion(ctx context.Context, agent *agentv1alph
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
 func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentv1alpha1.Agent{}).

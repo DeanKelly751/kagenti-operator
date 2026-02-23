@@ -316,5 +316,4 @@ var _ = Describe("AgentCardSync Controller", func() {
 		})
 	})
 
-	// selector-to-targetRef migration test removed — migration code deleted in targetRef migration.
 })

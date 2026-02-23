@@ -21,27 +21,23 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/go-logr/logr"
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// TargetRefNameIndex is the shared field index key for .spec.targetRef.name.
-// Used by AgentCardReconciler, AgentCardNetworkPolicyReconciler, and
-// AgentCardSyncReconciler to look up AgentCards by targetRef name without
-// listing every card in the namespace.
 const TargetRefNameIndex = ".spec.targetRef.name"
 
-// registerTargetRefIndexOnce ensures the field indexer is registered exactly once,
-// even if multiple controllers call RegisterAgentCardTargetRefIndex.
-var registerTargetRefIndexOnce sync.Once
+var (
+	registerTargetRefIndexOnce sync.Once
+	registerTargetRefIndexErr  error
+)
 
-// registerTargetRefIndexErr stores any error from the one-time registration.
-var registerTargetRefIndexErr error
-
-// RegisterAgentCardTargetRefIndex registers a field indexer for AgentCard on
-// .spec.targetRef.name. It is safe to call from multiple controllers — only
-// the first call performs the registration; subsequent calls are no-ops.
+// RegisterAgentCardTargetRefIndex registers a field indexer on .spec.targetRef.name (idempotent).
 func RegisterAgentCardTargetRefIndex(mgr ctrl.Manager) error {
 	registerTargetRefIndexOnce.Do(func() {
 		registerTargetRefIndexErr = mgr.GetFieldIndexer().IndexField(
@@ -49,7 +45,10 @@ func RegisterAgentCardTargetRefIndex(mgr ctrl.Manager) error {
 			&agentv1alpha1.AgentCard{},
 			TargetRefNameIndex,
 			func(obj client.Object) []string {
-				card := obj.(*agentv1alpha1.AgentCard)
+				card, ok := obj.(*agentv1alpha1.AgentCard)
+				if !ok {
+					return nil
+				}
 				if card.Spec.TargetRef != nil && card.Spec.TargetRef.Name != "" {
 					return []string{card.Spec.TargetRef.Name}
 				}
@@ -62,4 +61,36 @@ func RegisterAgentCardTargetRefIndex(mgr ctrl.Manager) error {
 		}
 	})
 	return registerTargetRefIndexErr
+}
+
+func mapWorkloadToAgentCards(lister client.Reader, apiVersion, kind string, log logr.Logger) handler.MapFunc {
+	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		if !isAgentWorkload(obj.GetLabels()) {
+			return nil
+		}
+
+		agentCardList := &agentv1alpha1.AgentCardList{}
+		if err := lister.List(ctx, agentCardList,
+			client.InNamespace(obj.GetNamespace()),
+			client.MatchingFields{TargetRefNameIndex: obj.GetName()},
+		); err != nil {
+			log.Error(err, "Failed to list AgentCards for mapping")
+			return nil
+		}
+
+		var requests []reconcile.Request
+		for _, card := range agentCardList.Items {
+			if card.Spec.TargetRef != nil &&
+				card.Spec.TargetRef.Kind == kind &&
+				card.Spec.TargetRef.APIVersion == apiVersion {
+				requests = append(requests, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      card.Name,
+						Namespace: card.Namespace,
+					},
+				})
+			}
+		}
+		return requests
+	}
 }
