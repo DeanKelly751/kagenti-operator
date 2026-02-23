@@ -14,9 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package distribution provides detection of Kubernetes distributions
-// (e.g., vanilla Kubernetes, OpenShift) to enable distribution-specific
-// behavior in the operator.
+// Package distribution detects the Kubernetes distribution (vanilla vs. OpenShift).
 package distribution
 
 import (
@@ -25,22 +23,16 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-var (
-	logger = ctrl.Log.WithName("distribution")
-)
+var logger = ctrl.Log.WithName("distribution")
 
-// Type represents the Kubernetes distribution type
 type Type string
 
 const (
-	// vanilla/upstream Kubernetes
 	Kubernetes Type = "kubernetes"
-	// Red Hat OpenShift
-	OpenShift Type = "openshift"
+	OpenShift  Type = "openshift"
 )
 
-// Detect attempts to detect the Kubernetes distribution by checking for
-// canonical markers of various distributions.
+// Detect probes the API server for distribution-specific API groups.
 func Detect(config *rest.Config) Type {
 	dc, err := discovery.NewDiscoveryClientForConfig(config)
 	if err != nil {
@@ -48,7 +40,6 @@ func Detect(config *rest.Config) Type {
 		return Kubernetes
 	}
 
-	// Leverage the existence of the config.openshift.io/v1 API group
 	_, err = dc.ServerResourcesForGroupVersion("config.openshift.io/v1")
 	if err == nil {
 		logger.Info("Detected OpenShift distribution")

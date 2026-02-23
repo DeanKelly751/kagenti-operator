@@ -18,10 +18,12 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -65,17 +67,17 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
-	var enableClientRegistration bool
 
-	// Signature verification flags
 	var requireA2ASignature bool
 	var signatureAuditMode bool
-	var signatureProvider string
-	var signatureSecretName string
-	var signatureSecretNamespace string
-	var signatureSecretKey string
-	var signatureJWKSURL string
 	var enforceNetworkPolicies bool
+
+	var spireTrustDomain string
+	var spireTrustBundleConfigMapName string
+	var spireTrustBundleConfigMapNS string
+	var spireTrustBundleConfigMapKey string
+	var spireTrustBundleRefreshInterval time.Duration
+	var svidExpiryGracePeriod time.Duration
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -94,54 +96,44 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-	flag.BoolVar(&enableClientRegistration, "enable-client-registration", true,
-		"If set, Kagenti will register clients (agents and tools) in Keycloak")
 
-	// Signature verification flags
 	flag.BoolVar(&requireA2ASignature, "require-a2a-signature", false,
 		"Require A2A agent cards to have a valid signature")
 	flag.BoolVar(&signatureAuditMode, "signature-audit-mode", false,
 		"When true, log signature verification failures but don't block (use for rollout)")
-	flag.StringVar(&signatureProvider, "signature-provider", "none",
-		"Signature verification provider type: 'secret', 'jwks', or 'none'")
-	flag.StringVar(&signatureSecretName, "signature-secret-name", "",
-		"Name of the Kubernetes Secret containing the signing public key")
-	flag.StringVar(&signatureSecretNamespace, "signature-secret-namespace", "",
-		"Namespace of the Kubernetes Secret containing the signing public key")
-	flag.StringVar(&signatureSecretKey, "signature-secret-key", "",
-		"Key within the Secret to use (if not set, auto-discovery is used)")
-	flag.StringVar(&signatureJWKSURL, "signature-jwks-url", "",
-		"URL of the JWKS endpoint for signature verification")
 	flag.BoolVar(&enforceNetworkPolicies, "enforce-network-policies", false,
 		"Create NetworkPolicies to restrict traffic for agents with unverified signatures")
 
+	flag.StringVar(&spireTrustDomain, "spire-trust-domain", "",
+		"SPIRE trust domain for identity binding (e.g. 'example.org')")
+	flag.StringVar(&spireTrustBundleConfigMapName, "spire-trust-bundle-configmap", "",
+		"Name of the ConfigMap containing the SPIRE trust bundle (SPIFFE JSON format)")
+	flag.StringVar(&spireTrustBundleConfigMapNS, "spire-trust-bundle-configmap-namespace", "",
+		"Namespace of the trust bundle ConfigMap")
+	flag.StringVar(&spireTrustBundleConfigMapKey, "spire-trust-bundle-configmap-key", "bundle.spiffe",
+		"Key within the trust bundle ConfigMap containing SPIFFE JSON data")
+	flag.DurationVar(&spireTrustBundleRefreshInterval, "spire-trust-bundle-refresh-interval", 5*time.Minute,
+		"How often to re-read the trust bundle")
+	flag.DurationVar(&svidExpiryGracePeriod, "svid-expiry-grace-period", 30*time.Minute,
+		"How far before the signing SVID expires to trigger a proactive workload restart for re-signing")
+
 	opts := zap.Options{
-		Development: true,
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// if the enable-http2 flag is false (the default), http/2 should be disabled
-	// due to its vulnerabilities. More specifically, disabling http/2 will
-	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
-	// Rapid Reset CVEs. For more information see:
-	// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
-	// - https://github.com/advisories/GHSA-4374-p667-p6c8
+	// Mitigate CVE-2023-44487 (HTTP/2 Rapid Reset).
 	disableHTTP2 := func(c *tls.Config) {
-		setupLog.Info("disabling http/2")
 		c.NextProtos = []string{"http/1.1"}
 	}
-
 	if !enableHTTP2 {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
-	// Create watchers for metrics and webhooks certificates
 	var metricsCertWatcher, webhookCertWatcher *certwatcher.CertWatcher
-
-	// Initial webhook TLS options
 	webhookTLSOpts := tlsOpts
 
 	if len(webhookCertPath) > 0 {
@@ -167,10 +159,6 @@ func main() {
 		TLSOpts: webhookTLSOpts,
 	})
 
-	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
-	// More info:
-	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.0/pkg/metrics/server
-	// - https://book.kubebuilder.io/reference/metrics.html
 	metricsServerOptions := metricsserver.Options{
 		BindAddress:   metricsAddr,
 		SecureServing: secureMetrics,
@@ -178,21 +166,9 @@ func main() {
 	}
 
 	if secureMetrics {
-		// FilterProvider is used to protect the metrics endpoint with authn/authz.
-		// These configurations ensure that only authorized users and service accounts
-		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
-		// https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.0/pkg/metrics/filters#WithAuthenticationAndAuthorization
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	// If the certificate is not specified, controller-runtime will automatically
-	// generate self-signed certificates for the metrics server. While convenient for development and testing,
-	// this setup is not recommended for production.
-	//
-	// TODO(user): If you enable certManager, uncomment the following lines:
-	// - [METRICS-WITH-CERTS] at config/default/kustomization.yaml to generate and use certificates
-	// managed by cert-manager for the metrics server.
-	// - [PROMETHEUS-WITH-CERTS] at config/prometheus/kustomization.yaml for TLS certification.
 	if len(metricsCertPath) > 0 {
 		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
 			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
@@ -203,7 +179,7 @@ func main() {
 			filepath.Join(metricsCertPath, metricsCertKey),
 		)
 		if err != nil {
-			setupLog.Error(err, "to initialize metrics certificate watcher", "error", err)
+			setupLog.Error(err, "Failed to initialize metrics certificate watcher")
 			os.Exit(1)
 		}
 
@@ -212,15 +188,12 @@ func main() {
 		})
 	}
 
-	// Detect Kubernetes distribution for platform-specific behavior
 	distType := distribution.Detect(ctrl.GetConfigOrDie())
 	setupLog.Info("Detected Kubernetes distribution", "distribution", distType)
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:  scheme,
 		Metrics: metricsServerOptions,
-		// Cache that will be used to create the default Cache. By default, the cache
-		// will watch and list requested objects in all namespaces.
 		Cache: cache.Options{
 			DefaultNamespaces: getNamespacesToWatch(),
 		},
@@ -228,17 +201,6 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "b7c4ae34.kagenti.dev",
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -246,16 +208,14 @@ func main() {
 	}
 
 	if err = (&controller.AgentReconciler{
-		Client:                   mgr.GetClient(),
-		Scheme:                   mgr.GetScheme(),
-		EnableClientRegistration: enableClientRegistration,
-		Distribution:             distType,
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		Distribution: distType,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
 	}
 
-	// Initialize signature verification provider
 	if !requireA2ASignature {
 		setupLog.Info("WARNING: --require-a2a-signature is false. Identity binding requires " +
 			"--require-a2a-signature=true to function. AgentCards with spec.identityBinding " +
@@ -264,41 +224,52 @@ func main() {
 
 	var sigProvider signature.Provider
 	if requireA2ASignature {
+		if spireTrustDomain == "" {
+			setupLog.Error(errors.New("missing required flag"), "--spire-trust-domain is required when --require-a2a-signature=true")
+			os.Exit(1)
+		}
+		if spireTrustBundleConfigMapName == "" || spireTrustBundleConfigMapNS == "" {
+			setupLog.Error(errors.New("missing required flags"),
+				"--spire-trust-bundle-configmap and --spire-trust-bundle-configmap-namespace are required when --require-a2a-signature=true")
+			os.Exit(1)
+		}
+
 		sigConfig := &signature.Config{
-			Type:            signature.ProviderType(signatureProvider),
-			SecretName:      signatureSecretName,
-			SecretNamespace: signatureSecretNamespace,
-			SecretKey:       signatureSecretKey,
-			JWKSURL:         signatureJWKSURL,
-			AuditMode:       signatureAuditMode,
+			Type:                       signature.ProviderTypeX5C,
+			TrustBundleConfigMapName:   spireTrustBundleConfigMapName,
+			TrustBundleConfigMapNS:     spireTrustBundleConfigMapNS,
+			TrustBundleConfigMapKey:    spireTrustBundleConfigMapKey,
+			TrustBundleRefreshInterval: spireTrustBundleRefreshInterval,
+			Client:                     mgr.GetClient(),
 		}
 
 		var providerErr error
 		sigProvider, providerErr = signature.NewProvider(sigConfig)
 		if providerErr != nil {
-			setupLog.Error(providerErr, "unable to create signature provider")
+			setupLog.Error(providerErr, "unable to create x5c signature provider")
 			os.Exit(1)
 		}
 		setupLog.Info("Signature verification enabled",
-			"provider", signatureProvider,
-			"auditMode", signatureAuditMode,
-			"requireSignature", requireA2ASignature)
+			"provider", "x5c",
+			"trustDomain", spireTrustDomain,
+			"auditMode", signatureAuditMode)
 	}
 
 	if err = (&controller.AgentCardReconciler{
-		Client:             mgr.GetClient(),
-		Scheme:             mgr.GetScheme(),
-		Recorder:           mgr.GetEventRecorderFor("agentcard-controller"),
-		AgentFetcher:       agentcard.NewFetcher(),
-		SignatureProvider:  sigProvider,
-		RequireSignature:   requireA2ASignature,
-		SignatureAuditMode: signatureAuditMode,
+		Client:                mgr.GetClient(),
+		Scheme:                mgr.GetScheme(),
+		Recorder:              mgr.GetEventRecorderFor("agentcard-controller"),
+		AgentFetcher:          agentcard.NewFetcher(),
+		SignatureProvider:     sigProvider,
+		RequireSignature:      requireA2ASignature,
+		SignatureAuditMode:    signatureAuditMode,
+		SpireTrustDomain:      spireTrustDomain,
+		SVIDExpiryGracePeriod: svidExpiryGracePeriod,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentCard")
 		os.Exit(1)
 	}
 
-	// Network policy controller (optional, enforces network isolation based on signature verification)
 	if enforceNetworkPolicies {
 		if err = (&controller.AgentCardNetworkPolicyReconciler{
 			Client:                 mgr.GetClient(),
@@ -310,8 +281,7 @@ func main() {
 		}
 		setupLog.Info("Network policy enforcement enabled for signature verification")
 	}
-	// AgentCardSync controller watches Deployments and StatefulSets
-	// It automatically creates AgentCards for workloads with agent labels
+
 	if err = (&controller.AgentCardSyncReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -357,19 +327,19 @@ func main() {
 	}
 }
 func getNamespacesToWatch() map[string]cache.Config {
-
-	// NAMESPACES2WATCH specifies the namespace(s) to watch.
-	// If undefined, the operator will run with cluster scope.
-	namespace, found := os.LookupEnv("NAMESPACES2WATCH")
-	if !found {
+	namespace := strings.TrimSpace(os.Getenv("NAMESPACES2WATCH"))
+	if namespace == "" {
 		return nil
 	}
 
 	namespaces := make(map[string]cache.Config)
-	if namespace != "" {
-		for _, ns := range strings.Split(namespace, ",") {
+	for _, ns := range strings.Split(namespace, ",") {
+		if ns = strings.TrimSpace(ns); ns != "" {
 			namespaces[ns] = cache.Config{}
 		}
+	}
+	if len(namespaces) == 0 {
+		return nil
 	}
 	return namespaces
 }

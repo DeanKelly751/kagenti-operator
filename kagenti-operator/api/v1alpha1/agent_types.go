@@ -66,20 +66,15 @@ type AgentStatus struct {
 type LifecyclePhase string
 
 const (
-	PhasePending   LifecyclePhase = "Pending"
 	PhaseDeploying LifecyclePhase = "Deploying"
 	PhaseReady     LifecyclePhase = "Ready"
-	PhaseFailed    LifecyclePhase = "Failed"
 )
 
-// AgentDeploymentStatus represents the status of the agent deployment
+// DeploymentStatus represents the status of the agent deployment.
 type DeploymentStatus struct {
-	// Current deployment phase: PhaseDeploying, PhaseReady, PhaseFailed
-	Phase LifecyclePhase `json:"phase,omitempty"`
-	// Deployment message
-	DeploymentMessage string `json:"deploymentMessage,omitempty"`
-	// Deployment completion time
-	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+	Phase             LifecyclePhase `json:"phase,omitempty"`
+	DeploymentMessage string         `json:"deploymentMessage,omitempty"`
+	CompletionTime    *metav1.Time   `json:"completionTime,omitempty"`
 }
 
 // +kubebuilder:object:root=true

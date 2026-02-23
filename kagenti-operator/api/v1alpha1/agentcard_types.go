@@ -41,28 +41,15 @@ type AgentCardSpec struct {
 	IdentityBinding *IdentityBinding `json:"identityBinding,omitempty"`
 }
 
-// SpiffeID represents a SPIFFE identity in the format spiffe://<trust-domain>/<path>
-// +kubebuilder:validation:Pattern=`^spiffe://[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9](/[a-zA-Z0-9\-\._~%!$&'()*+,;=:@]+)*$`
-type SpiffeID string
-
 // IdentityBinding configures workload identity binding for an AgentCard.
-// The SPIFFE ID used for binding comes from the JWS protected header (sign
-// with --spiffe-id). If the header lacks a spiffe_id, binding fails.
+// The SPIFFE ID is extracted from the leaf certificate SAN URI in the x5c chain.
+// Binding validates that the SPIFFE ID belongs to the configured trust domain.
 type IdentityBinding struct {
-	// Deprecated: No longer used; trust domain comes from the JWS protected header.
+	// TrustDomain overrides the operator-level --spire-trust-domain for this AgentCard.
+	// If empty, the operator flag value is used.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$`
 	TrustDomain string `json:"trustDomain,omitempty"`
-
-	// Deprecated: No longer used; SPIFFE ID comes from the JWS protected header.
-	// +optional
-	ExpectedSpiffeID SpiffeID `json:"expectedSpiffeID,omitempty"`
-
-	// AllowedSpiffeIDs is the allowlist of SPIFFE IDs permitted to bind to this agent.
-	// The SPIFFE ID from the JWS protected header must match one of these entries.
-	// +required
-	// +kubebuilder:validation:MinItems=1
-	AllowedSpiffeIDs []SpiffeID `json:"allowedSpiffeIDs"`
 
 	// Strict enables enforcement mode: binding failures trigger network isolation.
 	// When false (default), results are recorded in status only (audit mode).
@@ -81,7 +68,6 @@ type TargetRef struct {
 	// +kubebuilder:validation:MinLength=1
 	Kind string `json:"kind"`
 
-	// Name is the name of the target resource
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 }
@@ -129,7 +115,7 @@ type AgentCardStatus struct {
 	// +optional
 	SignatureKeyID string `json:"signatureKeyId,omitempty"`
 
-	// SignatureSpiffeID is the SPIFFE ID from the JWS protected header (set only when valid).
+	// SignatureSpiffeID is the SPIFFE ID from the leaf certificate SAN URI (set only when valid).
 	// +optional
 	SignatureSpiffeID string `json:"signatureSpiffeId,omitempty"`
 
@@ -137,11 +123,11 @@ type AgentCardStatus struct {
 	// +optional
 	SignatureIdentityMatch *bool `json:"signatureIdentityMatch,omitempty"`
 
-	// CardId is the SHA256 hash of the JCS-canonicalized card content (optional drift detection)
+	// CardId is the SHA-256 hash of the card content for drift detection.
 	// +optional
 	CardId string `json:"cardId,omitempty"`
 
-	// ExpectedSpiffeID is the SPIFFE ID used for binding evaluation (from JWS protected header)
+	// ExpectedSpiffeID is the SPIFFE ID used for binding evaluation.
 	// +optional
 	ExpectedSpiffeID string `json:"expectedSpiffeID,omitempty"`
 
@@ -152,7 +138,7 @@ type AgentCardStatus struct {
 
 // BindingStatus represents the result of identity binding evaluation
 type BindingStatus struct {
-	// Bound indicates whether the verified SPIFFE ID is in the allowlist
+	// Bound indicates whether the verified SPIFFE ID belongs to the configured trust domain
 	Bound bool `json:"bound"`
 
 	// Reason is a machine-readable reason for the binding status
@@ -214,7 +200,7 @@ type AgentCardData struct {
 
 // AgentCardSignature represents a JWS signature on an AgentCard (A2A spec §8.4.2).
 type AgentCardSignature struct {
-	// Protected is the base64url-encoded JWS protected header (contains alg, kid, spiffe_id).
+	// Protected is the base64url-encoded JWS protected header (contains alg, kid, x5c).
 	// +required
 	Protected string `json:"protected"`
 
@@ -270,7 +256,6 @@ type AgentSkill struct {
 
 // SkillParameter defines a parameter that a skill accepts
 type SkillParameter struct {
-	// Name is the parameter name
 	// +optional
 	Name string `json:"name,omitempty"`
 

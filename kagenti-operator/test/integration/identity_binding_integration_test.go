@@ -149,7 +149,7 @@ func testMatchingBindingEvaluation(t *testing.T) {
 
 	// Create AgentCard with matching SPIFFE ID using targetRef
 	expectedSpiffeID := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, testNamespace, saName)
-	agentCard := createTestAgentCard(t, ctx, cardName, deploymentName, []agentv1alpha1.SpiffeID{agentv1alpha1.SpiffeID(expectedSpiffeID)}, false)
+	agentCard := createTestAgentCard(t, ctx, cardName, deploymentName, false)
 	defer deleteResource(ctx, agentCard)
 
 	// Create and run AgentCard reconciler with a mock signature provider that
@@ -221,8 +221,7 @@ func testNonMatchingBindingEvaluation(t *testing.T) {
 	defer deleteResource(ctx, service)
 
 	// Create AgentCard with NON-matching SPIFFE ID in allowlist using targetRef
-	wrongSpiffeID := fmt.Sprintf("spiffe://%s/ns/other/sa/other-sa", trustDomain)
-	agentCard := createTestAgentCard(t, ctx, cardName, deploymentName, []agentv1alpha1.SpiffeID{agentv1alpha1.SpiffeID(wrongSpiffeID)}, false)
+	agentCard := createTestAgentCard(t, ctx, cardName, deploymentName, false)
 	defer deleteResource(ctx, agentCard)
 
 	// The workload's actual SPIFFE ID (from mock provider) does NOT match the allowlist
@@ -269,7 +268,7 @@ func testNonMatchingBindingEvaluation(t *testing.T) {
 	t.Logf("✓ Binding Status: Bound=%v", card.Status.BindingStatus.Bound)
 	t.Logf("✓ Reason: %s", card.Status.BindingStatus.Reason)
 	t.Logf("✓ Expected SPIFFE ID: %s", card.Status.ExpectedSpiffeID)
-	t.Logf("✓ Allowed SPIFFE IDs: %v", agentCard.Spec.IdentityBinding.AllowedSpiffeIDs)
+	t.Logf("✓ Trust Domain: %s", agentCard.Spec.IdentityBinding.TrustDomain)
 	t.Log("✓ TEST 2 PASSED: Non-matching binding evaluated as NotBound")
 }
 
@@ -298,7 +297,7 @@ func createTestService(t *testing.T, ctx context.Context, name string) *corev1.S
 	return service
 }
 
-func createTestAgentCard(t *testing.T, ctx context.Context, name, deploymentName string, allowedIDs []agentv1alpha1.SpiffeID, strict bool) *agentv1alpha1.AgentCard {
+func createTestAgentCard(t *testing.T, ctx context.Context, name, deploymentName string, strict bool) *agentv1alpha1.AgentCard {
 	agentCard := &agentv1alpha1.AgentCard{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -312,8 +311,8 @@ func createTestAgentCard(t *testing.T, ctx context.Context, name, deploymentName
 				Name:       deploymentName,
 			},
 			IdentityBinding: &agentv1alpha1.IdentityBinding{
-				AllowedSpiffeIDs: allowedIDs,
-				Strict:           strict,
+				TrustDomain: trustDomain,
+				Strict:      strict,
 			},
 		},
 	}
