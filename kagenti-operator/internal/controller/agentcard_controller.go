@@ -506,9 +506,11 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 		latest.Status.Card = cardData
 		latest.Status.Protocol = protocol
 		latest.Status.TargetRef = targetRef
-		latest.Status.LastSyncTime = &metav1.Time{Time: time.Now()}
-		if cardId != "" {
+		if cardId != "" && cardId != latest.Status.CardId {
+			latest.Status.LastSyncTime = &metav1.Time{Time: time.Now()}
 			latest.Status.CardId = cardId
+		} else if latest.Status.LastSyncTime == nil {
+			latest.Status.LastSyncTime = &metav1.Time{Time: time.Now()}
 		}
 
 		if verificationResult != nil {
@@ -522,8 +524,7 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 			}
 
 			sigCondition := metav1.Condition{
-				Type:               "SignatureVerified",
-				LastTransitionTime: metav1.Now(),
+				Type: "SignatureVerified",
 			}
 			if verificationResult.Verified {
 				sigCondition.Status = metav1.ConditionTrue
@@ -544,11 +545,10 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 
 		if verificationResult != nil && !verificationResult.Verified && !r.SignatureAuditMode {
 			meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
-				Type:               "Synced",
-				Status:             metav1.ConditionFalse,
-				LastTransitionTime: metav1.Now(),
-				Reason:             ReasonSignatureInvalid,
-				Message:            verificationResult.Details,
+				Type:    "Synced",
+				Status:  metav1.ConditionFalse,
+				Reason:  ReasonSignatureInvalid,
+				Message: verificationResult.Details,
 			})
 		} else {
 			message := fmt.Sprintf("Successfully fetched agent card for %s", cardData.Name)
@@ -556,26 +556,23 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 				message = fmt.Sprintf("Fetched agent card for %s (signature verification failed but audit mode enabled)", cardData.Name)
 			}
 			meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
-				Type:               "Synced",
-				Status:             metav1.ConditionTrue,
-				LastTransitionTime: metav1.Now(),
-				Reason:             "SyncSucceeded",
-				Message:            message,
+				Type:    "Synced",
+				Status:  metav1.ConditionTrue,
+				Reason:  "SyncSucceeded",
+				Message: message,
 			})
 		}
 
 		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionTrue,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "ReadyToServe",
-			Message:            "Agent index is ready for queries",
+			Type:    "Ready",
+			Status:  metav1.ConditionTrue,
+			Reason:  "ReadyToServe",
+			Message: "Agent index is ready for queries",
 		})
 
 		if binding != nil {
 			existingBound := meta.FindStatusCondition(latest.Status.Conditions, "Bound")
 
-			// Warn once on first evaluation.
 			if existingBound == nil {
 				agentCardLogger.Info("Identity binding is allowlist-only; SPIFFE trust bundle verification not yet available",
 					"agentCard", latest.Name)
@@ -599,12 +596,23 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 				}
 			}
 
-			now := metav1.Now()
+			bindingChanged := latest.Status.BindingStatus == nil ||
+				latest.Status.BindingStatus.Bound != binding.Bound ||
+				latest.Status.BindingStatus.Reason != binding.Reason ||
+				latest.Status.BindingStatus.Message != binding.Message
+			var evalTime *metav1.Time
+			if latest.Status.BindingStatus != nil {
+				evalTime = latest.Status.BindingStatus.LastEvaluationTime
+			}
+			if bindingChanged || evalTime == nil {
+				now := metav1.Now()
+				evalTime = &now
+			}
 			latest.Status.BindingStatus = &agentv1alpha1.BindingStatus{
 				Bound:              binding.Bound,
 				Reason:             binding.Reason,
 				Message:            binding.Message,
-				LastEvaluationTime: &now,
+				LastEvaluationTime: evalTime,
 			}
 			if binding.SpiffeID != "" {
 				latest.Status.ExpectedSpiffeID = binding.SpiffeID
@@ -612,7 +620,6 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 			meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
 				Type:               "Bound",
 				Status:             newConditionStatus,
-				LastTransitionTime: now,
 				Reason:             binding.Reason,
 				Message:            binding.Message,
 			})
@@ -786,11 +793,10 @@ func (r *AgentCardReconciler) updateCondition(ctx context.Context, agentCard *ag
 		}
 
 		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
-			Type:               conditionType,
-			Status:             status,
-			LastTransitionTime: metav1.Now(),
-			Reason:             reason,
-			Message:            message,
+			Type:    conditionType,
+			Status:  status,
+			Reason:  reason,
+			Message: message,
 		})
 
 		return r.Status().Update(ctx, latest)
@@ -999,12 +1005,23 @@ func (r *AgentCardReconciler) updateBindingStatus(ctx context.Context, agentCard
 			return err
 		}
 
-		now := metav1.Now()
+		bindingChanged := latest.Status.BindingStatus == nil ||
+			latest.Status.BindingStatus.Bound != bound ||
+			latest.Status.BindingStatus.Reason != reason ||
+			latest.Status.BindingStatus.Message != message
+		var evalTime *metav1.Time
+		if latest.Status.BindingStatus != nil {
+			evalTime = latest.Status.BindingStatus.LastEvaluationTime
+		}
+		if bindingChanged || evalTime == nil {
+			now := metav1.Now()
+			evalTime = &now
+		}
 		latest.Status.BindingStatus = &agentv1alpha1.BindingStatus{
 			Bound:              bound,
 			Reason:             reason,
 			Message:            message,
-			LastEvaluationTime: &now,
+			LastEvaluationTime: evalTime,
 		}
 		if expectedSpiffeID != "" {
 			latest.Status.ExpectedSpiffeID = expectedSpiffeID
@@ -1017,7 +1034,6 @@ func (r *AgentCardReconciler) updateBindingStatus(ctx context.Context, agentCard
 		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
 			Type:               "Bound",
 			Status:             conditionStatus,
-			LastTransitionTime: now,
 			Reason:             reason,
 			Message:            message,
 		})
