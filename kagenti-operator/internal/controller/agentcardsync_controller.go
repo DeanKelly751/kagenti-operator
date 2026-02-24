@@ -77,13 +77,7 @@ func (r *AgentCardSyncReconciler) ReconcileDeployment(ctx context.Context, req c
 		return ctrl.Result{}, nil
 	}
 
-	// Skip Deployments owned by the Agent CRD to avoid duplicate cards.
-	if isOwnedByAgentCRD(deployment) {
-		syncLogger.V(1).Info("Skipping Deployment owned by Agent CRD",
-			"deployment", deployment.Name, "namespace", deployment.Namespace)
-		return ctrl.Result{}, nil
-	}
-
+	// Create or update AgentCard with targetRef
 	gvk := appsv1.SchemeGroupVersion.WithKind("Deployment")
 	return r.ensureAgentCard(ctx, deployment, gvk)
 }
@@ -232,15 +226,7 @@ func (r *AgentCardSyncReconciler) findExistingCardForWorkload(ctx context.Contex
 	return "", false
 }
 
-func isOwnedByAgentCRD(obj client.Object) bool {
-	for _, ref := range obj.GetOwnerReferences() {
-		if ref.Kind == "Agent" && ref.APIVersion == agentv1alpha1.GroupVersion.String() {
-			return true
-		}
-	}
-	return false
-}
-
+// createAgentCardForWorkload creates a new AgentCard for a workload using targetRef
 func (r *AgentCardSyncReconciler) createAgentCardForWorkload(ctx context.Context, obj client.Object, gvk schema.GroupVersionKind, cardName string) (ctrl.Result, error) {
 	syncLogger.Info("Creating AgentCard for workload",
 		"agentCard", cardName,

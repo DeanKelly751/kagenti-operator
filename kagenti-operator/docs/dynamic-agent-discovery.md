@@ -19,10 +19,10 @@ Agent discovery followed by invocation is a complex problem in agentic systems. 
 
 ### AgentCard CRD
 
-The `AgentCard` Custom Resource serves as a lightweight catalog that stores agent metadata fetched from deployed agents. It maintains a 1:1 relationship with Agent resources through owner references.
+The `AgentCard` Custom Resource serves as a lightweight catalog that stores agent metadata fetched from deployed agents. It uses `spec.targetRef` to reference the backing workload (Deployment or StatefulSet) and maintains owner references for automatic cleanup.
 
 ```
-Agent (Deployment) → AgentCard (Discovery Index)
+Deployment/StatefulSet → AgentCard (Discovery Index)
      ↓                         ↓
   Runs A2A Agent        Stores Agent Card Data
      ↓                         ↓
@@ -32,59 +32,64 @@ Exposes /.well-known/    Enables kubectl get agentcards
 
 ### Key Design Decisions
 
-1. **Separate CRD**: AgentCard is separate from Agent to decouple discovery concerns from deployment lifecycle management
-2. **Owner References**: AgentCards use owner references pointing to their Agent, enabling automatic cleanup
+1. **Deployment-First**: Users create standard Kubernetes workloads; AgentCard handles discovery via `targetRef`
+2. **Owner References**: AgentCards use owner references pointing to their workload, enabling automatic cleanup
 3. **Protocol-Based**: Currently supports A2A protocol, extensible to other protocols
 4. **Status-Based Storage**: Agent metadata is stored in status fields (observed state) rather than spec (desired state)
 5. **Namespace-Scoped**: AgentCards are namespace-scoped for better security and access control
 
 ## How It Works
 
-### 1. Agent Labeling
+### 1. Workload Labeling
 
-Agents must be labeled to enable discovery:
+Agent workloads (Deployments or StatefulSets) must be labeled to enable discovery:
 
 ```yaml
-apiVersion: agent.kagenti.dev/v1alpha1
-kind: Agent
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: weather-agent
   labels:
     kagenti.io/type: agent           # Identifies as an agent
     kagenti.io/protocol: a2a         # Specifies protocol
+    app.kubernetes.io/name: weather-agent
+spec:
+  # ... standard Deployment spec
 ```
 
 ### 2. AgentCard Creation
 
-When an Agent with appropriate labels is deployed, an AgentCard is automatically created:
+When a workload with appropriate labels is deployed, an AgentCard is automatically created by the AgentCardSync controller, or users can create one explicitly with `targetRef`:
 
 ```yaml
 apiVersion: agent.kagenti.dev/v1alpha1
 kind: AgentCard
 metadata:
-  name: weather-agent-card
+  name: weather-agent-deployment-card
   ownerReferences:
-    - apiVersion: agent.kagenti.dev/v1alpha1
-      kind: Agent
+    - apiVersion: apps/v1
+      kind: Deployment
       name: weather-agent
+      controller: true
 spec:
   syncPeriod: 30s
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: weather-agent
-      kagenti.io/type: agent
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: weather-agent
 ```
 
 ### 3. Periodic Synchronization
 
 The AgentCard controller:
 
-1. Identifies agents with `kagenti.io/protocol: a2a` label
+1. Resolves the backing workload via `spec.targetRef`
 2. Constructs the service URL for the agent
 3. Fetches the agent card from `/.well-known/agent.json`
-4. Parses and stores the card data in the AgentCard status
-5. Updates conditions to reflect sync status
-6. Repeats periodically based on `syncPeriod`
+4. Optionally verifies the card signature
+5. Parses and stores the card data in the AgentCard status
+6. Updates conditions to reflect sync status
+7. Repeats periodically based on `syncPeriod`
 
 ### 4. Discovery via kubectl
 
@@ -185,8 +190,8 @@ This data is automatically fetched and stored in the AgentCard status.
 ### Deploy an Agent with Discovery
 
 ```yaml
-apiVersion: agent.kagenti.dev/v1alpha1
-kind: Agent
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: assistant-agent
   labels:
@@ -194,20 +199,35 @@ metadata:
     kagenti.io/protocol: a2a
     app.kubernetes.io/name: assistant-agent
 spec:
-  image: "ghcr.io/myorg/assistant:v1.0.0"
-  servicePorts:
-    - name: http
-      port: 8000
-      targetPort: 8000
-  podTemplateSpec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: assistant-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: assistant-agent
     spec:
       containers:
       - name: agent
+        image: "ghcr.io/myorg/assistant:v1.0.0"
         ports:
         - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: assistant-agent
+spec:
+  selector:
+    app.kubernetes.io/name: assistant-agent
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
 ```
 
-The AgentCard is created automatically with the operator managing synchronization.
+The AgentCard is created automatically by the AgentCardSync controller when agent labels are present, or can be created explicitly with `targetRef`.
 
 ### Query Agent Cards
 
@@ -293,16 +313,14 @@ conditions:
 
 ## Security Considerations
 
-### CardSignature Verification (Future)
+### CardSignature Verification
 
-The A2A protocol supports signed agent cards for identity verification. Future enhancements will:
+The operator supports A2A agent card signature verification. When enabled (`--require-a2a-signature`):
 
-1. Store public keys in Kubernetes Secrets
-2. Verify card signatures during sync
-3. Optionally refuse to sync unsigned cards
-4. Update `validSignature` status field
-
-See [feature: Strict CardSignature Checking](https://github.com/kagenti/kagenti-operator/issues/116) for details.
+1. Public keys are stored in Kubernetes Secrets or fetched via JWKS endpoints
+2. Card signatures are verified during each sync cycle
+3. Unsigned or invalid cards are flagged in status
+4. Identity binding can be configured via `spec.identityBinding` with SPIFFE ID allowlists
 
 ### RBAC
 
@@ -329,22 +347,23 @@ AgentCards are namespace-scoped, preventing agents from discovering agents in ot
 
 ### AgentCard Not Syncing
 
-Check the agent:
+Check the workload:
 ```bash
-kubectl get agent weather-agent -o yaml
+kubectl get deployment weather-agent -o yaml
 kubectl logs -l app.kubernetes.io/name=weather-agent
 ```
 
 Check the AgentCard conditions:
 ```bash
-kubectl describe agentcard weather-agent-card
+kubectl describe agentcard weather-agent-deployment-card
 ```
 
 Common issues:
-- Agent not ready (pods not running)
+- Workload not ready (pods not running)
 - Service not accessible
 - Agent card endpoint not implemented
 - Protocol label missing or incorrect
+- `targetRef` pointing to wrong workload
 
 ### Stale AgentCard Data
 
@@ -358,7 +377,7 @@ Or update the syncPeriod to sync more frequently.
 
 ### Orphaned AgentCards
 
-If an Agent is deleted, its AgentCard should be automatically cleaned up via owner references. If orphaned cards persist:
+If a workload is deleted, its AgentCard should be automatically cleaned up via owner references. If orphaned cards persist:
 
 ```bash
 # Find orphaned cards

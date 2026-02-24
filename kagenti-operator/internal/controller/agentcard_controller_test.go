@@ -574,7 +574,7 @@ var _ = Describe("AgentCard Controller - getWorkload orchestration", func() {
 			}
 		})
 
-		It("should use targetRef and ignore selector", func() {
+		It("should resolve workload via targetRef", func() {
 			By("creating a Deployment with agent labels")
 			deployment := &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -604,7 +604,7 @@ var _ = Describe("AgentCard Controller - getWorkload orchestration", func() {
 			}
 			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
 
-			By("creating an AgentCard with both targetRef and selector")
+			By("creating an AgentCard with targetRef")
 			agentCard := &agentv1alpha1.AgentCard{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-card-both",
@@ -616,18 +616,13 @@ var _ = Describe("AgentCard Controller - getWorkload orchestration", func() {
 						Kind:       "Deployment",
 						Name:       deploymentName,
 					},
-					Selector: &agentv1alpha1.AgentSelector{
-						MatchLabels: map[string]string{
-							"app.kubernetes.io/name": "different-name",
-						},
-					},
 				},
 			}
 
 			By("calling getWorkload")
 			workload, err := reconciler.getWorkload(ctx, agentCard)
 
-			By("verifying targetRef was used (selector is ignored)")
+			By("verifying targetRef resolved the workload")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(workload).NotTo(BeNil())
 			Expect(workload.Name).To(Equal(deploymentName))

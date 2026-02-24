@@ -1,19 +1,21 @@
 # Kagenti Operator
 
-This document describes the Kagenti Operator, a Kubernetes Operator that automates the deployment, discovery, and security of AI agents within a Kubernetes cluster.
+This document presents a proposal for a Kubernetes Operator to automate the lifecycle management of AI agents within a Kubernetes cluster. The operator follows a **Deployment-first model**: users create standard Kubernetes Deployments or StatefulSets for their agents, and the operator discovers them via `AgentCard` Custom Resources with `targetRef`. The `AgentBuild` CR handles building container images from source.
 
-The operator manages the `AgentCard` Custom Resource for agent discovery and verification. Agents are deployed as standard Kubernetes **Deployments** or **StatefulSets** with the `kagenti.io/type: agent` label — the operator automatically discovers labeled workloads and creates AgentCard resources for them.
+The `AgentCard` CR provides dynamic agent discovery by fetching and caching agent metadata (e.g., A2A agent cards) from running workloads. Each AgentCard references a backing workload via `spec.targetRef`.
 
-> **Deprecation Notice:** The `Agent` Custom Resource is deprecated and will be removed in a future release. Use standard Kubernetes Deployments or StatefulSets with the `kagenti.io/type: agent` label instead. See the [Migration Guide](../../docs/migration/migrate-agent-crd-to-workloads.md) for details.
+The `AgentBuild` CR defines the specifications for building and publishing a container image for an AI agent. Upon creation or update of an `AgentBuild` resource, the operator will trigger a Tekton pipeline to automate pulling source code, building a Docker image, and pushing it to a specified image registry. Secure access to private repositories is managed through a reference to a Kubernetes Secret containing a GitHub token.
 
 ## Goals
 
-* Support deployment of AI agents using standard Kubernetes Deployments and StatefulSets with the `kagenti.io/type: agent` label
-* Automatically discover and index agent metadata via the A2A protocol
-* Provide cryptographic signature verification for agent cards (JWS with RSA/ECDSA)
+* Follow a Deployment-first model where users create standard Kubernetes Deployments/StatefulSets for their agents
+* Provide dynamic agent discovery through `AgentCard` CRs with `targetRef`-based workload binding
+* Provide cryptographic signature verification for agent cards (JWS with RSA/ECDSA via x5c certificate chains)
 * Support SPIFFE-based workload identity binding with trust-domain validation
 * Enforce network isolation via Kubernetes NetworkPolicies based on verification status
-* Lock down agent pods with read-only filesystem with minimal privileges
+* Automate the container image building and publishing process for AI agents triggered by `AgentBuild` CRs
+* Integrate with Tekton Pipelines for the image building workflow, consisting of pull, build, and push tasks
+* Securely manage GitHub repository access using a referenced Kubernetes Secret
 * Support cluster-wide as well as namespaced scope deployment
 
 ## Deployment Modes
@@ -31,49 +33,63 @@ graph TD;
         User[User/App]
         style User fill:#ffecb3,stroke:#ffa000
 
-        Workload["Deployment / StatefulSet\n(with kagenti labels)"]
-        style Workload fill:#e1f5fe,stroke:#039be5
-
-        User -->|Creates| Workload
-
-        AgentCardSync[AgentCard Sync Controller]
-        style AgentCardSync fill:#ffe0b2,stroke:#fb8c00
-
-        AgentCardController[AgentCard Controller]
-        style AgentCardController fill:#ffe0b2,stroke:#fb8c00
-
-        NetworkPolicyController[NetworkPolicy Controller]
-        style NetworkPolicyController fill:#ffe0b2,stroke:#fb8c00
-
-        AgentPod[Agent Pod]
-        style AgentPod fill:#c8e6c9,stroke:#66bb6a
+        Deployment_Deployment[Deployment/StatefulSet]
+        style Deployment_Deployment fill:#d1c4e9,stroke:#7e57c2
 
         AgentCardCRD["AgentCard CR"]
         style AgentCardCRD fill:#e1f5fe,stroke:#039be5
 
-        Workload -->|Deploys| AgentPod
-        Workload -->|Watches| AgentCardSync
-        AgentCardSync -->|Auto-creates| AgentCardCRD
+        AgentBuildCRD["AgentBuild CR"]
+
+        User -->|Creates| Deployment_Deployment
+        User -->|Creates| AgentCardCRD
+        User -->|Creates| AgentBuildCRD
+
+        AgentCardController[AgentCard Controller]
+        style AgentCardController fill:#ffe0b2,stroke:#fb8c00
+
+        AgentBuildController[AgentBuild Controller]
+        style AgentBuildController fill:#ffe0b2,stroke:#fb8c00
+
+        AgentPod[Agent Pod]
+        style AgentPod fill:#c8e6c9,stroke:#66bb6a
+
+        AgentCardCRD -->|targetRef| Deployment_Deployment
         AgentCardCRD -->|Reconciles| AgentCardController
-        AgentCardController -->|Fetches agent card| AgentPod
-        AgentCardCRD -->|Reconciles| NetworkPolicyController
+        AgentBuildCRD -->|Reconciles| AgentBuildController
+
+        Deployment_Deployment --> |Deploys| AgentPod
+        AgentCardController -->|Fetches agent card from| AgentPod
+
+        subgraph Tekton_Pipeline
+            direction LR
+            style Tekton_Pipeline fill:#e7f3e7,stroke:#73b473,stroke-width:1px
+
+            Pull[1. Pull Task]
+            style Pull fill:#e8eaf6,stroke:#5c6bc0
+            Build[2. Build Task]
+            style Build fill:#fff3e0,stroke:#ffa726
+            Push[3. Push Image Task]
+            style Push fill:#f3e5f5,stroke:#ab47bc
+            Pull --> Build --> Push
+        end
+        AgentBuildController -->|Triggers| Tekton_Pipeline
+        AgentBuildController -->|Saves Image URL on successful build| AgentBuildCRD
     end
 ```
 
 ## Controllers
 
-The operator runs four controllers:
-
-### Agent Controller (Deprecated)
-> **Deprecated:** The Agent CR and its controller are deprecated. Use standard Kubernetes Deployments or StatefulSets with the `kagenti.io/type: agent` label instead.
-
-Reconciles `Agent` CRs into Kubernetes Deployments and Services. Creates RBAC objects (ServiceAccount, Role, RoleBinding) for each agent. Updates the Agent status with deployment phase and conditions.
+The operator runs the following controllers:
 
 ### AgentCard Controller
 Reconciles `AgentCard` CRs by resolving the backing workload via `spec.targetRef` (duck typing), fetching the agent card from the workload's `/.well-known/agent.json` endpoint, verifying JWS signatures, evaluating SPIFFE identity binding, and updating the AgentCard status.
 
 ### AgentCard Sync Controller
 Watches Deployments and StatefulSets labeled with `kagenti.io/type=agent` and `kagenti.io/protocol=<protocol>`. Automatically creates AgentCard resources with `targetRef` pointing to the discovered workloads. Sets owner references for garbage collection.
+
+### AgentBuild Controller
+Reconciles `AgentBuild` CRs by creating and managing Tekton Pipelines and PipelineRuns. Tracks build status and updates AgentBuild status with the built image reference.
 
 ### NetworkPolicy Controller
 Watches AgentCard resources when `--enforce-network-policies` is enabled. Creates permissive NetworkPolicies for agents with verified signatures and restrictive NetworkPolicies for unverified agents. When identity binding is configured, both signature and binding must pass for permissive access.

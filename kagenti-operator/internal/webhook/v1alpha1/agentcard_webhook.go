@@ -75,13 +75,9 @@ func (v *AgentCardValidator) ValidateDelete(ctx context.Context, obj runtime.Obj
 func (v *AgentCardValidator) validateAgentCard(agentcard *agentv1alpha1.AgentCard) (admission.Warnings, error) {
 	var warnings admission.Warnings
 
+	// spec.targetRef is required
 	if agentcard.Spec.TargetRef == nil {
-		return nil, fmt.Errorf("spec.targetRef is required: specify the workload backing this agent (selector is deprecated)")
-	}
-
-	if agentcard.Spec.Selector != nil {
-		warnings = append(warnings,
-			"spec.selector is deprecated and ignored; only spec.targetRef is used")
+		return nil, fmt.Errorf("spec.targetRef is required: specify the workload backing this agent")
 	}
 
 	return warnings, nil

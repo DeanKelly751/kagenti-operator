@@ -40,7 +40,6 @@ import (
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 	"github.com/kagenti/operator/internal/agentcard"
 	"github.com/kagenti/operator/internal/controller"
-	"github.com/kagenti/operator/internal/distribution"
 	"github.com/kagenti/operator/internal/signature"
 	webhookv1alpha1 "github.com/kagenti/operator/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
@@ -96,7 +95,6 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-
 	flag.BoolVar(&requireA2ASignature, "require-a2a-signature", false,
 		"Require A2A agent cards to have a valid signature")
 	flag.BoolVar(&signatureAuditMode, "signature-audit-mode", false,
@@ -188,9 +186,6 @@ func main() {
 		})
 	}
 
-	distType := distribution.Detect(ctrl.GetConfigOrDie())
-	setupLog.Info("Detected Kubernetes distribution", "distribution", distType)
-
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:  scheme,
 		Metrics: metricsServerOptions,
@@ -204,15 +199,6 @@ func main() {
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
-		os.Exit(1)
-	}
-
-	if err = (&controller.AgentReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		Distribution: distType,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
 	}
 
