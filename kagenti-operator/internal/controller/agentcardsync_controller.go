@@ -37,9 +37,16 @@ import (
 
 var syncLogger = ctrl.Log.WithName("controller").WithName("AgentCardSync")
 
-// DefaultAutoSyncGracePeriod prevents duplicate cards when a Deployment and AgentCard
-// are applied together (the Deployment event may fire before the manual card is cached).
-const DefaultAutoSyncGracePeriod = 5 * time.Second
+const (
+	// DefaultAutoSyncGracePeriod prevents duplicate cards when a Deployment and AgentCard
+	// are applied together (the Deployment event may fire before the manual card is cached).
+	DefaultAutoSyncGracePeriod = 5 * time.Second
+
+	// LabelManagedBy identifies auto-created AgentCards so the sync controller
+	// can distinguish its own cards from manually-created ones.
+	LabelManagedBy      = "app.kubernetes.io/managed-by"
+	LabelManagedByValue = "kagenti-operator"
+)
 
 // AgentCardSyncReconciler auto-creates AgentCards for labelled agent workloads.
 type AgentCardSyncReconciler struct {
@@ -123,6 +130,19 @@ func (r *AgentCardSyncReconciler) ensureAgentCard(ctx context.Context, obj clien
 	}, existingCard)
 
 	if err == nil {
+		if r.isAutoCreatedCard(existingCard) {
+			if manualCard, found := r.findManualCardForWorkload(ctx, obj, gvk, cardName); found {
+				syncLogger.Info("Deleting auto-created AgentCard superseded by manual card",
+					"autoCard", cardName, "manualCard", manualCard,
+					"workload", obj.GetName(), "kind", gvk.Kind)
+				if err := r.Delete(ctx, existingCard); err != nil && !errors.IsNotFound(err) {
+					syncLogger.Error(err, "Failed to delete superseded auto-created AgentCard")
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{}, nil
+			}
+		}
+
 		needsUpdate := false
 
 		if !r.hasOwnerReferenceForObject(existingCard, obj) {
@@ -203,27 +223,52 @@ func (r *AgentCardSyncReconciler) ensureAgentCard(ctx context.Context, obj clien
 
 // findExistingCardForWorkload returns the name of an existing card targeting this workload, if any.
 func (r *AgentCardSyncReconciler) findExistingCardForWorkload(ctx context.Context, obj client.Object, gvk schema.GroupVersionKind) (string, bool) {
+	return r.findCardForWorkload(ctx, obj, gvk, "")
+}
+
+// findManualCardForWorkload returns the name of a manually-created card targeting this workload,
+// excluding the auto-created card identified by excludeName.
+func (r *AgentCardSyncReconciler) findManualCardForWorkload(ctx context.Context, obj client.Object, gvk schema.GroupVersionKind, excludeName string) (string, bool) {
+	return r.findCardForWorkload(ctx, obj, gvk, excludeName)
+}
+
+// findCardForWorkload lists cards targeting the workload, optionally excluding one by name.
+// Uses the targetRef.name field index when available, falling back to a full namespace list.
+func (r *AgentCardSyncReconciler) findCardForWorkload(ctx context.Context, obj client.Object, gvk schema.GroupVersionKind, excludeName string) (string, bool) {
 	cardList := &agentv1alpha1.AgentCardList{}
-	if err := r.List(ctx, cardList,
+
+	err := r.List(ctx, cardList,
 		client.InNamespace(obj.GetNamespace()),
 		client.MatchingFields{TargetRefNameIndex: obj.GetName()},
-	); err != nil {
-		syncLogger.Error(err, "Failed to list AgentCards for duplicate check")
-		return "", false
+	)
+	if err != nil {
+		// Field index may not be available (e.g. unit tests); fall back to unindexed list.
+		cardList = &agentv1alpha1.AgentCardList{}
+		if fallbackErr := r.List(ctx, cardList, client.InNamespace(obj.GetNamespace())); fallbackErr != nil {
+			syncLogger.Error(fallbackErr, "Failed to list AgentCards for duplicate check")
+			return "", false
+		}
 	}
 
 	expectedAPIVersion := gvk.GroupVersion().String()
 
 	for i := range cardList.Items {
 		card := &cardList.Items[i]
-
+		if card.Name == excludeName {
+			continue
+		}
 		if card.Spec.TargetRef != nil &&
 			card.Spec.TargetRef.APIVersion == expectedAPIVersion &&
-			card.Spec.TargetRef.Kind == gvk.Kind {
+			card.Spec.TargetRef.Kind == gvk.Kind &&
+			card.Spec.TargetRef.Name == obj.GetName() {
 			return card.Name, true
 		}
 	}
 	return "", false
+}
+
+func (r *AgentCardSyncReconciler) isAutoCreatedCard(card *agentv1alpha1.AgentCard) bool {
+	return card.Labels != nil && card.Labels[LabelManagedBy] == LabelManagedByValue
 }
 
 // createAgentCardForWorkload creates a new AgentCard for a workload using targetRef
@@ -244,8 +289,8 @@ func (r *AgentCardSyncReconciler) createAgentCardForWorkload(ctx context.Context
 			Name:      cardName,
 			Namespace: obj.GetNamespace(),
 			Labels: map[string]string{
-				"app.kubernetes.io/name":       appName,
-				"app.kubernetes.io/managed-by": "kagenti-operator",
+				"app.kubernetes.io/name": appName,
+				LabelManagedBy:          LabelManagedByValue,
 			},
 		},
 		Spec: agentv1alpha1.AgentCardSpec{

@@ -207,6 +207,150 @@ var _ = Describe("AgentCardSync Controller", func() {
 		})
 	})
 
+	Context("When a manual AgentCard targets the same workload as an auto-created one", func() {
+		const (
+			deploymentName  = "test-supersede-deployment"
+			autoCardName    = "test-supersede-deployment-deployment-card"
+			manualCardName  = "test-supersede-manual"
+			namespace       = "default"
+		)
+
+		ctx := context.Background()
+
+		deploymentNN := types.NamespacedName{Name: deploymentName, Namespace: namespace}
+
+		BeforeEach(func() {
+			By("creating a labelled Deployment")
+			deployment := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      deploymentName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						"app.kubernetes.io/name": deploymentName,
+						LabelAgentType:           LabelValueAgent,
+						LabelKagentiProtocol:     "a2a",
+					},
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: ptr.To(int32(1)),
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"app": deploymentName},
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{"app": deploymentName},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "agent", Image: "test:latest"}},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			deployment := &appsv1.Deployment{}
+			if err := k8sClient.Get(ctx, deploymentNN, deployment); err == nil {
+				Expect(k8sClient.Delete(ctx, deployment)).To(Succeed())
+			}
+			for _, name := range []string{autoCardName, manualCardName} {
+				card := &agentv1alpha1.AgentCard{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, card); err == nil {
+					Expect(k8sClient.Delete(ctx, card)).To(Succeed())
+				}
+			}
+		})
+
+		It("should delete the auto-created card when a manual card exists", func() {
+			reconciler := &AgentCardSyncReconciler{
+				Client:              k8sClient,
+				Scheme:              k8sClient.Scheme(),
+				AutoSyncGracePeriod: -1,
+			}
+
+			By("auto-creating the card via first reconcile")
+			_, err := reconciler.ReconcileDeployment(ctx, reconcile.Request{NamespacedName: deploymentNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			autoCard := &agentv1alpha1.AgentCard{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: autoCardName, Namespace: namespace}, autoCard)).To(Succeed())
+
+			By("creating a manual AgentCard targeting the same Deployment")
+			manualCard := &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      manualCardName,
+					Namespace: namespace,
+				},
+				Spec: agentv1alpha1.AgentCardSpec{
+					TargetRef: &agentv1alpha1.TargetRef{
+						APIVersion: "apps/v1",
+						Kind:       "Deployment",
+						Name:       deploymentName,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, manualCard)).To(Succeed())
+
+			By("reconciling again -- auto-card should be deleted")
+			_, err = reconciler.ReconcileDeployment(ctx, reconcile.Request{NamespacedName: deploymentNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: autoCardName, Namespace: namespace}, autoCard)
+			Expect(errors.IsNotFound(err)).To(BeTrue(), "auto-created card should have been deleted")
+
+			By("verifying the manual card still exists")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: manualCardName, Namespace: namespace}, manualCard)).To(Succeed())
+		})
+
+		It("should not delete a manually-created card even if another manual card exists", func() {
+			By("creating two manual AgentCards targeting the same Deployment")
+			for _, name := range []string{manualCardName, manualCardName + "-2"} {
+				card := &agentv1alpha1.AgentCard{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      name,
+						Namespace: namespace,
+					},
+					Spec: agentv1alpha1.AgentCardSpec{
+						TargetRef: &agentv1alpha1.TargetRef{
+							APIVersion: "apps/v1",
+							Kind:       "Deployment",
+							Name:       deploymentName,
+						},
+					},
+				}
+				Expect(k8sClient.Create(ctx, card)).To(Succeed())
+			}
+
+			reconciler := &AgentCardSyncReconciler{
+				Client:              k8sClient,
+				Scheme:              k8sClient.Scheme(),
+				AutoSyncGracePeriod: -1,
+			}
+
+			By("reconciling -- sync controller should skip creation, not delete manual cards")
+			_, err := reconciler.ReconcileDeployment(ctx, reconcile.Request{NamespacedName: deploymentNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying both manual cards still exist")
+			for _, name := range []string{manualCardName, manualCardName + "-2"} {
+				card := &agentv1alpha1.AgentCard{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, card)).To(Succeed())
+			}
+
+			By("verifying no auto-card was created")
+			autoCard := &agentv1alpha1.AgentCard{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: autoCardName, Namespace: namespace}, autoCard)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+
+			By("cleaning up second manual card")
+			card := &agentv1alpha1.AgentCard{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: manualCardName + "-2", Namespace: namespace}, card); err == nil {
+				Expect(k8sClient.Delete(ctx, card)).To(Succeed())
+			}
+		})
+	})
+
 	Context("When reconciling a StatefulSet with agent labels", func() {
 		const (
 			statefulsetName = "test-sync-statefulset"
