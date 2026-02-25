@@ -57,9 +57,9 @@ const (
 type Config struct {
 	Type ProviderType
 
-	TrustBundleConfigMapName string        // ConfigMap name (SPIFFE JSON format)
-	TrustBundleConfigMapNS   string
-	TrustBundleConfigMapKey  string        // default: "bundle.spiffe"
+	TrustBundleConfigMapName   string // ConfigMap name (SPIFFE JSON format)
+	TrustBundleConfigMapNS     string
+	TrustBundleConfigMapKey    string        // default: "bundle.spiffe"
 	TrustBundleRefreshInterval time.Duration // default: 5m
 
 	Client client.Client

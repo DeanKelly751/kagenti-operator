@@ -290,7 +290,7 @@ func (r *AgentCardSyncReconciler) createAgentCardForWorkload(ctx context.Context
 			Namespace: obj.GetNamespace(),
 			Labels: map[string]string{
 				"app.kubernetes.io/name": appName,
-				LabelManagedBy:          LabelManagedByValue,
+				LabelManagedBy:           LabelManagedByValue,
 			},
 		},
 		Spec: agentv1alpha1.AgentCardSpec{

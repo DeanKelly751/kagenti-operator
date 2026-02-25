@@ -618,10 +618,10 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 				latest.Status.ExpectedSpiffeID = binding.SpiffeID
 			}
 			meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
-				Type:               "Bound",
-				Status:             newConditionStatus,
-				Reason:             binding.Reason,
-				Message:            binding.Message,
+				Type:    "Bound",
+				Status:  newConditionStatus,
+				Reason:  binding.Reason,
+				Message: binding.Message,
 			})
 		}
 
@@ -1032,10 +1032,10 @@ func (r *AgentCardReconciler) updateBindingStatus(ctx context.Context, agentCard
 			conditionStatus = metav1.ConditionTrue
 		}
 		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
-			Type:               "Bound",
-			Status:             conditionStatus,
-			Reason:             reason,
-			Message:            message,
+			Type:    "Bound",
+			Status:  conditionStatus,
+			Reason:  reason,
+			Message: message,
 		})
 
 		return r.Status().Update(ctx, latest)

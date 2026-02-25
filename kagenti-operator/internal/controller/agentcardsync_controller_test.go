@@ -209,10 +209,10 @@ var _ = Describe("AgentCardSync Controller", func() {
 
 	Context("When a manual AgentCard targets the same workload as an auto-created one", func() {
 		const (
-			deploymentName  = "test-supersede-deployment"
-			autoCardName    = "test-supersede-deployment-deployment-card"
-			manualCardName  = "test-supersede-manual"
-			namespace       = "default"
+			deploymentName = "test-supersede-deployment"
+			autoCardName   = "test-supersede-deployment-deployment-card"
+			manualCardName = "test-supersede-manual"
+			namespace      = "default"
 		)
 
 		ctx := context.Background()

@@ -51,7 +51,6 @@ var _ = Describe("Signature Verification", func() {
 			deploymentName = "sig-valid-agent"
 			agentCardName  = "sig-valid-card"
 			namespace      = "default"
-			secretName     = "sig-valid-keys"
 		)
 
 		var (
@@ -63,25 +62,7 @@ var _ = Describe("Signature Verification", func() {
 
 		BeforeEach(func() {
 			By("generating an RSA key pair")
-			var err error
-			rsaPrivKey, err = rsa.GenerateKey(rand.Reader, 2048)
-			Expect(err).NotTo(HaveOccurred())
-
-			pubDER, err := x509.MarshalPKIXPublicKey(&rsaPrivKey.PublicKey)
-			Expect(err).NotTo(HaveOccurred())
-			pubKeyPEM = pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
-
-			By("creating the public key Secret")
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      secretName,
-					Namespace: namespace,
-				},
-				Data: map[string][]byte{
-					"my-signing-key": pubKeyPEM,
-				},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			rsaPrivKey, pubKeyPEM = generateTestRSAKeyPair()
 		})
 
 		AfterEach(func() {
@@ -89,7 +70,6 @@ var _ = Describe("Signature Verification", func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should set validSignature=true and SignatureVerified condition for a correctly signed card", func() {
@@ -175,26 +155,14 @@ var _ = Describe("Signature Verification", func() {
 			deploymentName = "sig-unsigned-agent"
 			agentCardName  = "sig-unsigned-card"
 			namespace      = "default"
-			secretName     = "sig-unsigned-keys"
 		)
 
 		ctx := context.Background()
-
-		BeforeEach(func() {
-			By("creating a public key Secret")
-			_, pubPEM := generateTestRSAKeyPair()
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-				Data:       map[string][]byte{"key": pubPEM},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
-		})
 
 		AfterEach(func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should set validSignature=false for an unsigned card", func() {
@@ -267,7 +235,6 @@ var _ = Describe("Signature Verification", func() {
 			deploymentName = "sig-wrongkey-agent"
 			agentCardName  = "sig-wrongkey-card"
 			namespace      = "default"
-			secretName     = "sig-wrongkey-keys"
 		)
 
 		ctx := context.Background()
@@ -276,20 +243,12 @@ var _ = Describe("Signature Verification", func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should set validSignature=false when card is signed with wrong key", func() {
 			By("generating two different key pairs")
 			signingKey, _ := generateTestRSAKeyPair()
 			_, wrongPubPEM := generateTestRSAKeyPair()
-
-			By("creating secret with the wrong public key")
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-				Data:       map[string][]byte{"key-1": wrongPubPEM},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 
 			By("creating Deployment and Service")
 			createDeploymentWithService(ctx, deploymentName, namespace)
@@ -355,7 +314,6 @@ var _ = Describe("Signature Verification", func() {
 			deploymentName = "sig-audit-agent"
 			agentCardName  = "sig-audit-card"
 			namespace      = "default"
-			secretName     = "sig-audit-keys"
 		)
 
 		ctx := context.Background()
@@ -364,18 +322,10 @@ var _ = Describe("Signature Verification", func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should allow unsigned card in audit mode and set Synced=True", func() {
 			_, pubPEM := generateTestRSAKeyPair()
-
-			By("creating secret")
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-				Data:       map[string][]byte{"key": pubPEM},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 
 			By("creating Deployment and Service")
 			createDeploymentWithService(ctx, deploymentName, namespace)
@@ -512,7 +462,6 @@ var _ = Describe("Signature Verification", func() {
 			deploymentName = "sig-identity-agent"
 			agentCardName  = "sig-identity-card"
 			namespace      = "default"
-			secretName     = "sig-identity-keys"
 			trustDomain    = "test.local"
 		)
 
@@ -522,19 +471,11 @@ var _ = Describe("Signature Verification", func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should set signatureIdentityMatch=true when both signature and binding pass", func() {
 			By("generating key pair")
 			privKey, pubPEM := generateTestRSAKeyPair()
-
-			By("creating secret")
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-				Data:       map[string][]byte{"key-1": pubPEM},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 
 			By("creating Deployment and Service")
 			createDeploymentWithService(ctx, deploymentName, namespace)
@@ -606,7 +547,6 @@ var _ = Describe("Signature Verification", func() {
 			deploymentName = "sig-label-agent"
 			agentCardName  = "sig-label-card"
 			namespace      = "default"
-			secretName     = "sig-label-keys"
 		)
 
 		ctx := context.Background()
@@ -615,17 +555,11 @@ var _ = Describe("Signature Verification", func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should propagate signature-verified=true label to Deployment pod template on valid signature", func() {
-			By("generating key pair and creating secret")
+			By("generating key pair")
 			privKey, pubPEM := generateTestRSAKeyPair()
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-				Data:       map[string][]byte{"key-1": pubPEM},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 
 			By("creating a Deployment directly (not via Agent CRD)")
 			replicas := int32(1)
@@ -753,7 +687,6 @@ var _ = Describe("Signature Verification", func() {
 			deploymentName = "sig-label-idem-agent"
 			agentCardName  = "sig-label-idem-card"
 			namespace      = "default"
-			secretName     = "sig-label-idem-keys"
 		)
 
 		ctx := context.Background()
@@ -762,17 +695,11 @@ var _ = Describe("Signature Verification", func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should not update the Deployment on a second reconcile when label is already correct", func() {
-			By("generating key pair and creating secret")
+			By("generating key pair")
 			privKey, pubPEM := generateTestRSAKeyPair()
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-				Data:       map[string][]byte{"key-1": pubPEM},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 
 			By("creating Deployment and Service")
 			createDeploymentWithService(ctx, deploymentName, namespace)
@@ -850,7 +777,6 @@ var _ = Describe("Signature Verification", func() {
 			deploymentName = "sig-label-rm-agent"
 			agentCardName  = "sig-label-rm-card"
 			namespace      = "default"
-			secretName     = "sig-label-rm-keys"
 		)
 
 		ctx := context.Background()
@@ -859,20 +785,12 @@ var _ = Describe("Signature Verification", func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should remove signature-verified label when signature becomes invalid", func() {
 			By("generating two key pairs — signing key and wrong verification key")
 			signingKey, _ := generateTestRSAKeyPair()
 			_, wrongPubPEM := generateTestRSAKeyPair()
-
-			By("creating secret with the wrong public key")
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-				Data:       map[string][]byte{"key-1": wrongPubPEM},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 
 			By("creating a Deployment with the signature-verified label already set (simulating previous valid state)")
 			replicas := int32(1)
@@ -1015,7 +933,6 @@ var _ = Describe("Signature Verification", func() {
 			cardNameA      = "sig-multi-card-a"
 			cardNameB      = "sig-multi-card-b"
 			namespace      = "default"
-			secretName     = "sig-multi-keys"
 		)
 
 		ctx := context.Background()
@@ -1025,17 +942,11 @@ var _ = Describe("Signature Verification", func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, cardNameB, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should set label=false when one card says false even if the other says true", func() {
-			By("generating key pair and creating secret")
+			By("generating key pair")
 			privKey, pubPEM := generateTestRSAKeyPair()
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-				Data:       map[string][]byte{"key-1": pubPEM},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 
 			By("creating Deployment and Service")
 			createDeploymentWithService(ctx, deploymentName, namespace)
@@ -1196,7 +1107,7 @@ type mockSignatureProvider struct {
 }
 
 func (m *mockSignatureProvider) Name() string       { return "mock" }
-func (m *mockSignatureProvider) BundleHash() string  { return "mock-hash" }
+func (m *mockSignatureProvider) BundleHash() string { return "mock-hash" }
 
 func (m *mockSignatureProvider) VerifySignature(ctx context.Context, cardData *agentv1alpha1.AgentCardData,
 	signatures []agentv1alpha1.AgentCardSignature) (*signature.VerificationResult, error) {

@@ -28,8 +28,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -86,16 +86,16 @@ func init() {
 // X5CProvider verifies JWS signatures via x5c chains against a SPIRE trust bundle
 // (ConfigMap in SPIFFE JSON format, from SPIRE's BundlePublisher k8s_configmap plugin).
 type X5CProvider struct {
-	client        client.Client
-	configMapName string
-	configMapNS   string
-	configMapKey  string
+	client          client.Client
+	configMapName   string
+	configMapNS     string
+	configMapKey    string
 	refreshInterval time.Duration
 
-	mu              sync.RWMutex
-	trustBundle     *x509.CertPool
-	lastBundleLoad  time.Time
-	bundleHash      string // SHA-256 of raw bundle data for change detection
+	mu             sync.RWMutex
+	trustBundle    *x509.CertPool
+	lastBundleLoad time.Time
+	bundleHash     string // SHA-256 of raw bundle data for change detection
 }
 
 func NewX5CProvider(config *Config) (*X5CProvider, error) {
