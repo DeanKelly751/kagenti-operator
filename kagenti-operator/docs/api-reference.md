@@ -338,7 +338,7 @@ metadata:
   namespace: default
   labels:
     kagenti.io/type: agent
-    kagenti.io/protocol: a2a
+    protocol.kagenti.io/a2a: ""
     app.kubernetes.io/name: my-agent
 spec:
   replicas: 1
@@ -545,7 +545,7 @@ metadata:
   labels:
     app.kubernetes.io/name: weather-agent
     kagenti.io/type: agent
-    kagenti.io/protocol: a2a
+    protocol.kagenti.io/a2a: ""
 spec:
   replicas: 1
   selector:
@@ -729,7 +729,7 @@ spec:
 | `Synced` | `True` | `SyncSucceeded` | Agent card fetched successfully |
 | `Synced` | `False` | `WorkloadNotFound` | Referenced workload does not exist |
 | `Synced` | `False` | `WorkloadNotReady` | Workload is not ready to serve |
-| `Synced` | `False` | `NoProtocol` | Workload missing `kagenti.io/protocol` label |
+| `Synced` | `False` | `NoProtocol` | Workload missing `protocol.kagenti.io/<name>` label |
 | `Synced` | `False` | `FetchFailed` | Failed to fetch agent card from endpoint |
 | `Synced` | `False` | `SignatureInvalid` | Signature verification failed (enforce mode) |
 | `Ready` | `True` | `ReadyToServe` | Agent index ready for queries |
@@ -747,7 +747,7 @@ For Deployments and StatefulSets to be automatically discovered by the operator,
 | Label | Value | Required | Description |
 |-------|-------|----------|-------------|
 | `kagenti.io/type` | `agent` | Yes | Identifies the workload as an agent |
-| `kagenti.io/protocol` | `a2a`, `mcp`, etc. | Yes | Protocol for fetching agent card |
+| `protocol.kagenti.io/<name>` | `""` (existence implies support) | Yes (at least one) | Protocol(s) the agent speaks (e.g., `protocol.kagenti.io/a2a`, `protocol.kagenti.io/mcp`) |
 | `app.kubernetes.io/name` | `<agent-name>` | Recommended | Standard Kubernetes app name label |
 
 ---

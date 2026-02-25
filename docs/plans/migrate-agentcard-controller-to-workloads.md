@@ -189,7 +189,7 @@ As defined in the Kagenti UI migration plan, all agent workloads must have these
 |-------|-------|---------|
 | `kagenti.io/type` | `agent` | Identifies resource as a Kagenti agent |
 | `app.kubernetes.io/name` | `<agent-name>` | Standard K8s app name label |
-| `kagenti.io/protocol` | `a2a`, `mcp`, etc. | Protocol type for card fetching |
+| `protocol.kagenti.io/<name>` | `""` (e.g., `protocol.kagenti.io/a2a`) | Protocol(s) the agent speaks |
 
 ### Recommended Labels
 
@@ -211,14 +211,15 @@ kagenti.io/type=agent
 To discover agents with a specific protocol:
 
 ```
-kagenti.io/type=agent,kagenti.io/protocol=a2a
+kagenti.io/type=agent,protocol.kagenti.io/a2a
 ```
 
 ### Label Changes from Agent CRD
 
 | Old Label (Agent CRD) | New Label (Workloads) |
 |-----------------------|-----------------------|
-| `kagenti.io/agent-protocol` | `kagenti.io/protocol` |
+| `kagenti.io/agent-protocol: a2a` | `protocol.kagenti.io/a2a: ""` |
+| `kagenti.io/protocol: a2a` | `protocol.kagenti.io/a2a: ""` |
 
 ---
 

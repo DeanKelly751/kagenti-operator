@@ -112,7 +112,7 @@ metadata:
   labels:
     app.kubernetes.io/name: weather-agent
     kagenti.io/type: agent
-    kagenti.io/protocol: a2a
+    protocol.kagenti.io/a2a: ""
 spec:
   replicas: 1
   selector:

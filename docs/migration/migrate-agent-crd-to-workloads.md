@@ -74,7 +74,7 @@ metadata:
   labels:
     app.kubernetes.io/name: my-agent
     kagenti.io/type: agent
-    kagenti.io/protocol: a2a  # New label
+    protocol.kagenti.io/a2a: ""  # New multi-protocol label
 spec:
   replicas: 1
   selector:
@@ -174,20 +174,21 @@ kubectl delete agent my-agent -n default
 
 ## Label Migration
 
-Update your labels to use the new format:
+Update your labels to use the new multi-protocol format:
 
 | Old Label | New Label |
 |-----------|-----------|
-| `kagenti.io/agent-protocol` | `kagenti.io/protocol` |
+| `kagenti.io/agent-protocol: a2a` | `protocol.kagenti.io/a2a: ""` |
+| `kagenti.io/protocol: a2a` | `protocol.kagenti.io/a2a: ""` |
 
-Both labels are currently supported, but the old label will be removed in a future release.
+Both old label formats are still supported for backward compatibility, but they will be removed in a future release. The new prefix-based format allows a single workload to declare support for multiple protocols simultaneously.
 
 ### Required Labels for Workloads
 
 | Label | Value | Required |
 |-------|-------|----------|
 | `kagenti.io/type` | `agent` | Yes |
-| `kagenti.io/protocol` | `a2a`, `mcp`, etc. | Yes |
+| `protocol.kagenti.io/<name>` | `""` (existence implies support) | Yes (at least one) |
 | `app.kubernetes.io/name` | `<agent-name>` | Recommended |
 
 ## AgentCard Naming Convention
