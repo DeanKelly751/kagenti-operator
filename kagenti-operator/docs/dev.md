@@ -97,7 +97,7 @@ kagenti-operator/
 | `api/v1alpha1/` | CRD Go types and schema definitions |
 | `internal/controller/` | Core reconciliation logic (4 controllers) |
 | `internal/agentcard/` | Agent card fetching from A2A endpoints |
-| `internal/signature/` | JWS signature verification (Secret and JWKS providers) |
+| `internal/signature/` | JWS signature verification (x5c provider with SPIRE trust bundle) |
 | `internal/webhook/` | Admission webhook validation/mutation |
 | `config/` | Kubernetes manifests and kustomize configs |
 | `test/` | Test suites and utilities |

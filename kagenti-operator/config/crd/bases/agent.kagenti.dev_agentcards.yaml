@@ -81,22 +81,6 @@ spec:
               identityBinding:
                 description: IdentityBinding specifies SPIFFE identity binding configuration
                 properties:
-                  allowedSpiffeIDs:
-                    description: |-
-                      AllowedSpiffeIDs is the allowlist of SPIFFE IDs permitted to bind to this agent.
-                      The SPIFFE ID from the JWS protected header must match one of these entries.
-                    items:
-                      description: SpiffeID represents a SPIFFE identity in the format
-                        spiffe://<trust-domain>/<path>
-                      pattern: ^spiffe://[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9](/[a-zA-Z0-9\-\._~%!$&'()*+,;=:@]+)*$
-                      type: string
-                    minItems: 1
-                    type: array
-                  expectedSpiffeID:
-                    description: 'Deprecated: No longer used; SPIFFE ID comes from
-                      the JWS protected header.'
-                    pattern: ^spiffe://[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9](/[a-zA-Z0-9\-\._~%!$&'()*+,;=:@]+)*$
-                    type: string
                   strict:
                     default: false
                     description: |-
@@ -104,12 +88,11 @@ spec:
                       When false (default), results are recorded in status only (audit mode).
                     type: boolean
                   trustDomain:
-                    description: 'Deprecated: No longer used; trust domain comes from
-                      the JWS protected header.'
+                    description: |-
+                      TrustDomain overrides the operator-level --spire-trust-domain for this AgentCard.
+                      If empty, the operator flag value is used.
                     pattern: ^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$
                     type: string
-                required:
-                - allowedSpiffeIDs
                 type: object
               syncPeriod:
                 default: 30s

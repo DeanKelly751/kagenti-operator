@@ -23,12 +23,11 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
-	_ "crypto/sha512" // Register SHA-384 and SHA-512 for hashForAlgorithm tests
+	_ "crypto/sha512"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"math/big"
 	"testing"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
@@ -69,20 +68,19 @@ func generateECDSAKeyPair(t *testing.T) (*ecdsa.PrivateKey, []byte) {
 // buildJWSSignature creates a JWS signature for testing.
 // It builds a protected header, constructs the signing input per RFC 7515,
 // and signs with the given RSA private key.
-func buildJWSSignature(t *testing.T, cardData *agentv1alpha1.AgentCardData, privKey *rsa.PrivateKey, kid, spiffeID string) agentv1alpha1.AgentCardSignature {
+func buildJWSSignature(t *testing.T, cardData *agentv1alpha1.AgentCardData, privKey *rsa.PrivateKey, kid, _ string) agentv1alpha1.AgentCardSignature {
 	t.Helper()
 	header := &ProtectedHeader{
 		Algorithm: "RS256",
 		Type:      "JOSE",
 		KeyID:     kid,
-		SpiffeID:  spiffeID,
 	}
 	protectedB64, err := EncodeProtectedHeader(header)
 	if err != nil {
 		t.Fatalf("Failed to encode protected header: %v", err)
 	}
 
-	payload, err := createCanonicalCardJSON(cardData)
+	payload, err := CreateCanonicalCardJSON(cardData)
 	if err != nil {
 		t.Fatalf("Failed to create canonical JSON: %v", err)
 	}
@@ -114,7 +112,7 @@ func buildJWSSignatureECDSA(t *testing.T, cardData *agentv1alpha1.AgentCardData,
 		t.Fatalf("Failed to encode protected header: %v", err)
 	}
 
-	payload, err := createCanonicalCardJSON(cardData)
+	payload, err := CreateCanonicalCardJSON(cardData)
 	if err != nil {
 		t.Fatalf("Failed to create canonical JSON: %v", err)
 	}
@@ -148,7 +146,6 @@ func TestDecodeProtectedHeader(t *testing.T) {
 	header := &ProtectedHeader{
 		Algorithm: "RS256",
 		KeyID:     "test-key",
-		SpiffeID:  "spiffe://cluster.local/ns/default/sa/agent",
 	}
 	encoded, err := EncodeProtectedHeader(header)
 	if err != nil {
@@ -164,9 +161,6 @@ func TestDecodeProtectedHeader(t *testing.T) {
 	}
 	if decoded.KeyID != "test-key" {
 		t.Errorf("Expected kid=test-key, got %s", decoded.KeyID)
-	}
-	if decoded.SpiffeID != "spiffe://cluster.local/ns/default/sa/agent" {
-		t.Errorf("Expected spiffe_id match, got %s", decoded.SpiffeID)
 	}
 }
 
@@ -194,9 +188,9 @@ func TestCanonicalJSON_SortedKeys(t *testing.T) {
 		Version: "1.0.0",
 	}
 
-	canonical, err := createCanonicalCardJSON(cardData)
+	canonical, err := CreateCanonicalCardJSON(cardData)
 	if err != nil {
-		t.Fatalf("createCanonicalCardJSON failed: %v", err)
+		t.Fatalf("CreateCanonicalCardJSON failed: %v", err)
 	}
 
 	// Verify it's valid JSON
@@ -232,9 +226,9 @@ func TestCanonicalJSON_ExcludesSignatures(t *testing.T) {
 		},
 	}
 
-	canonical, err := createCanonicalCardJSON(cardData)
+	canonical, err := CreateCanonicalCardJSON(cardData)
 	if err != nil {
-		t.Fatalf("createCanonicalCardJSON failed: %v", err)
+		t.Fatalf("CreateCanonicalCardJSON failed: %v", err)
 	}
 
 	got := string(canonical)
@@ -252,9 +246,9 @@ func TestCanonicalJSON_ExcludesEmptyFields(t *testing.T) {
 		Version: "1.0.0",
 	}
 
-	canonical, err := createCanonicalCardJSON(cardData)
+	canonical, err := CreateCanonicalCardJSON(cardData)
 	if err != nil {
-		t.Fatalf("createCanonicalCardJSON failed: %v", err)
+		t.Fatalf("CreateCanonicalCardJSON failed: %v", err)
 	}
 
 	got := string(canonical)
@@ -276,13 +270,13 @@ func TestCanonicalJSON_Deterministic(t *testing.T) {
 		DefaultOutputModes: []string{"application/json"},
 	}
 
-	first, err := createCanonicalCardJSON(cardData)
+	first, err := CreateCanonicalCardJSON(cardData)
 	if err != nil {
 		t.Fatalf("First call failed: %v", err)
 	}
 
 	for i := 0; i < 10; i++ {
-		again, err := createCanonicalCardJSON(cardData)
+		again, err := CreateCanonicalCardJSON(cardData)
 		if err != nil {
 			t.Fatalf("Call %d failed: %v", i, err)
 		}
@@ -303,9 +297,9 @@ func TestCanonicalJSON_NestedCapabilities(t *testing.T) {
 		},
 	}
 
-	canonical, err := createCanonicalCardJSON(cardData)
+	canonical, err := CreateCanonicalCardJSON(cardData)
 	if err != nil {
-		t.Fatalf("createCanonicalCardJSON failed: %v", err)
+		t.Fatalf("CreateCanonicalCardJSON failed: %v", err)
 	}
 
 	got := string(canonical)
@@ -335,24 +329,6 @@ func TestVerifyJWS_RSA_ValidSignature(t *testing.T) {
 	}
 	if result.KeyID != "test-key" {
 		t.Errorf("Expected keyID=test-key, got %s", result.KeyID)
-	}
-}
-
-func TestVerifyJWS_RSA_WithSpiffeID(t *testing.T) {
-	privKey, pubKeyPEM := generateRSAKeyPair(t)
-	cardData := newCardData("Agent", "http://agent:8000", "1.0.0")
-	spiffeID := "spiffe://cluster.local/ns/default/sa/agent-sa"
-	jwsSig := buildJWSSignature(t, cardData, privKey, "key-1", spiffeID)
-
-	result, err := VerifyJWS(cardData, &jwsSig, pubKeyPEM)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if !result.Verified {
-		t.Errorf("Expected verified=true. Details: %s", result.Details)
-	}
-	if result.SpiffeID != spiffeID {
-		t.Errorf("Expected SpiffeID=%s, got %s", spiffeID, result.SpiffeID)
 	}
 }
 
@@ -485,17 +461,6 @@ func TestVerifyJWS_InvalidSignatureBase64(t *testing.T) {
 	_, err := VerifyJWS(cardData, sig, pubKeyPEM)
 	if err == nil {
 		t.Error("Expected error for invalid base64url signature")
-	}
-}
-
-func TestVerifyJWS_PreservesKeyID(t *testing.T) {
-	privKey, pubKeyPEM := generateRSAKeyPair(t)
-	cardData := newCardData("Agent", "http://agent:8000", "1.0.0")
-	jwsSig := buildJWSSignature(t, cardData, privKey, "my-special-key-id", "")
-
-	result, _ := VerifyJWS(cardData, &jwsSig, pubKeyPEM)
-	if result.KeyID != "my-special-key-id" {
-		t.Errorf("Expected keyID='my-special-key-id', got '%s'", result.KeyID)
 	}
 }
 
@@ -638,16 +603,16 @@ func buildJWSSignatureRSAGeneric(t *testing.T, cardData *agentv1alpha1.AgentCard
 		t.Fatalf("Failed to encode protected header: %v", err)
 	}
 
-	payload, err := createCanonicalCardJSON(cardData)
+	payload, err := CreateCanonicalCardJSON(cardData)
 	if err != nil {
 		t.Fatalf("Failed to create canonical JSON: %v", err)
 	}
 	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
 	signingInput := []byte(protectedB64 + "." + payloadB64)
 
-	hashFunc, err := hashForAlgorithm(alg)
+	hashFunc, err := HashForAlgorithm(alg)
 	if err != nil {
-		t.Fatalf("hashForAlgorithm(%s) failed: %v", alg, err)
+		t.Fatalf("HashForAlgorithm(%s) failed: %v", alg, err)
 	}
 	hasher := hashFunc.New()
 	hasher.Write(signingInput)
@@ -685,16 +650,16 @@ func buildJWSSignatureECDSAGeneric(t *testing.T, cardData *agentv1alpha1.AgentCa
 		t.Fatalf("Failed to encode protected header: %v", err)
 	}
 
-	payload, err := createCanonicalCardJSON(cardData)
+	payload, err := CreateCanonicalCardJSON(cardData)
 	if err != nil {
 		t.Fatalf("Failed to create canonical JSON: %v", err)
 	}
 	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
 	signingInput := []byte(protectedB64 + "." + payloadB64)
 
-	hashFunc, err := hashForAlgorithm(alg)
+	hashFunc, err := HashForAlgorithm(alg)
 	if err != nil {
-		t.Fatalf("hashForAlgorithm(%s) failed: %v", alg, err)
+		t.Fatalf("HashForAlgorithm(%s) failed: %v", alg, err)
 	}
 	hasher := hashFunc.New()
 	hasher.Write(signingInput)
@@ -842,7 +807,7 @@ func TestVerifyJWS_ECDSA_CurveMismatch(t *testing.T) {
 	header := &ProtectedHeader{Algorithm: "ES256", Type: "JOSE", KeyID: "mismatch-key"}
 	protectedB64, _ := EncodeProtectedHeader(header)
 
-	payload, _ := createCanonicalCardJSON(cardData)
+	payload, _ := CreateCanonicalCardJSON(cardData)
 	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
 	signingInput := []byte(protectedB64 + "." + payloadB64)
 
@@ -883,9 +848,9 @@ func TestCanonicalJSON_BoolFalse_Preserved(t *testing.T) {
 		},
 	}
 
-	canonical, err := createCanonicalCardJSON(cardData)
+	canonical, err := CreateCanonicalCardJSON(cardData)
 	if err != nil {
-		t.Fatalf("createCanonicalCardJSON failed: %v", err)
+		t.Fatalf("CreateCanonicalCardJSON failed: %v", err)
 	}
 
 	got := string(canonical)
@@ -914,16 +879,16 @@ func buildJWSSignatureECDSARawRS(t *testing.T, cardData *agentv1alpha1.AgentCard
 		t.Fatalf("Failed to encode protected header: %v", err)
 	}
 
-	payload, err := createCanonicalCardJSON(cardData)
+	payload, err := CreateCanonicalCardJSON(cardData)
 	if err != nil {
 		t.Fatalf("Failed to create canonical JSON: %v", err)
 	}
 	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
 	signingInput := []byte(protectedB64 + "." + payloadB64)
 
-	hashFunc, err := hashForAlgorithm(alg)
+	hashFunc, err := HashForAlgorithm(alg)
 	if err != nil {
-		t.Fatalf("hashForAlgorithm(%s) failed: %v", alg, err)
+		t.Fatalf("HashForAlgorithm(%s) failed: %v", alg, err)
 	}
 	hasher := hashFunc.New()
 	hasher.Write(signingInput)
@@ -935,7 +900,7 @@ func buildJWSSignatureECDSARawRS(t *testing.T, cardData *agentv1alpha1.AgentCard
 	}
 
 	// Encode as raw R||S (fixed-length, zero-padded)
-	byteSize := curveByteSize(privKey.Curve)
+	byteSize := CurveByteSize(privKey.Curve)
 	rBytes := r.Bytes()
 	sBytes := s.Bytes()
 	rawSig := make([]byte, 2*byteSize)
@@ -995,7 +960,7 @@ func TestVerifyJWS_RSA_MinKeySize_Rejected(t *testing.T) {
 	// Build a signature with the small key
 	header := &ProtectedHeader{Algorithm: "RS256", Type: "JOSE", KeyID: "small-key"}
 	protectedB64, _ := EncodeProtectedHeader(header)
-	payload, _ := createCanonicalCardJSON(cardData)
+	payload, _ := CreateCanonicalCardJSON(cardData)
 	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
 	signingInput := []byte(protectedB64 + "." + payloadB64)
 	hash := sha256.Sum256(signingInput)
@@ -1023,30 +988,6 @@ func TestVerifyJWS_RSA_MinKeySize_Rejected(t *testing.T) {
 	}
 }
 
-// --- Test: JWKS invalid-curve EC point (#4) ---
-
-func TestJWKSProvider_InvalidCurvePoint(t *testing.T) {
-	// ecJWKToPEM should reject off-curve points
-	provider := &JWKSProvider{}
-
-	// Create a JWK with an off-curve point (invalid X,Y for P-256)
-	// X=1, Y=1 is not on the P-256 curve
-	invalidJWK := &JWK{
-		Kty: "EC",
-		Crv: "P-256",
-		X:   base64.RawURLEncoding.EncodeToString([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}),
-		Y:   base64.RawURLEncoding.EncodeToString([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}),
-	}
-
-	_, err := provider.jwkToPublicKeyPEM(invalidJWK)
-	if err == nil {
-		t.Fatal("Expected error for off-curve EC point")
-	}
-	if indexOf(err.Error(), "not on curve") == -1 {
-		t.Errorf("Expected 'not on curve' in error, got: %v", err)
-	}
-}
-
 // --- Unit tests for algorithm helpers ---
 
 func TestHashForAlgorithm_AllSupported(t *testing.T) {
@@ -1066,12 +1007,12 @@ func TestHashForAlgorithm_AllSupported(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.alg, func(t *testing.T) {
-			h, err := hashForAlgorithm(tt.alg)
+			h, err := HashForAlgorithm(tt.alg)
 			if err != nil {
-				t.Fatalf("hashForAlgorithm(%s) unexpected error: %v", tt.alg, err)
+				t.Fatalf("HashForAlgorithm(%s) unexpected error: %v", tt.alg, err)
 			}
 			if h != tt.expected {
-				t.Errorf("hashForAlgorithm(%s) = %v, want %v", tt.alg, h, tt.expected)
+				t.Errorf("HashForAlgorithm(%s) = %v, want %v", tt.alg, h, tt.expected)
 			}
 		})
 	}
@@ -1079,9 +1020,9 @@ func TestHashForAlgorithm_AllSupported(t *testing.T) {
 
 func TestHashForAlgorithm_Unsupported(t *testing.T) {
 	for _, alg := range []string{"HS256", "none", "", "RS1024"} {
-		_, err := hashForAlgorithm(alg)
+		_, err := HashForAlgorithm(alg)
 		if err == nil {
-			t.Errorf("hashForAlgorithm(%q) expected error, got nil", alg)
+			t.Errorf("HashForAlgorithm(%q) expected error, got nil", alg)
 		}
 	}
 }
@@ -1173,9 +1114,9 @@ func TestCurveByteSize(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.curve.Params().Name, func(t *testing.T) {
-			got := curveByteSize(tt.curve)
+			got := CurveByteSize(tt.curve)
 			if got != tt.expected {
-				t.Errorf("curveByteSize(%s) = %d, want %d", tt.curve.Params().Name, got, tt.expected)
+				t.Errorf("CurveByteSize(%s) = %d, want %d", tt.curve.Params().Name, got, tt.expected)
 			}
 		})
 	}
@@ -1196,28 +1137,6 @@ func TestRemoveEmptyFields_NestedEmptyMapOmitted(t *testing.T) {
 	}
 	if result["name"] != "Agent" {
 		t.Errorf("Expected name='Agent', got %v", result["name"])
-	}
-}
-
-func TestRemoveEmptyFields_EmptyStringOmitted(t *testing.T) {
-	input := map[string]interface{}{
-		"name":        "Agent",
-		"description": "",
-	}
-	result := removeEmptyFields(input)
-	if _, exists := result["description"]; exists {
-		t.Error("Expected empty string field to be omitted")
-	}
-}
-
-func TestRemoveEmptyFields_NilValueOmitted(t *testing.T) {
-	input := map[string]interface{}{
-		"name":  "Agent",
-		"other": nil,
-	}
-	result := removeEmptyFields(input)
-	if _, exists := result["other"]; exists {
-		t.Error("Expected nil field to be omitted")
 	}
 }
 
@@ -1285,53 +1204,6 @@ func TestRemoveEmptyFields_DeeplyNestedPreservesNonEmpty(t *testing.T) {
 	}
 	if middle["inner"] != "value" {
 		t.Errorf("Expected inner='value', got %v", middle["inner"])
-	}
-}
-
-// --- JWKS: jwkToPublicKeyPEM with unsupported key type ---
-
-func TestJWKSProvider_UnsupportedKeyType(t *testing.T) {
-	provider := &JWKSProvider{}
-	invalidJWK := &JWK{
-		Kty: "OKP", // Ed25519 — not supported
-		Kid: "test-key",
-	}
-	_, err := provider.jwkToPublicKeyPEM(invalidJWK)
-	if err == nil {
-		t.Fatal("Expected error for unsupported key type 'OKP'")
-	}
-	if indexOf(err.Error(), "unsupported") == -1 {
-		t.Errorf("Expected 'unsupported' in error, got: %v", err)
-	}
-}
-
-// --- JWKS: RSA JWK with modulus too small ---
-
-func TestJWKSProvider_RSAKeyTooSmall_JWK(t *testing.T) {
-	provider := &JWKSProvider{}
-
-	// Generate a 1024-bit RSA key and extract N and E
-	smallKey, err := rsa.GenerateKey(rand.Reader, 1024)
-	if err != nil {
-		t.Fatalf("Failed to generate 1024-bit RSA key: %v", err)
-	}
-
-	nBytes := smallKey.PublicKey.N.Bytes()
-	eBytes := big.NewInt(int64(smallKey.PublicKey.E)).Bytes()
-
-	jwk := &JWK{
-		Kty: "RSA",
-		Kid: "small-key",
-		N:   base64.RawURLEncoding.EncodeToString(nBytes),
-		E:   base64.RawURLEncoding.EncodeToString(eBytes),
-	}
-
-	_, err = provider.jwkToPublicKeyPEM(jwk)
-	if err == nil {
-		t.Fatal("Expected error for RSA JWK with 1024-bit modulus")
-	}
-	if indexOf(err.Error(), "too small") == -1 && indexOf(err.Error(), "below minimum") == -1 {
-		t.Errorf("Expected key-size rejection in error, got: %v", err)
 	}
 }
 

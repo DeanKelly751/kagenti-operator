@@ -28,7 +28,6 @@ import (
 
 var agentcardlog = ctrl.Log.WithName("agentcard-webhook")
 
-// SetupAgentCardWebhookWithManager will setup the manager to manage the webhooks
 func SetupAgentCardWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).
 		For(&agentv1alpha1.AgentCard{}).
@@ -38,10 +37,8 @@ func SetupAgentCardWebhookWithManager(mgr ctrl.Manager) error {
 
 //+kubebuilder:webhook:path=/validate-agent-kagenti-dev-v1alpha1-agentcard,mutating=false,failurePolicy=fail,sideEffects=None,groups=agent.kagenti.dev,resources=agentcards,verbs=create;update,versions=v1alpha1,name=vagentcard.kb.io,admissionReviewVersions=v1
 
-// AgentCardValidator implements validating webhook for AgentCard
 type AgentCardValidator struct{}
 
-// ValidateCreate implements webhook validation for create
 func (v *AgentCardValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	agentcard, ok := obj.(*agentv1alpha1.AgentCard)
 	if !ok {
@@ -53,7 +50,6 @@ func (v *AgentCardValidator) ValidateCreate(ctx context.Context, obj runtime.Obj
 	return v.validateAgentCard(agentcard)
 }
 
-// ValidateUpdate implements webhook validation for update
 func (v *AgentCardValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	agentcard, ok := newObj.(*agentv1alpha1.AgentCard)
 	if !ok {
@@ -65,7 +61,6 @@ func (v *AgentCardValidator) ValidateUpdate(ctx context.Context, oldObj, newObj 
 	return v.validateAgentCard(agentcard)
 }
 
-// ValidateDelete implements webhook validation for delete
 func (v *AgentCardValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	agentcard, ok := obj.(*agentv1alpha1.AgentCard)
 	if !ok {
@@ -74,11 +69,9 @@ func (v *AgentCardValidator) ValidateDelete(ctx context.Context, obj runtime.Obj
 
 	agentcardlog.Info("validate delete", "name", agentcard.Name)
 
-	// Allow deletions
 	return nil, nil
 }
 
-// validateAgentCard validates the AgentCard spec
 func (v *AgentCardValidator) validateAgentCard(agentcard *agentv1alpha1.AgentCard) (admission.Warnings, error) {
 	var warnings admission.Warnings
 
@@ -86,9 +79,6 @@ func (v *AgentCardValidator) validateAgentCard(agentcard *agentv1alpha1.AgentCar
 	if agentcard.Spec.TargetRef == nil {
 		return nil, fmt.Errorf("spec.targetRef is required: specify the workload backing this agent")
 	}
-
-	// Field-level validation for targetRef (e.g., non-empty APIVersion/Kind/Name)
-	// is enforced by the CRD schema (minLength constraints), so it is not repeated here.
 
 	return warnings, nil
 }

@@ -78,9 +78,7 @@ The Kagenti Operator is a Kubernetes controller that implements the [Operator Pa
 - Injects pipeline templates based on mode
 
 #### Signature Providers
-- **Secret Provider**: Reads public keys from Kubernetes Secrets
-- **JWKS Provider**: Fetches public keys from a JWKS endpoint (RFC 7517)
-- **NoOp Provider**: Default when signature verification is disabled
+- **X5CProvider**: Validates `x5c` certificate chains against the SPIRE X.509 trust bundle and verifies JWS signatures using the leaf public key
 
 ---
 
@@ -139,6 +137,11 @@ graph TB
         Deployment -->|Creates| Pod
         Pod -->|Uses image from| Registry
         CardController -->|Fetches agent card from| Pod
+    end
+
+    subgraph "Trust Sources"
+        TrustBundle[SPIRE Trust Bundle ConfigMap]
+        SigProvider -->|Validates x5c chain| TrustBundle
     end
 
     SyncController -->|Watches| Deployment
@@ -224,17 +227,28 @@ The NetworkPolicy Controller enforces network isolation based on signature verif
 
 The operator verifies JWS signatures embedded in agent cards per A2A spec section 8.4:
 
-1. Decode JWS protected header (extract `alg`, `kid`, `spiffe_id`)
-2. Validate the algorithm (reject `none`, verify key type matches)
-3. Create canonical JSON payload (sorted keys, no whitespace, `signatures` field excluded)
-4. Reconstruct signing input: `BASE64URL(protected) || '.' || BASE64URL(canonical_payload)`
-5. Verify the cryptographic signature against the public key
+1. Extract `x5c` certificate chain from JWS protected header
+2. Validate the chain against the SPIRE X.509 trust bundle
+3. Extract the SPIFFE ID from the leaf certificate's SAN URI
+4. Extract the leaf public key and verify the JWS signature (reject `none`, verify key type matches `alg`)
+5. Create canonical JSON payload (sorted keys, no whitespace, `signatures` field excluded)
+6. Reconstruct signing input: `BASE64URL(protected) || '.' || BASE64URL(canonical_payload)`
+7. Verify the cryptographic signature against the leaf public key
 
 Supported algorithms: RS256, RS384, RS512, ES256, ES384, ES512.
 
 ### Identity Binding
 
 When `spec.identityBinding` is configured on an AgentCard:
+
+1. The SPIFFE ID is extracted from the leaf certificate's SAN URI (proven by the x5c chain, not self-asserted)
+2. The SPIFFE ID's trust domain is validated against the configured trust domain (`spec.identityBinding.trustDomain` or `--spire-trust-domain`)
+3. Both signature AND binding must pass for the `signature-verified=true` label
+4. NetworkPolicy enforcement uses this label for traffic control
+
+---
+
+## AgentBuild Pipeline Architecture
 
 ```
 ConfigMap (step-<name>)
@@ -486,7 +500,7 @@ The operator exposes metrics via Prometheus:
 
 - [API Reference](./api-reference.md) — CRD specifications
 - [Dynamic Agent Discovery](./dynamic-agent-discovery.md) — AgentCard discovery system
-- [Signature Verification](./a2a-signature-verification.md) — JWS signature setup guide
-- [Identity Binding](./identity-binding-quickstart.md) — SPIFFE identity binding guide
+- [Signature Verification](./agentcard-signature-verification.md) — JWS signature setup guide
+- [Identity Binding](./agentcard-identity-binding.md) — SPIFFE identity binding guide
 - [Developer Guide](./dev.md) — Contributing to the operator
 - [Getting Started](../GETTING_STARTED.md) — Tutorials and examples

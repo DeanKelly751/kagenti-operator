@@ -444,10 +444,12 @@ The `AgentCard` Custom Resource stores agent metadata for dynamic discovery and 
 
 #### IdentityBinding
 
+Configures workload identity binding for an AgentCard. The SPIFFE ID is extracted from the leaf certificate's SAN URI in the `x5c` chain during signature verification.
+
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `allowedSpiffeIDs` | []string | Yes | Allowlist of SPIFFE IDs permitted to bind to this agent |
-| `strict` | boolean | No | Enable enforcement mode (default: false, audit-only) |
+| `trustDomain` | string | No | Overrides the operator-level `--spire-trust-domain` for this AgentCard. If empty, the operator flag value is used. |
+| `strict` | boolean | No | Enables enforcement mode: binding failures trigger network isolation. When false (default), results are recorded in status only (audit mode). |
 
 ### Status Fields
 
@@ -524,7 +526,7 @@ Represents the A2A agent card structure based on the [A2A specification](https:/
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `protected` | string | Base64url-encoded JWS protected header (contains `alg`, `kid`, `spiffe_id`) |
+| `protected` | string | Base64url-encoded JWS protected header (contains `alg`, `kid`, `typ`, `x5c`) |
 | `signature` | string | Base64url-encoded JWS signature value |
 | `header` | object | Optional unprotected JWS header parameters (e.g., `timestamp`) |
 
@@ -574,6 +576,24 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: weather-agent
+```
+
+#### AgentCard with Identity Binding
+
+```yaml
+apiVersion: agent.kagenti.dev/v1alpha1
+kind: AgentCard
+metadata:
+  name: weather-agent-card
+  namespace: default
+spec:
+  syncPeriod: "30s"
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: weather-agent
+  identityBinding:
+    strict: true
 ```
 
 The AgentCard can also be automatically created by the operator when agent labels are present on the Deployment.
@@ -735,8 +755,8 @@ For Deployments and StatefulSets to be automatically discovered by the operator,
 ## Additional Resources
 
 - [Dynamic Agent Discovery](./dynamic-agent-discovery.md) — How AgentCard enables agent discovery
-- [Signature Verification](./a2a-signature-verification.md) — JWS signature verification setup
-- [Identity Binding](./identity-binding-quickstart.md) — SPIFFE identity binding guide
+- [Signature Verification](./agentcard-signature-verification.md) — JWS signature verification setup
+- [Identity Binding](./agentcard-identity-binding.md) — SPIFFE identity binding guide
 - [Architecture Documentation](./architecture.md) — Operator design and components
 - [Developer Guide](./dev.md) — Contributing and development
 - [Getting Started Tutorial](../GETTING_STARTED.md) — Detailed tutorials and examples

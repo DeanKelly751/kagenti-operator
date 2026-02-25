@@ -22,76 +22,58 @@ import (
 	"time"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// VerificationResult contains the result of signature verification.
+// VerificationResult holds the outcome of a signature verification.
 //
-// Contract:
-//   - The returned error from Provider.VerifySignature signals infrastructure failures
-//     (secret not found, network error, client not initialised). Callers should treat
-//     a non-nil error as a transient/retriable problem.
-//   - Crypto outcomes (wrong key, tampered payload, no signature) are conveyed via
-//     Verified=false + Details. The returned error is nil in these cases.
-//   - When Verified=true, Details carries a human-readable summary of the verification.
+// Error contract: a non-nil error from Provider.VerifySignature indicates an
+// infrastructure failure (retriable). Cryptographic failures set Verified=false
+// with a nil error.
 type VerificationResult struct {
-	Verified bool
-	KeyID    string
-	SpiffeID string // SPIFFE ID extracted from the JWS protected header
-	Details  string
+	Verified     bool
+	KeyID        string
+	SpiffeID     string // from leaf cert SAN URI
+	Details      string
+	LeafNotAfter time.Time // leaf cert expiry
 }
 
-// Provider defines the interface for A2A signature verification.
-// Implementations can support Kubernetes Secrets, JWKS servers, or other methods.
+// Provider verifies A2A AgentCard JWS signatures (spec section 8.4).
 type Provider interface {
-	// VerifySignature verifies AgentCard JWS signatures per A2A spec section 8.4.
-	// Accepts the card data (for canonical payload) and the JWS signatures array.
-	// Returns success if at least one signature verifies.
+	// VerifySignature returns success if at least one signature verifies.
 	VerifySignature(ctx context.Context, cardData *agentv1alpha1.AgentCardData, signatures []agentv1alpha1.AgentCardSignature) (*VerificationResult, error)
-
-	// Name returns the provider name for logging and metrics
 	Name() string
+	// BundleHash returns a hash of the current trust bundle for change detection.
+	BundleHash() string
 }
 
-// NewProvider creates a signature verification provider based on configuration
+type ProviderType string
+
+const (
+	ProviderTypeX5C ProviderType = "x5c"
+)
+
+// Config holds configuration for the signature verification provider.
+type Config struct {
+	Type ProviderType
+
+	TrustBundleConfigMapName   string // ConfigMap name (SPIFFE JSON format)
+	TrustBundleConfigMapNS     string
+	TrustBundleConfigMapKey    string        // default: "bundle.spiffe"
+	TrustBundleRefreshInterval time.Duration // default: 5m
+
+	Client client.Client
+}
+
 func NewProvider(config *Config) (Provider, error) {
 	if config == nil {
 		return nil, fmt.Errorf("provider config cannot be nil")
 	}
 
 	switch config.Type {
-	case ProviderTypeSecret:
-		return NewSecretProvider(config)
-	case ProviderTypeJWKS:
-		return NewJWKSProvider(config)
-	case ProviderTypeNone:
-		return NewNoOpProvider(), nil
+	case ProviderTypeX5C:
+		return NewX5CProvider(config)
 	default:
-		return nil, fmt.Errorf("unknown provider type: %s", config.Type)
+		return nil, fmt.Errorf("unknown provider type: %s (only 'x5c' is supported)", config.Type)
 	}
-}
-
-// ProviderType defines the type of signature verification provider
-type ProviderType string
-
-const (
-	ProviderTypeSecret ProviderType = "secret"
-	ProviderTypeJWKS   ProviderType = "jwks"
-	ProviderTypeNone   ProviderType = "none"
-)
-
-// Config holds configuration for signature verification providers
-type Config struct {
-	Type ProviderType
-
-	// For secret-based provider
-	SecretName      string
-	SecretNamespace string
-	SecretKey       string
-
-	// For JWKS provider
-	JWKSURL      string
-	JWKSCacheTTL time.Duration // How long to cache JWKS keys (default: 5 minutes)
-
-	// Common settings
-	AuditMode bool // If true, log verification failures but don't block
 }

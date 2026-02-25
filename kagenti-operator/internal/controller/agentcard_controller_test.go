@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
@@ -238,7 +239,7 @@ var _ = Describe("AgentCard Controller", func() {
 	})
 })
 
-var _ = Describe("AgentCard Controller - getWorkloadByTargetRef", func() {
+var _ = Describe("AgentCard Controller - getWorkload", func() {
 	const namespace = "default"
 
 	var (
@@ -293,13 +294,11 @@ var _ = Describe("AgentCard Controller - getWorkloadByTargetRef", func() {
 			}
 			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
 
-			By("calling getWorkloadByTargetRef")
-			targetRef := &agentv1alpha1.TargetRef{
-				APIVersion: "apps/v1",
-				Kind:       "Deployment",
-				Name:       deploymentName,
-			}
-			workload, err := reconciler.getWorkloadByTargetRef(ctx, namespace, targetRef)
+			By("calling getWorkload")
+			workload, err := reconciler.getWorkload(ctx, &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+				Spec:       agentv1alpha1.AgentCardSpec{TargetRef: &agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: deploymentName}},
+			})
 
 			By("verifying the Deployment was found")
 			Expect(err).NotTo(HaveOccurred())
@@ -354,13 +353,11 @@ var _ = Describe("AgentCard Controller - getWorkloadByTargetRef", func() {
 				return k8sClient.Status().Update(ctx, deployment)
 			}).Should(Succeed())
 
-			By("calling getWorkloadByTargetRef")
-			targetRef := &agentv1alpha1.TargetRef{
-				APIVersion: "apps/v1",
-				Kind:       "Deployment",
-				Name:       deploymentName,
-			}
-			workload, err := reconciler.getWorkloadByTargetRef(ctx, namespace, targetRef)
+			By("calling getWorkload")
+			workload, err := reconciler.getWorkload(ctx, &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+				Spec:       agentv1alpha1.AgentCardSpec{TargetRef: &agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: deploymentName}},
+			})
 
 			By("verifying readiness is detected")
 			Expect(err).NotTo(HaveOccurred())
@@ -408,13 +405,11 @@ var _ = Describe("AgentCard Controller - getWorkloadByTargetRef", func() {
 			}
 			Expect(k8sClient.Create(ctx, statefulSet)).To(Succeed())
 
-			By("calling getWorkloadByTargetRef")
-			targetRef := &agentv1alpha1.TargetRef{
-				APIVersion: "apps/v1",
-				Kind:       "StatefulSet",
-				Name:       statefulSetName,
-			}
-			workload, err := reconciler.getWorkloadByTargetRef(ctx, namespace, targetRef)
+			By("calling getWorkload")
+			workload, err := reconciler.getWorkload(ctx, &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+				Spec:       agentv1alpha1.AgentCardSpec{TargetRef: &agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "StatefulSet", Name: statefulSetName}},
+			})
 
 			By("verifying the StatefulSet was found")
 			Expect(err).NotTo(HaveOccurred())
@@ -464,13 +459,11 @@ var _ = Describe("AgentCard Controller - getWorkloadByTargetRef", func() {
 				return k8sClient.Status().Update(ctx, statefulSet)
 			}).Should(Succeed())
 
-			By("calling getWorkloadByTargetRef")
-			targetRef := &agentv1alpha1.TargetRef{
-				APIVersion: "apps/v1",
-				Kind:       "StatefulSet",
-				Name:       statefulSetName,
-			}
-			workload, err := reconciler.getWorkloadByTargetRef(ctx, namespace, targetRef)
+			By("calling getWorkload")
+			workload, err := reconciler.getWorkload(ctx, &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+				Spec:       agentv1alpha1.AgentCardSpec{TargetRef: &agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "StatefulSet", Name: statefulSetName}},
+			})
 
 			By("verifying readiness is detected")
 			Expect(err).NotTo(HaveOccurred())
@@ -480,13 +473,10 @@ var _ = Describe("AgentCard Controller - getWorkloadByTargetRef", func() {
 
 	Context("When targetRef references non-existent workload", func() {
 		It("should return ErrWorkloadNotFound for non-existent Deployment", func() {
-			targetRef := &agentv1alpha1.TargetRef{
-				APIVersion: "apps/v1",
-				Kind:       "Deployment",
-				Name:       "nonexistent-deployment",
-			}
-
-			workload, err := reconciler.getWorkloadByTargetRef(ctx, namespace, targetRef)
+			workload, err := reconciler.getWorkload(ctx, &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+				Spec:       agentv1alpha1.AgentCardSpec{TargetRef: &agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "nonexistent-deployment"}},
+			})
 
 			Expect(err).To(HaveOccurred())
 			Expect(errors.Is(err, ErrWorkloadNotFound)).To(BeTrue())
@@ -494,13 +484,10 @@ var _ = Describe("AgentCard Controller - getWorkloadByTargetRef", func() {
 		})
 
 		It("should return ErrWorkloadNotFound for non-existent StatefulSet", func() {
-			targetRef := &agentv1alpha1.TargetRef{
-				APIVersion: "apps/v1",
-				Kind:       "StatefulSet",
-				Name:       "nonexistent-statefulset",
-			}
-
-			workload, err := reconciler.getWorkloadByTargetRef(ctx, namespace, targetRef)
+			workload, err := reconciler.getWorkload(ctx, &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+				Spec:       agentv1alpha1.AgentCardSpec{TargetRef: &agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "StatefulSet", Name: "nonexistent-statefulset"}},
+			})
 
 			Expect(err).To(HaveOccurred())
 			Expect(errors.Is(err, ErrWorkloadNotFound)).To(BeTrue())
@@ -547,13 +534,11 @@ var _ = Describe("AgentCard Controller - getWorkloadByTargetRef", func() {
 			}
 			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
 
-			By("calling getWorkloadByTargetRef")
-			targetRef := &agentv1alpha1.TargetRef{
-				APIVersion: "apps/v1",
-				Kind:       "Deployment",
-				Name:       deploymentName,
-			}
-			workload, err := reconciler.getWorkloadByTargetRef(ctx, namespace, targetRef)
+			By("calling getWorkload")
+			workload, err := reconciler.getWorkload(ctx, &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+				Spec:       agentv1alpha1.AgentCardSpec{TargetRef: &agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: deploymentName}},
+			})
 
 			By("verifying ErrNotAgentWorkload is returned")
 			Expect(err).To(HaveOccurred())
@@ -697,18 +682,9 @@ var _ = Describe("getWorkloadProtocol", func() {
 		Expect(protocol).To(BeEmpty())
 	})
 
-	It("should return empty string when labels map is nil", func() {
-		protocol := getWorkloadProtocol(nil)
-
-		Expect(protocol).To(BeEmpty())
-	})
-
-	It("should return empty string when labels map is empty", func() {
-		labels := map[string]string{}
-
-		protocol := getWorkloadProtocol(labels)
-
-		Expect(protocol).To(BeEmpty())
+	It("should return empty string when labels map is nil or empty", func() {
+		Expect(getWorkloadProtocol(nil)).To(BeEmpty())
+		Expect(getWorkloadProtocol(map[string]string{})).To(BeEmpty())
 	})
 
 	It("should use new label even when legacy label has different value", func() {
@@ -761,6 +737,184 @@ var _ = Describe("getServicePort", func() {
 			Spec:       corev1.ServiceSpec{},
 		}
 		Expect(reconciler.getServicePort(service)).To(Equal(int32(8000)))
+	})
+})
+
+var _ = Describe("ignoreOperatorLabelUpdatePredicate", func() {
+	pred := ignoreOperatorLabelUpdatePredicate()
+
+	It("should allow updates where no operator annotations changed", func() {
+		oldDeploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-deploy",
+				Namespace: "default",
+				Annotations: map[string]string{
+					AnnotationVerifiedStatePrefix + "card-a": "true",
+				},
+			},
+		}
+		newDeploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-deploy",
+				Namespace: "default",
+				Annotations: map[string]string{
+					AnnotationVerifiedStatePrefix + "card-a": "true",
+				},
+			},
+		}
+		result := pred.Update(event.UpdateEvent{ObjectOld: oldDeploy, ObjectNew: newDeploy})
+		Expect(result).To(BeTrue(), "should allow event when no operator annotations changed")
+	})
+
+	It("should suppress updates where a per-card annotation was added", func() {
+		oldDeploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-deploy",
+				Namespace: "default",
+			},
+		}
+		newDeploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-deploy",
+				Namespace: "default",
+				Annotations: map[string]string{
+					AnnotationVerifiedStatePrefix + "card-a": "true",
+				},
+			},
+		}
+		result := pred.Update(event.UpdateEvent{ObjectOld: oldDeploy, ObjectNew: newDeploy})
+		Expect(result).To(BeFalse(), "should suppress event when per-card annotation added")
+	})
+
+	It("should suppress updates where a per-card annotation value changed", func() {
+		oldDeploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-deploy",
+				Namespace: "default",
+				Annotations: map[string]string{
+					AnnotationVerifiedStatePrefix + "card-a": "true",
+				},
+			},
+		}
+		newDeploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-deploy",
+				Namespace: "default",
+				Annotations: map[string]string{
+					AnnotationVerifiedStatePrefix + "card-a": "false",
+				},
+			},
+		}
+		result := pred.Update(event.UpdateEvent{ObjectOld: oldDeploy, ObjectNew: newDeploy})
+		Expect(result).To(BeFalse(), "should suppress event when per-card annotation toggled")
+	})
+
+	It("should suppress updates where a per-card annotation was removed", func() {
+		oldDeploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-deploy",
+				Namespace: "default",
+				Annotations: map[string]string{
+					AnnotationVerifiedStatePrefix + "card-a": "true",
+				},
+			},
+		}
+		newDeploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-deploy",
+				Namespace: "default",
+			},
+		}
+		result := pred.Update(event.UpdateEvent{ObjectOld: oldDeploy, ObjectNew: newDeploy})
+		Expect(result).To(BeFalse(), "should suppress event when per-card annotation removed")
+	})
+
+	It("should suppress updates where the legacy annotation changed", func() {
+		oldDeploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-deploy",
+				Namespace: "default",
+			},
+		}
+		newDeploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "test-deploy",
+				Namespace:   "default",
+				Annotations: map[string]string{AnnotationLastVerifiedState: "true"},
+			},
+		}
+		result := pred.Update(event.UpdateEvent{ObjectOld: oldDeploy, ObjectNew: newDeploy})
+		Expect(result).To(BeFalse(), "should suppress event when legacy annotation changed")
+	})
+
+	It("should allow Create events", func() {
+		deploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deploy", Namespace: "default"},
+		}
+		result := pred.Create(event.CreateEvent{Object: deploy})
+		Expect(result).To(BeTrue(), "Create events should always pass through")
+	})
+
+	It("should allow Delete events", func() {
+		deploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-deploy", Namespace: "default"},
+		}
+		result := pred.Delete(event.DeleteEvent{Object: deploy})
+		Expect(result).To(BeTrue(), "Delete events should always pass through")
+	})
+})
+
+var _ = Describe("aggregateVerifiedState", func() {
+	reconciler := &AgentCardReconciler{}
+
+	It("should return true when all per-card annotations are true", func() {
+		annotations := map[string]string{
+			AnnotationVerifiedStatePrefix + "card-a": "true",
+			AnnotationVerifiedStatePrefix + "card-b": "true",
+			"unrelated-annotation":                   "whatever",
+		}
+		Expect(reconciler.aggregateVerifiedState(annotations)).To(BeTrue())
+	})
+
+	It("should return false when any per-card annotation is false", func() {
+		annotations := map[string]string{
+			AnnotationVerifiedStatePrefix + "card-a": "true",
+			AnnotationVerifiedStatePrefix + "card-b": "false",
+		}
+		Expect(reconciler.aggregateVerifiedState(annotations)).To(BeFalse())
+	})
+
+	It("should return false when there are no per-card annotations", func() {
+		annotations := map[string]string{
+			"unrelated": "value",
+		}
+		Expect(reconciler.aggregateVerifiedState(annotations)).To(BeFalse())
+	})
+
+	It("should return false for nil annotations", func() {
+		Expect(reconciler.aggregateVerifiedState(nil)).To(BeFalse())
+	})
+
+	It("should return true for a single card with true", func() {
+		annotations := map[string]string{
+			AnnotationVerifiedStatePrefix + "only-card": "true",
+		}
+		Expect(reconciler.aggregateVerifiedState(annotations)).To(BeTrue())
+	})
+
+	It("should return false for a single card with false", func() {
+		annotations := map[string]string{
+			AnnotationVerifiedStatePrefix + "only-card": "false",
+		}
+		Expect(reconciler.aggregateVerifiedState(annotations)).To(BeFalse())
+	})
+
+	It("should ignore the legacy annotation", func() {
+		annotations := map[string]string{
+			AnnotationLastVerifiedState:                 "true",
+			AnnotationVerifiedStatePrefix + "only-card": "false",
+		}
+		Expect(reconciler.aggregateVerifiedState(annotations)).To(BeFalse())
 	})
 })
 

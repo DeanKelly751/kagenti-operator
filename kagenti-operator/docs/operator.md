@@ -10,10 +10,12 @@ The `AgentBuild` CR defines the specifications for building and publishing a con
 
 * Follow a Deployment-first model where users create standard Kubernetes Deployments/StatefulSets for their agents
 * Provide dynamic agent discovery through `AgentCard` CRs with `targetRef`-based workload binding
+* Provide cryptographic signature verification for agent cards (JWS with RSA/ECDSA via x5c certificate chains)
+* Support SPIFFE-based workload identity binding with trust-domain validation
+* Enforce network isolation via Kubernetes NetworkPolicies based on verification status
 * Automate the container image building and publishing process for AI agents triggered by `AgentBuild` CRs
 * Integrate with Tekton Pipelines for the image building workflow, consisting of pull, build, and push tasks
 * Securely manage GitHub repository access using a referenced Kubernetes Secret
-* Support A2A agent card signature verification and identity binding
 * Support cluster-wide as well as namespaced scope deployment
 
 ## Deployment Modes
@@ -95,12 +97,10 @@ Watches AgentCard resources when `--enforce-network-policies` is enabled. Create
 ## Security Features
 
 ### Signature Verification
-The operator verifies JWS signatures embedded in agent cards per A2A spec section 8.4. Two providers are supported:
-- **Secret Provider**: Reads public keys from Kubernetes Secrets
-- **JWKS Provider**: Fetches public keys from a JWKS endpoint (RFC 7517)
+The operator verifies JWS signatures embedded in agent cards per A2A spec section 8.4 using the **X5CProvider**. The `x5c` certificate chain in the JWS protected header is validated against the SPIRE X.509 trust bundle, and the leaf certificate's public key is used for signature verification.
 
 ### Identity Binding
-AgentCards can be configured with `spec.identityBinding.allowedSpiffeIDs` to restrict which workload identities are permitted. The SPIFFE ID is extracted from the JWS protected header during signature verification.
+AgentCards are bound to workload identities via trust-domain validation. The SPIFFE ID is extracted from the leaf certificate's SAN URI (cryptographically proven by the x5c chain) and validated against the configured trust domain.
 
 ### Network Isolation
 When `--enforce-network-policies` is enabled, the NetworkPolicy controller creates:

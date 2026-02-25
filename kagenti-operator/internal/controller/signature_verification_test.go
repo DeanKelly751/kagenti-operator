@@ -51,7 +51,6 @@ var _ = Describe("Signature Verification", func() {
 			deploymentName = "sig-valid-agent"
 			agentCardName  = "sig-valid-card"
 			namespace      = "default"
-			secretName     = "sig-valid-keys"
 		)
 
 		var (
@@ -63,25 +62,7 @@ var _ = Describe("Signature Verification", func() {
 
 		BeforeEach(func() {
 			By("generating an RSA key pair")
-			var err error
-			rsaPrivKey, err = rsa.GenerateKey(rand.Reader, 2048)
-			Expect(err).NotTo(HaveOccurred())
-
-			pubDER, err := x509.MarshalPKIXPublicKey(&rsaPrivKey.PublicKey)
-			Expect(err).NotTo(HaveOccurred())
-			pubKeyPEM = pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
-
-			By("creating the public key Secret")
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      secretName,
-					Namespace: namespace,
-				},
-				Data: map[string][]byte{
-					"my-signing-key": pubKeyPEM,
-				},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			rsaPrivKey, pubKeyPEM = generateTestRSAKeyPair()
 		})
 
 		AfterEach(func() {
@@ -89,7 +70,6 @@ var _ = Describe("Signature Verification", func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should set validSignature=true and SignatureVerified condition for a correctly signed card", func() {
@@ -120,13 +100,7 @@ var _ = Describe("Signature Verification", func() {
 			Expect(k8sClient.Create(ctx, agentCard)).To(Succeed())
 
 			By("configuring a reconciler with signature verification enabled")
-			provider, err := signature.NewSecretProvider(&signature.Config{
-				Type:            signature.ProviderTypeSecret,
-				SecretName:      secretName,
-				SecretNamespace: namespace,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			provider.(*signature.SecretProvider).SetClient(k8sClient)
+			provider := &mockSignatureProvider{pubKeyPEM: pubKeyPEM}
 
 			reconciler := &AgentCardReconciler{
 				Client:             k8sClient,
@@ -138,7 +112,7 @@ var _ = Describe("Signature Verification", func() {
 			}
 
 			// First reconcile adds finalizer
-			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: agentCardName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -181,26 +155,14 @@ var _ = Describe("Signature Verification", func() {
 			deploymentName = "sig-unsigned-agent"
 			agentCardName  = "sig-unsigned-card"
 			namespace      = "default"
-			secretName     = "sig-unsigned-keys"
 		)
 
 		ctx := context.Background()
-
-		BeforeEach(func() {
-			By("creating a public key Secret")
-			_, pubPEM := generateTestRSAKeyPair()
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-				Data:       map[string][]byte{"key": pubPEM},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
-		})
 
 		AfterEach(func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should set validSignature=false for an unsigned card", func() {
@@ -228,13 +190,7 @@ var _ = Describe("Signature Verification", func() {
 				// No Signatures field
 			}
 
-			provider, err := signature.NewSecretProvider(&signature.Config{
-				Type:            signature.ProviderTypeSecret,
-				SecretName:      secretName,
-				SecretNamespace: namespace,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			provider.(*signature.SecretProvider).SetClient(k8sClient)
+			provider := &mockSignatureProvider{}
 
 			reconciler := &AgentCardReconciler{
 				Client:             k8sClient,
@@ -246,7 +202,7 @@ var _ = Describe("Signature Verification", func() {
 			}
 
 			// Reconcile twice (finalizer + verify)
-			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: agentCardName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -279,7 +235,6 @@ var _ = Describe("Signature Verification", func() {
 			deploymentName = "sig-wrongkey-agent"
 			agentCardName  = "sig-wrongkey-card"
 			namespace      = "default"
-			secretName     = "sig-wrongkey-keys"
 		)
 
 		ctx := context.Background()
@@ -288,20 +243,12 @@ var _ = Describe("Signature Verification", func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should set validSignature=false when card is signed with wrong key", func() {
 			By("generating two different key pairs")
 			signingKey, _ := generateTestRSAKeyPair()
 			_, wrongPubPEM := generateTestRSAKeyPair()
-
-			By("creating secret with the wrong public key")
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-				Data:       map[string][]byte{"key-1": wrongPubPEM},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 
 			By("creating Deployment and Service")
 			createDeploymentWithService(ctx, deploymentName, namespace)
@@ -327,14 +274,8 @@ var _ = Describe("Signature Verification", func() {
 			}
 			Expect(k8sClient.Create(ctx, agentCard)).To(Succeed())
 
-			By("reconciling with signature verification")
-			provider, err := signature.NewSecretProvider(&signature.Config{
-				Type:            signature.ProviderTypeSecret,
-				SecretName:      secretName,
-				SecretNamespace: namespace,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			provider.(*signature.SecretProvider).SetClient(k8sClient)
+			By("reconciling with signature verification (wrong key)")
+			provider := &mockSignatureProvider{pubKeyPEM: wrongPubPEM}
 
 			reconciler := &AgentCardReconciler{
 				Client:             k8sClient,
@@ -345,7 +286,7 @@ var _ = Describe("Signature Verification", func() {
 				SignatureAuditMode: false,
 			}
 
-			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: agentCardName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -373,7 +314,6 @@ var _ = Describe("Signature Verification", func() {
 			deploymentName = "sig-audit-agent"
 			agentCardName  = "sig-audit-card"
 			namespace      = "default"
-			secretName     = "sig-audit-keys"
 		)
 
 		ctx := context.Background()
@@ -382,18 +322,10 @@ var _ = Describe("Signature Verification", func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should allow unsigned card in audit mode and set Synced=True", func() {
 			_, pubPEM := generateTestRSAKeyPair()
-
-			By("creating secret")
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-				Data:       map[string][]byte{"key": pubPEM},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 
 			By("creating Deployment and Service")
 			createDeploymentWithService(ctx, deploymentName, namespace)
@@ -419,14 +351,7 @@ var _ = Describe("Signature Verification", func() {
 			Expect(k8sClient.Create(ctx, agentCard)).To(Succeed())
 
 			By("reconciling with audit mode enabled")
-			provider, err := signature.NewSecretProvider(&signature.Config{
-				Type:            signature.ProviderTypeSecret,
-				SecretName:      secretName,
-				SecretNamespace: namespace,
-				AuditMode:       true,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			provider.(*signature.SecretProvider).SetClient(k8sClient)
+			provider := &mockSignatureProvider{pubKeyPEM: pubPEM}
 
 			reconciler := &AgentCardReconciler{
 				Client:             k8sClient,
@@ -437,7 +362,7 @@ var _ = Describe("Signature Verification", func() {
 				SignatureAuditMode: true,
 			}
 
-			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: agentCardName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -456,13 +381,13 @@ var _ = Describe("Signature Verification", func() {
 				return syncedCond != nil && syncedCond.Status == metav1.ConditionTrue
 			}, timeout, interval).Should(BeTrue())
 
-			By("verifying SignatureVerified condition mentions audit mode")
+			By("verifying SignatureVerified condition is False with audit reason")
 			card := &agentv1alpha1.AgentCard{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: agentCardName, Namespace: namespace}, card)).To(Succeed())
 			sigCond := findCondition(card.Status.Conditions, "SignatureVerified")
 			Expect(sigCond).NotTo(BeNil())
-			// In audit mode, unsigned cards pass via the provider (audit mode returns verified=true)
-			Expect(sigCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(sigCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(sigCond.Reason).To(Equal(ReasonSignatureInvalidAudit))
 		})
 	})
 
@@ -537,7 +462,6 @@ var _ = Describe("Signature Verification", func() {
 			deploymentName = "sig-identity-agent"
 			agentCardName  = "sig-identity-card"
 			namespace      = "default"
-			secretName     = "sig-identity-keys"
 			trustDomain    = "test.local"
 		)
 
@@ -547,32 +471,23 @@ var _ = Describe("Signature Verification", func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should set signatureIdentityMatch=true when both signature and binding pass", func() {
 			By("generating key pair")
 			privKey, pubPEM := generateTestRSAKeyPair()
 
-			By("creating secret")
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-				Data:       map[string][]byte{"key-1": pubPEM},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
-
 			By("creating Deployment and Service")
 			createDeploymentWithService(ctx, deploymentName, namespace)
 
-			By("creating signed card data with SPIFFE ID in JWS protected header")
+			By("creating signed card data")
 			expectedSpiffeID := "spiffe://" + trustDomain + "/ns/" + namespace + "/sa/test-sa"
 			cardData := &agentv1alpha1.AgentCardData{
 				Name:    "Identity Agent",
 				Version: "1.0.0",
 				URL:     "http://localhost:8000",
 			}
-			// Sign with spiffeID embedded in the JWS protected header
-			jwsSig := buildTestJWS(cardData, privKey, "key-1", expectedSpiffeID)
+			jwsSig := buildTestJWS(cardData, privKey, "key-1", "")
 			cardData.Signatures = []agentv1alpha1.AgentCardSignature{jwsSig}
 
 			By("creating AgentCard with both signature verification and identity binding")
@@ -586,20 +501,14 @@ var _ = Describe("Signature Verification", func() {
 						Name:       deploymentName,
 					},
 					IdentityBinding: &agentv1alpha1.IdentityBinding{
-						AllowedSpiffeIDs: []agentv1alpha1.SpiffeID{agentv1alpha1.SpiffeID(expectedSpiffeID)},
+						TrustDomain: trustDomain,
 					},
 				},
 			}
 			Expect(k8sClient.Create(ctx, agentCard)).To(Succeed())
 
 			By("reconciling with both signature and identity binding")
-			provider, err := signature.NewSecretProvider(&signature.Config{
-				Type:            signature.ProviderTypeSecret,
-				SecretName:      secretName,
-				SecretNamespace: namespace,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			provider.(*signature.SecretProvider).SetClient(k8sClient)
+			provider := &mockSignatureProvider{pubKeyPEM: pubPEM, spiffeID: expectedSpiffeID}
 
 			reconciler := &AgentCardReconciler{
 				Client:             k8sClient,
@@ -611,7 +520,7 @@ var _ = Describe("Signature Verification", func() {
 			}
 
 			// First reconcile adds the finalizer and returns early.
-			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: agentCardName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -638,7 +547,6 @@ var _ = Describe("Signature Verification", func() {
 			deploymentName = "sig-label-agent"
 			agentCardName  = "sig-label-card"
 			namespace      = "default"
-			secretName     = "sig-label-keys"
 		)
 
 		ctx := context.Background()
@@ -647,17 +555,11 @@ var _ = Describe("Signature Verification", func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
 		})
 
 		It("should propagate signature-verified=true label to Deployment pod template on valid signature", func() {
-			By("generating key pair and creating secret")
+			By("generating key pair")
 			privKey, pubPEM := generateTestRSAKeyPair()
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-				Data:       map[string][]byte{"key-1": pubPEM},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 
 			By("creating a Deployment directly (not via Agent CRD)")
 			replicas := int32(1)
@@ -741,13 +643,7 @@ var _ = Describe("Signature Verification", func() {
 			Expect(k8sClient.Create(ctx, agentCard)).To(Succeed())
 
 			By("reconciling with signature verification enabled")
-			provider, err := signature.NewSecretProvider(&signature.Config{
-				Type:            signature.ProviderTypeSecret,
-				SecretName:      secretName,
-				SecretNamespace: namespace,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			provider.(*signature.SecretProvider).SetClient(k8sClient)
+			provider := &mockSignatureProvider{pubKeyPEM: pubPEM}
 
 			reconciler := &AgentCardReconciler{
 				Client:             k8sClient,
@@ -759,7 +655,7 @@ var _ = Describe("Signature Verification", func() {
 			}
 
 			// First reconcile adds finalizer
-			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: agentCardName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -778,15 +674,19 @@ var _ = Describe("Signature Verification", func() {
 				}
 				return d.Spec.Template.Labels[LabelSignatureVerified]
 			}, timeout, interval).Should(Equal("true"))
+
+			By("verifying the per-card annotation is set on the Deployment")
+			d := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: namespace}, d)).To(Succeed())
+			Expect(d.Annotations[AnnotationVerifiedStatePrefix+agentCardName]).To(Equal("true"))
 		})
 	})
 
-	Context("Label Propagation — Invalid Signature removes label from Deployment", func() {
+	Context("Label Propagation — Repeated reconciles are idempotent (no loop)", func() {
 		const (
-			deploymentName = "sig-label-rm-agent"
-			agentCardName  = "sig-label-rm-card"
+			deploymentName = "sig-label-idem-agent"
+			agentCardName  = "sig-label-idem-card"
 			namespace      = "default"
-			secretName     = "sig-label-rm-keys"
 		)
 
 		ctx := context.Background()
@@ -795,20 +695,102 @@ var _ = Describe("Signature Verification", func() {
 			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
 			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
 			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
-			cleanupResource(ctx, &corev1.Secret{}, secretName, namespace)
+		})
+
+		It("should not update the Deployment on a second reconcile when label is already correct", func() {
+			By("generating key pair")
+			privKey, pubPEM := generateTestRSAKeyPair()
+
+			By("creating Deployment and Service")
+			createDeploymentWithService(ctx, deploymentName, namespace)
+
+			By("creating signed card data")
+			makeCardData := func() *agentv1alpha1.AgentCardData {
+				cd := &agentv1alpha1.AgentCardData{
+					Name:    "Idempotent Label Agent",
+					Version: "1.0.0",
+					URL:     "http://localhost:8000",
+				}
+				jwsSig := buildTestJWS(cd, privKey, "key-1", "")
+				cd.Signatures = []agentv1alpha1.AgentCardSignature{jwsSig}
+				return cd
+			}
+
+			By("creating AgentCard with targetRef")
+			agentCard := &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{Name: agentCardName, Namespace: namespace},
+				Spec: agentv1alpha1.AgentCardSpec{
+					SyncPeriod: "30s",
+					TargetRef: &agentv1alpha1.TargetRef{
+						APIVersion: "apps/v1",
+						Kind:       "Deployment",
+						Name:       deploymentName,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, agentCard)).To(Succeed())
+
+			provider := &mockSignatureProvider{pubKeyPEM: pubPEM}
+			reconciler := &AgentCardReconciler{
+				Client:             k8sClient,
+				Scheme:             k8sClient.Scheme(),
+				AgentFetcher:       &mockFetcherFunc{fn: func() *agentv1alpha1.AgentCardData { return makeCardData() }},
+				RequireSignature:   true,
+				SignatureProvider:  provider,
+				SignatureAuditMode: false,
+			}
+
+			By("first reconcile: adds finalizer")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: agentCardName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("second reconcile: sets label + annotation")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: agentCardName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("capturing the Deployment resourceVersion after label propagation")
+			d := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: namespace}, d)).To(Succeed())
+			Expect(d.Spec.Template.Labels[LabelSignatureVerified]).To(Equal("true"))
+			Expect(d.Annotations[AnnotationVerifiedStatePrefix+agentCardName]).To(Equal("true"))
+			rvAfterFirstPropagation := d.ResourceVersion
+
+			By("third reconcile: should be a no-op for the Deployment")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: agentCardName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the Deployment was NOT updated (resourceVersion unchanged)")
+			d2 := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: namespace}, d2)).To(Succeed())
+			Expect(d2.ResourceVersion).To(Equal(rvAfterFirstPropagation))
+		})
+	})
+
+	Context("Label Propagation — Invalid Signature removes label from Deployment", func() {
+		const (
+			deploymentName = "sig-label-rm-agent"
+			agentCardName  = "sig-label-rm-card"
+			namespace      = "default"
+		)
+
+		ctx := context.Background()
+
+		AfterEach(func() {
+			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
+			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
+			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
 		})
 
 		It("should remove signature-verified label when signature becomes invalid", func() {
 			By("generating two key pairs — signing key and wrong verification key")
 			signingKey, _ := generateTestRSAKeyPair()
 			_, wrongPubPEM := generateTestRSAKeyPair()
-
-			By("creating secret with the wrong public key")
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-				Data:       map[string][]byte{"key-1": wrongPubPEM},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 
 			By("creating a Deployment with the signature-verified label already set (simulating previous valid state)")
 			replicas := int32(1)
@@ -899,14 +881,8 @@ var _ = Describe("Signature Verification", func() {
 			}
 			Expect(k8sClient.Create(ctx, agentCard)).To(Succeed())
 
-			By("reconciling with signature verification enabled")
-			provider, err := signature.NewSecretProvider(&signature.Config{
-				Type:            signature.ProviderTypeSecret,
-				SecretName:      secretName,
-				SecretNamespace: namespace,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			provider.(*signature.SecretProvider).SetClient(k8sClient)
+			By("reconciling with signature verification enabled (wrong key)")
+			provider := &mockSignatureProvider{pubKeyPEM: wrongPubPEM}
 
 			reconciler := &AgentCardReconciler{
 				Client:             k8sClient,
@@ -918,7 +894,7 @@ var _ = Describe("Signature Verification", func() {
 			}
 
 			// First reconcile adds finalizer
-			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: agentCardName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -938,11 +914,147 @@ var _ = Describe("Signature Verification", func() {
 				return d.Spec.Template.Labels[LabelSignatureVerified]
 			}, timeout, interval).Should(BeEmpty())
 
+			By("verifying the per-card annotation records false")
+			d2 := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: namespace}, d2)).To(Succeed())
+			Expect(d2.Annotations[AnnotationVerifiedStatePrefix+agentCardName]).To(Equal("false"))
+
 			By("verifying validSignature=false")
 			card := &agentv1alpha1.AgentCard{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: agentCardName, Namespace: namespace}, card)).To(Succeed())
 			Expect(card.Status.ValidSignature).NotTo(BeNil())
 			Expect(*card.Status.ValidSignature).To(BeFalse())
+		})
+	})
+
+	Context("Label Propagation — Multi-card AND aggregation", func() {
+		const (
+			deploymentName = "sig-multi-agent"
+			cardNameA      = "sig-multi-card-a"
+			cardNameB      = "sig-multi-card-b"
+			namespace      = "default"
+		)
+
+		ctx := context.Background()
+
+		AfterEach(func() {
+			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, cardNameA, namespace)
+			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, cardNameB, namespace)
+			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
+			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
+		})
+
+		It("should set label=false when one card says false even if the other says true", func() {
+			By("generating key pair")
+			privKey, pubPEM := generateTestRSAKeyPair()
+
+			By("creating Deployment and Service")
+			createDeploymentWithService(ctx, deploymentName, namespace)
+
+			makeSignedCard := func() *agentv1alpha1.AgentCardData {
+				cd := &agentv1alpha1.AgentCardData{
+					Name: "Multi Card Agent", Version: "1.0.0", URL: "http://localhost:8000",
+				}
+				jwsSig := buildTestJWS(cd, privKey, "key-1", "")
+				cd.Signatures = []agentv1alpha1.AgentCardSignature{jwsSig}
+				return cd
+			}
+
+			makeUnsignedCard := func() *agentv1alpha1.AgentCardData {
+				return &agentv1alpha1.AgentCardData{
+					Name: "Multi Card Agent", Version: "1.0.0", URL: "http://localhost:8000",
+				}
+			}
+
+			By("creating two AgentCards targeting the same Deployment")
+			cardA := &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{Name: cardNameA, Namespace: namespace},
+				Spec: agentv1alpha1.AgentCardSpec{
+					SyncPeriod: "30s",
+					TargetRef:  &agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: deploymentName},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cardA)).To(Succeed())
+
+			cardB := &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{Name: cardNameB, Namespace: namespace},
+				Spec: agentv1alpha1.AgentCardSpec{
+					SyncPeriod: "30s",
+					TargetRef:  &agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: deploymentName},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cardB)).To(Succeed())
+
+			By("reconciling card A with valid signature (verified=true)")
+			providerA := &mockSignatureProvider{pubKeyPEM: pubPEM}
+			reconcilerA := &AgentCardReconciler{
+				Client: k8sClient, Scheme: k8sClient.Scheme(),
+				AgentFetcher:       &mockFetcherFunc{fn: makeSignedCard},
+				RequireSignature:   true,
+				SignatureProvider:  providerA,
+				SignatureAuditMode: false,
+			}
+			_, err := reconcilerA.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: cardNameA, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconcilerA.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: cardNameA, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying label is true after card A (only card so far)")
+			d := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: namespace}, d)).To(Succeed())
+			Expect(d.Spec.Template.Labels[LabelSignatureVerified]).To(Equal("true"))
+			Expect(d.Annotations[AnnotationVerifiedStatePrefix+cardNameA]).To(Equal("true"))
+
+			By("reconciling card B with unsigned card (verified=false)")
+			reconcilerB := &AgentCardReconciler{
+				Client: k8sClient, Scheme: k8sClient.Scheme(),
+				AgentFetcher:       &mockFetcherFunc{fn: makeUnsignedCard},
+				RequireSignature:   true,
+				SignatureProvider:  providerA,
+				SignatureAuditMode: false,
+			}
+			_, err = reconcilerB.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: cardNameB, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconcilerB.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: cardNameB, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying label is now empty (card B says false, AND aggregation)")
+			Eventually(func() string {
+				d := &appsv1.Deployment{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: namespace}, d); err != nil {
+					return "error"
+				}
+				return d.Spec.Template.Labels[LabelSignatureVerified]
+			}, timeout, interval).Should(BeEmpty())
+
+			By("verifying per-card annotations are correct")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: namespace}, d)).To(Succeed())
+			Expect(d.Annotations[AnnotationVerifiedStatePrefix+cardNameA]).To(Equal("true"))
+			Expect(d.Annotations[AnnotationVerifiedStatePrefix+cardNameB]).To(Equal("false"))
+
+			By("reconciling card B again with valid signature (both cards now true)")
+			reconcilerB.AgentFetcher = &mockFetcherFunc{fn: makeSignedCard}
+			_, err = reconcilerB.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: cardNameB, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying label is now true (both cards agree)")
+			Eventually(func() string {
+				d := &appsv1.Deployment{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: namespace}, d); err != nil {
+					return ""
+				}
+				return d.Spec.Template.Labels[LabelSignatureVerified]
+			}, timeout, interval).Should(Equal("true"))
 		})
 	})
 })
@@ -958,25 +1070,16 @@ func generateTestRSAKeyPair() (*rsa.PrivateKey, []byte) {
 }
 
 // buildTestJWS creates a JWS signature for integration testing.
-// Builds a protected header with alg, kid, and optional spiffe_id,
-// then signs the canonical card payload per A2A spec JWS format.
-func buildTestJWS(cardData *agentv1alpha1.AgentCardData, privKey *rsa.PrivateKey, kid, spiffeID string) agentv1alpha1.AgentCardSignature {
-	// Build protected header (per A2A spec §8.4.2: alg, typ, kid are MUST)
+func buildTestJWS(cardData *agentv1alpha1.AgentCardData, privKey *rsa.PrivateKey, kid, _ string) agentv1alpha1.AgentCardSignature {
 	header := map[string]string{"alg": "RS256", "typ": "JOSE", "kid": kid}
-	if spiffeID != "" {
-		header["spiffe_id"] = spiffeID
-	}
 	headerJSON, _ := json.Marshal(header)
 	protectedB64 := base64.RawURLEncoding.EncodeToString(headerJSON)
 
-	// Use the production canonical JSON to guarantee test/prod parity
 	payload, _ := signature.CreateCanonicalCardJSON(cardData)
 
-	// Construct signing input
 	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
 	signingInput := []byte(protectedB64 + "." + payloadB64)
 
-	// Sign
 	hash := sha256.Sum256(signingInput)
 	sig, _ := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hash[:])
 
@@ -984,6 +1087,38 @@ func buildTestJWS(cardData *agentv1alpha1.AgentCardData, privKey *rsa.PrivateKey
 		Protected: protectedB64,
 		Signature: base64.RawURLEncoding.EncodeToString(sig),
 	}
+}
+
+// mockFetcherFunc returns a fresh AgentCardData on each call, avoiding the
+// mutation issue where the reconciler overwrites cardData.URL in place.
+type mockFetcherFunc struct {
+	fn func() *agentv1alpha1.AgentCardData
+}
+
+func (m *mockFetcherFunc) Fetch(_ context.Context, _, _ string) (*agentv1alpha1.AgentCardData, error) {
+	return m.fn(), nil
+}
+
+// mockSignatureProvider wraps VerifyJWS with a fixed public key for tests.
+// This replaces the deleted SecretProvider in test code.
+type mockSignatureProvider struct {
+	pubKeyPEM []byte
+	spiffeID  string // returned in result when verification succeeds
+}
+
+func (m *mockSignatureProvider) Name() string       { return "mock" }
+func (m *mockSignatureProvider) BundleHash() string { return "mock-hash" }
+
+func (m *mockSignatureProvider) VerifySignature(ctx context.Context, cardData *agentv1alpha1.AgentCardData,
+	signatures []agentv1alpha1.AgentCardSignature) (*signature.VerificationResult, error) {
+	for i := range signatures {
+		result, err := signature.VerifyJWS(cardData, &signatures[i], m.pubKeyPEM)
+		if err == nil && result != nil && result.Verified {
+			result.SpiffeID = m.spiffeID
+			return result, nil
+		}
+	}
+	return &signature.VerificationResult{Verified: false, Details: "no valid signature"}, nil
 }
 
 // createDeploymentWithService creates a Deployment (with Available status) and a Service for testing.

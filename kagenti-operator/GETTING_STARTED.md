@@ -412,8 +412,8 @@ kubectl run curl-test --image=curlimages/curl:8.1.2 --rm -i --tty -n team1 -- \
 ## Next Steps
 
 - [Dynamic Agent Discovery](docs/dynamic-agent-discovery.md) — How AgentCard enables agent discovery
-- [Signature Verification](docs/a2a-signature-verification.md) — Set up JWS signature verification
-- [Identity Binding](docs/identity-binding-quickstart.md) — Configure SPIFFE identity binding
+- [Signature Verification](docs/agentcard-signature-verification.md) — Set up JWS signature verification
+- [Identity Binding](docs/agentcard-identity-binding.md) — Configure SPIFFE identity binding
 - [Migration Guide](../docs/migration/migrate-agent-crd-to-workloads.md) — Migrating from Agent CRD to workloads
 - [API Reference](docs/api-reference.md) — Full CRD specifications
 
