@@ -755,8 +755,8 @@ For Deployments and StatefulSets to be automatically discovered by the operator,
 ## Additional Resources
 
 - [Dynamic Agent Discovery](./dynamic-agent-discovery.md) — How AgentCard enables agent discovery
-- [Signature Verification](./a2a-signature-verification.md) — JWS signature verification setup
-- [Identity Binding](./identity-binding-quickstart.md) — SPIFFE identity binding guide
+- [Signature Verification](./agentcard-signature-verification.md) — JWS signature verification setup
+- [Identity Binding](./agentcard-identity-binding.md) — SPIFFE identity binding guide
 - [Architecture Documentation](./architecture.md) — Operator design and components
 - [Developer Guide](./dev.md) — Contributing and development
 - [Getting Started Tutorial](../GETTING_STARTED.md) — Detailed tutorials and examples

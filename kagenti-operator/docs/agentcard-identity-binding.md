@@ -81,19 +81,16 @@ spec:
     name: weather-agent
   identityBinding:
     trustDomain: partner.example.com   # Override operator default
-    strict: true                        # Enforce (not just audit)
+    strict: true                        # Reserved for future audit/enforce distinction
 ```
 
 If `trustDomain` is omitted, the operator-level `--spire-trust-domain` is used.
 
-### Strict vs Audit Mode
+### Enforcement Behavior
 
-| `strict` | Behavior |
-|----------|----------|
-| `false` (default) | Binding results recorded in status only; no network enforcement |
-| `true` | Binding failures trigger network isolation via NetworkPolicy |
+When identity binding is configured, binding failures **always** remove the `signature-verified` label from the workload and trigger a restrictive NetworkPolicy (when `--enforce-network-policies=true`). The `strict` field is reserved for future use.
 
-**Production recommendation:** Always set `strict: true`.
+**Production recommendation:** Always set `strict: true` and `--enforce-network-policies=true`.
 
 ---
 
@@ -105,7 +102,7 @@ If `trustDomain` is omitted, the operator-level `--spire-trust-domain` is used.
 | `status.signatureSpiffeId` | SPIFFE ID extracted from the leaf certificate SAN |
 | `status.signatureIdentityMatch` | `true` when both signature AND binding pass |
 | `status.bindingStatus.bound` | `true` if trust domain matches |
-| `status.bindingStatus.reason` | `Bound`, `NotBound`, `WorkloadNotFound` |
+| `status.bindingStatus.reason` | `Bound`, `NotBound` |
 | `conditions[type=SignatureVerified]` | `True`/`False` with reason |
 | `conditions[type=Bound]` | `True`/`False` with binding result |
 
@@ -118,12 +115,12 @@ If `trustDomain` is omitted, the operator-level `--spire-trust-domain` is used.
 | `bindingStatus.bound: false` with trust domain mismatch | SVID issued by a different trust domain | Verify `--spire-trust-domain` matches the SPIRE server's trust domain |
 | `bindingStatus` is nil | No `identityBinding` configured | Add `spec.identityBinding` to the AgentCard |
 | `signatureIdentityMatch: false` | Signature valid but binding failed | Check trust domain configuration |
-| No NetworkPolicy created | `--enable-network-policy` not set | Enable network policy enforcement |
+| No NetworkPolicy created | `--enforce-network-policies` not set | Enable network policy enforcement |
 
 ```bash
 # Debug commands
 kubectl get agentcard <name> -o jsonpath='{.status.bindingStatus}' | jq .
 kubectl get agentcard <name> -o jsonpath='{.status.signatureSpiffeId}'
-kubectl logs -n kagenti-system deployment/kagenti-controller-manager | grep -i binding
+kubectl logs -n agentcard-system deployment/agentcard-operator | grep -i binding
 kubectl get networkpolicy -n <namespace>
 ```

@@ -1,4 +1,4 @@
-# A2A AgentCard Signature Verification
+# AgentCard Signature Verification
 
 **GitHub Issue:** [#116 - Feature: Strict CardSignature Checking](https://github.com/kagenti/kagenti-operator/issues/116)
 
@@ -97,7 +97,7 @@ on every CA rotation.
 
 ### 4. Deploy an agent with the signing init-container
 
-See `config/samples/spire-signing/` for complete manifests. The key elements:
+See `demos/agentcard-spire-signing/` for complete manifests and a runnable demo. The key elements:
 
 ```yaml
 initContainers:
@@ -105,14 +105,16 @@ initContainers:
     image: kagenti/agentcard-signer:latest
     env:
       - name: SPIFFE_ENDPOINT_SOCKET
-        value: unix:///run/spire/sockets/agent.sock
+        value: unix:///run/spire/agent-sockets/spire-agent.sock
       - name: UNSIGNED_CARD_PATH
         value: /etc/agentcard/agent.json
       - name: AGENT_CARD_PATH
         value: /app/.well-known/agent.json
+      - name: SIGN_TIMEOUT
+        value: "30s"
     volumeMounts:
       - name: spire-agent-socket
-        mountPath: /run/spire/sockets
+        mountPath: /run/spire/agent-sockets
         readOnly: true
       - name: unsigned-card
         mountPath: /etc/agentcard
@@ -169,7 +171,7 @@ Expected status:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SPIFFE_ENDPOINT_SOCKET` | `unix:///run/spire/sockets/agent.sock` | SPIRE Workload API socket |
+| `SPIFFE_ENDPOINT_SOCKET` | `unix:///run/spire/agent-sockets/spire-agent.sock` | SPIRE Workload API socket |
 | `UNSIGNED_CARD_PATH` | `/etc/agentcard/agent.json` | Path to read the unsigned card |
 | `AGENT_CARD_PATH` | `/app/.well-known/agent.json` | Path to write the signed card |
 | `SIGN_TIMEOUT` | `30s` | Timeout for SPIRE connection |

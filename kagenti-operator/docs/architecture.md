@@ -500,7 +500,7 @@ The operator exposes metrics via Prometheus:
 
 - [API Reference](./api-reference.md) — CRD specifications
 - [Dynamic Agent Discovery](./dynamic-agent-discovery.md) — AgentCard discovery system
-- [Signature Verification](./a2a-signature-verification.md) — JWS signature setup guide
-- [Identity Binding](./identity-binding-quickstart.md) — SPIFFE identity binding guide
+- [Signature Verification](./agentcard-signature-verification.md) — JWS signature setup guide
+- [Identity Binding](./agentcard-identity-binding.md) — SPIFFE identity binding guide
 - [Developer Guide](./dev.md) — Contributing to the operator
 - [Getting Started](../GETTING_STARTED.md) — Tutorials and examples
