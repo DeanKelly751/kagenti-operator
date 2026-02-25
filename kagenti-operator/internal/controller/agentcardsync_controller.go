@@ -112,7 +112,7 @@ func (r *AgentCardSyncReconciler) shouldSyncWorkload(labels map[string]string) b
 	if labels == nil || labels[LabelAgentType] != LabelValueAgent {
 		return false
 	}
-	return labels[LabelKagentiProtocol] != "" || labels[LabelAgentProtocol] != ""
+	return hasProtocolLabels(labels)
 }
 
 // getAgentCardNameFromWorkload includes the kind suffix to prevent name collisions.

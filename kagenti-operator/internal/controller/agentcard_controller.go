@@ -53,8 +53,13 @@ import (
 const (
 	LabelAgentType       = "kagenti.io/type"
 	LabelAgentProtocol   = "kagenti.io/agent-protocol" // deprecated
-	LabelKagentiProtocol = "kagenti.io/protocol"
+	LabelKagentiProtocol = "kagenti.io/protocol"       // deprecated; use ProtocolLabelPrefix
 	LabelValueAgent      = "agent"
+
+	// ProtocolLabelPrefix is the label key prefix for multi-protocol support.
+	// The existence of a label with this prefix implies support for the named protocol.
+	// For example, protocol.kagenti.io/a2a on a workload means it speaks A2A.
+	ProtocolLabelPrefix = "protocol.kagenti.io/"
 
 	// LabelSignatureVerified is used by NetworkPolicy rules to gate traffic between verified agents.
 	LabelSignatureVerified = "agent.kagenti.dev/signature-verified"
@@ -197,7 +202,7 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	protocol := getWorkloadProtocol(workload.Labels)
 	if protocol == "" {
 		if condErr := r.updateCondition(ctx, agentCard, "Synced", metav1.ConditionFalse, "NoProtocol",
-			"Workload does not have kagenti.io/protocol label"); condErr != nil {
+			"Workload does not have a protocol.kagenti.io/<name> label"); condErr != nil {
 			return ctrl.Result{}, condErr
 		}
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
@@ -437,20 +442,63 @@ func hasReadyCondition(obj *unstructured.Unstructured) bool {
 	return false
 }
 
-// getWorkloadProtocol returns the protocol label, preferring the new key over the deprecated one.
-func getWorkloadProtocol(labels map[string]string) string {
+// getWorkloadProtocols returns all protocols declared on a workload via the
+// protocol.kagenti.io/<name> label prefix. Falls back to the deprecated
+// kagenti.io/protocol and kagenti.io/agent-protocol single-value labels.
+func getWorkloadProtocols(labels map[string]string) []string {
 	if labels == nil {
-		return ""
+		return nil
 	}
+
+	var protocols []string
+	for k := range labels {
+		if strings.HasPrefix(k, ProtocolLabelPrefix) {
+			name := strings.TrimPrefix(k, ProtocolLabelPrefix)
+			if name != "" {
+				protocols = append(protocols, name)
+			}
+		}
+	}
+	if len(protocols) > 0 {
+		return protocols
+	}
+
+	// Fall back to deprecated single-value labels.
 	if protocol := labels[LabelKagentiProtocol]; protocol != "" {
-		return protocol
+		agentCardLogger.V(1).Info("Deprecated label kagenti.io/protocol in use; migrate to protocol.kagenti.io/<name>",
+			"protocol", protocol)
+		return []string{protocol}
 	}
 	if protocol := labels[LabelAgentProtocol]; protocol != "" {
-		agentCardLogger.V(1).Info("Deprecated label kagenti.io/agent-protocol in use; migrate to kagenti.io/protocol",
+		agentCardLogger.V(1).Info("Deprecated label kagenti.io/agent-protocol in use; migrate to protocol.kagenti.io/<name>",
 			"protocol", protocol)
-		return protocol
+		return []string{protocol}
 	}
-	return ""
+	return nil
+}
+
+// getWorkloadProtocol returns the first declared protocol for a workload.
+// Prefer getWorkloadProtocols when the full set of protocols is needed.
+func getWorkloadProtocol(labels map[string]string) string {
+	protocols := getWorkloadProtocols(labels)
+	if len(protocols) == 0 {
+		return ""
+	}
+	return protocols[0]
+}
+
+// hasProtocolLabels reports whether any protocol label is present on the workload,
+// using either the new prefix or the deprecated single-value labels.
+func hasProtocolLabels(labels map[string]string) bool {
+	if labels == nil {
+		return false
+	}
+	for k := range labels {
+		if strings.HasPrefix(k, ProtocolLabelPrefix) {
+			return true
+		}
+	}
+	return labels[LabelKagentiProtocol] != "" || labels[LabelAgentProtocol] != ""
 }
 
 func (r *AgentCardReconciler) getService(ctx context.Context, namespace, name string) (*corev1.Service, error) {

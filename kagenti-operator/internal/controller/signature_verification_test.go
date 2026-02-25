@@ -568,9 +568,9 @@ var _ = Describe("Signature Verification", func() {
 					Name:      deploymentName,
 					Namespace: namespace,
 					Labels: map[string]string{
-						"app":                deploymentName,
-						LabelAgentType:       LabelValueAgent,
-						LabelKagentiProtocol: "a2a",
+						"app":                       deploymentName,
+						LabelAgentType:              LabelValueAgent,
+						ProtocolLabelPrefix + "a2a": "",
 					},
 				},
 				Spec: appsv1.DeploymentSpec{
@@ -799,9 +799,9 @@ var _ = Describe("Signature Verification", func() {
 					Name:      deploymentName,
 					Namespace: namespace,
 					Labels: map[string]string{
-						"app":                deploymentName,
-						LabelAgentType:       LabelValueAgent,
-						LabelKagentiProtocol: "a2a",
+						"app":                       deploymentName,
+						LabelAgentType:              LabelValueAgent,
+						ProtocolLabelPrefix + "a2a": "",
 					},
 				},
 				Spec: appsv1.DeploymentSpec{
@@ -1124,9 +1124,9 @@ func (m *mockSignatureProvider) VerifySignature(ctx context.Context, cardData *a
 // createDeploymentWithService creates a Deployment (with Available status) and a Service for testing.
 func createDeploymentWithService(ctx context.Context, name, namespace string) {
 	labels := map[string]string{
-		"app":                name,
-		LabelAgentType:       LabelValueAgent,
-		LabelKagentiProtocol: "a2a",
+		"app":                       name,
+		LabelAgentType:              LabelValueAgent,
+		ProtocolLabelPrefix + "a2a": "",
 	}
 	replicas := int32(1)
 	deployment := &appsv1.Deployment{
