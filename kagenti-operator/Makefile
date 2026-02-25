@@ -150,6 +150,17 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default > dist/install.yaml
 
+SIGNER_IMG ?= kagenti/agentcard-signer:latest
+KIND_CLUSTER_NAME ?= $(CLUSTER)
+
+.PHONY: build-signer
+build-signer: ## Build the agentcard-signer init-container image.
+	$(CONTAINER_TOOL) build -t $(SIGNER_IMG) -f cmd/agentcard-signer/Dockerfile .
+
+.PHONY: load-signer-image
+load-signer-image: ## Load the agentcard-signer image into Kind.
+	kind load docker-image $(SIGNER_IMG) --name $(KIND_CLUSTER_NAME)
+
 ##@ Deployment
 
 ifndef ignore-not-found
