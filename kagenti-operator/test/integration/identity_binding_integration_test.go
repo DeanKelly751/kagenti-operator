@@ -328,9 +328,9 @@ func createTestAgentCard(t *testing.T, ctx context.Context, name, deploymentName
 
 func createTestDeployment(t *testing.T, ctx context.Context, name, saName string, replicas int32) *appsv1.Deployment {
 	labels := map[string]string{
-		"app.kubernetes.io/name": name,
-		"kagenti.io/type":        "agent",
-		"kagenti.io/protocol":    "a2a",
+		"app.kubernetes.io/name":  name,
+		"kagenti.io/type":         "agent",
+		"protocol.kagenti.io/a2a": "",
 	}
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{

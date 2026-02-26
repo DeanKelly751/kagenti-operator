@@ -69,9 +69,9 @@ var _ = Describe("AgentCard Controller", func() {
 					Name:      deploymentName,
 					Namespace: namespace,
 					Labels: map[string]string{
-						"app.kubernetes.io/name": deploymentName,
-						LabelAgentType:           LabelValueAgent,
-						LabelAgentProtocol:       "a2a",
+						"app.kubernetes.io/name":    deploymentName,
+						LabelAgentType:              LabelValueAgent,
+						ProtocolLabelPrefix + "a2a": "",
 					},
 				},
 				Spec: appsv1.DeploymentSpec{
@@ -84,9 +84,9 @@ var _ = Describe("AgentCard Controller", func() {
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{
-								"app.kubernetes.io/name": deploymentName,
-								LabelAgentType:           LabelValueAgent,
-								LabelAgentProtocol:       "a2a",
+								"app.kubernetes.io/name":    deploymentName,
+								LabelAgentType:              LabelValueAgent,
+								ProtocolLabelPrefix + "a2a": "",
 							},
 						},
 						Spec: corev1.PodSpec{
@@ -272,8 +272,8 @@ var _ = Describe("AgentCard Controller - getWorkload", func() {
 					Name:      deploymentName,
 					Namespace: namespace,
 					Labels: map[string]string{
-						LabelAgentType:       LabelValueAgent,
-						LabelKagentiProtocol: "a2a",
+						LabelAgentType:              LabelValueAgent,
+						ProtocolLabelPrefix + "a2a": "",
 					},
 				},
 				Spec: appsv1.DeploymentSpec{
@@ -317,8 +317,8 @@ var _ = Describe("AgentCard Controller - getWorkload", func() {
 					Name:      deploymentName,
 					Namespace: namespace,
 					Labels: map[string]string{
-						LabelAgentType:       LabelValueAgent,
-						LabelKagentiProtocol: "a2a",
+						LabelAgentType:              LabelValueAgent,
+						ProtocolLabelPrefix + "a2a": "",
 					},
 				},
 				Spec: appsv1.DeploymentSpec{
@@ -382,8 +382,8 @@ var _ = Describe("AgentCard Controller - getWorkload", func() {
 					Name:      statefulSetName,
 					Namespace: namespace,
 					Labels: map[string]string{
-						LabelAgentType:       LabelValueAgent,
-						LabelKagentiProtocol: "a2a",
+						LabelAgentType:              LabelValueAgent,
+						ProtocolLabelPrefix + "a2a": "",
 					},
 				},
 				Spec: appsv1.StatefulSetSpec{
@@ -426,8 +426,8 @@ var _ = Describe("AgentCard Controller - getWorkload", func() {
 					Name:      statefulSetName,
 					Namespace: namespace,
 					Labels: map[string]string{
-						LabelAgentType:       LabelValueAgent,
-						LabelKagentiProtocol: "a2a",
+						LabelAgentType:              LabelValueAgent,
+						ProtocolLabelPrefix + "a2a": "",
 					},
 				},
 				Spec: appsv1.StatefulSetSpec{
@@ -581,9 +581,9 @@ var _ = Describe("AgentCard Controller - getWorkload orchestration", func() {
 					Name:      deploymentName,
 					Namespace: namespace,
 					Labels: map[string]string{
-						"app.kubernetes.io/name": deploymentName,
-						LabelAgentType:           LabelValueAgent,
-						LabelKagentiProtocol:     "a2a",
+						"app.kubernetes.io/name":    deploymentName,
+						LabelAgentType:              LabelValueAgent,
+						ProtocolLabelPrefix + "a2a": "",
 					},
 				},
 				Spec: appsv1.DeploymentSpec{
@@ -651,10 +651,9 @@ var _ = Describe("AgentCard Controller - getWorkload orchestration", func() {
 })
 
 var _ = Describe("getWorkloadProtocol", func() {
-	It("should return new label value when both labels are present", func() {
+	It("should return protocol from prefix label", func() {
 		labels := map[string]string{
-			LabelKagentiProtocol: "a2a",       // New label
-			LabelAgentProtocol:   "old-value", // Legacy label
+			ProtocolLabelPrefix + "a2a": "",
 		}
 
 		protocol := getWorkloadProtocol(labels)
@@ -662,9 +661,30 @@ var _ = Describe("getWorkloadProtocol", func() {
 		Expect(protocol).To(Equal("a2a"))
 	})
 
-	It("should fall back to legacy label when new label is absent", func() {
+	It("should prefer prefix labels over deprecated single-value labels", func() {
 		labels := map[string]string{
-			LabelAgentProtocol: "a2a", // Only legacy label
+			ProtocolLabelPrefix + "mcp": "",
+			LabelKagentiProtocol:        "a2a",
+		}
+
+		protocol := getWorkloadProtocol(labels)
+
+		Expect(protocol).To(Equal("mcp"))
+	})
+
+	It("should fall back to deprecated kagenti.io/protocol label", func() {
+		labels := map[string]string{
+			LabelKagentiProtocol: "a2a",
+		}
+
+		protocol := getWorkloadProtocol(labels)
+
+		Expect(protocol).To(Equal("a2a"))
+	})
+
+	It("should fall back to deprecated kagenti.io/agent-protocol label", func() {
+		labels := map[string]string{
+			LabelAgentProtocol: "a2a",
 		}
 
 		protocol := getWorkloadProtocol(labels)
@@ -686,16 +706,96 @@ var _ = Describe("getWorkloadProtocol", func() {
 		Expect(getWorkloadProtocol(nil)).To(BeEmpty())
 		Expect(getWorkloadProtocol(map[string]string{})).To(BeEmpty())
 	})
+})
 
-	It("should use new label even when legacy label has different value", func() {
+var _ = Describe("getWorkloadProtocols", func() {
+	It("should return all protocols from prefix labels", func() {
 		labels := map[string]string{
-			LabelKagentiProtocol: "mcp",
-			LabelAgentProtocol:   "a2a",
+			ProtocolLabelPrefix + "a2a": "",
+			ProtocolLabelPrefix + "mcp": "",
 		}
 
-		protocol := getWorkloadProtocol(labels)
+		protocols := getWorkloadProtocols(labels)
 
-		Expect(protocol).To(Equal("mcp"))
+		Expect(protocols).To(ConsistOf("a2a", "mcp"))
+	})
+
+	It("should ignore prefix label with empty name", func() {
+		labels := map[string]string{
+			ProtocolLabelPrefix: "", // just the prefix, no protocol name
+		}
+
+		protocols := getWorkloadProtocols(labels)
+
+		Expect(protocols).To(BeEmpty())
+	})
+
+	It("should return nil when no protocol labels are present", func() {
+		labels := map[string]string{
+			"some-other-label": "value",
+		}
+
+		protocols := getWorkloadProtocols(labels)
+
+		Expect(protocols).To(BeNil())
+	})
+
+	It("should return nil for nil labels", func() {
+		Expect(getWorkloadProtocols(nil)).To(BeNil())
+	})
+
+	It("should fall back to deprecated kagenti.io/protocol label", func() {
+		labels := map[string]string{
+			LabelKagentiProtocol: "a2a",
+		}
+
+		protocols := getWorkloadProtocols(labels)
+
+		Expect(protocols).To(Equal([]string{"a2a"}))
+	})
+
+	It("should fall back to deprecated kagenti.io/agent-protocol label", func() {
+		labels := map[string]string{
+			LabelAgentProtocol: "a2a",
+		}
+
+		protocols := getWorkloadProtocols(labels)
+
+		Expect(protocols).To(Equal([]string{"a2a"}))
+	})
+})
+
+var _ = Describe("hasProtocolLabels", func() {
+	It("should return true for prefix labels", func() {
+		labels := map[string]string{
+			ProtocolLabelPrefix + "a2a": "",
+		}
+		Expect(hasProtocolLabels(labels)).To(BeTrue())
+	})
+
+	It("should return true for deprecated kagenti.io/protocol", func() {
+		labels := map[string]string{
+			LabelKagentiProtocol: "a2a",
+		}
+		Expect(hasProtocolLabels(labels)).To(BeTrue())
+	})
+
+	It("should return true for deprecated kagenti.io/agent-protocol", func() {
+		labels := map[string]string{
+			LabelAgentProtocol: "a2a",
+		}
+		Expect(hasProtocolLabels(labels)).To(BeTrue())
+	})
+
+	It("should return false when no protocol labels present", func() {
+		labels := map[string]string{
+			"some-label": "value",
+		}
+		Expect(hasProtocolLabels(labels)).To(BeFalse())
+	})
+
+	It("should return false for nil labels", func() {
+		Expect(hasProtocolLabels(nil)).To(BeFalse())
 	})
 })
 

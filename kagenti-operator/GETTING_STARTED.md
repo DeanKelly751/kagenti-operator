@@ -68,7 +68,7 @@ metadata:
   labels:
     app.kubernetes.io/name: weather-agent
     kagenti.io/type: agent
-    kagenti.io/protocol: a2a
+    protocol.kagenti.io/a2a: ""
     kagenti.io/framework: LangGraph
 spec:
   replicas: 1
@@ -148,7 +148,7 @@ metadata:
   namespace: team1
   labels:
     kagenti.io/framework: Python
-    kagenti.io/protocol: streamable_http
+    protocol.kagenti.io/streamable_http: ""
     kagenti.io/type: tool
     toolhive-basename: weather-tool
 spec:

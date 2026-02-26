@@ -50,11 +50,20 @@ kind: Deployment
 metadata:
   name: weather-agent
   labels:
-    kagenti.io/type: agent           # Identifies as an agent
-    kagenti.io/protocol: a2a         # Specifies protocol
+    kagenti.io/type: agent             # Identifies as an agent
+    protocol.kagenti.io/a2a: ""        # Speaks A2A protocol
     app.kubernetes.io/name: weather-agent
 spec:
   # ... standard Deployment spec
+```
+
+Multiple protocols can be declared simultaneously:
+
+```yaml
+  labels:
+    kagenti.io/type: agent
+    protocol.kagenti.io/a2a: ""        # Speaks A2A
+    protocol.kagenti.io/mcp: ""        # Also speaks MCP
 ```
 
 ### 2. AgentCard Creation
@@ -196,7 +205,7 @@ metadata:
   name: assistant-agent
   labels:
     kagenti.io/type: agent
-    kagenti.io/protocol: a2a
+    protocol.kagenti.io/a2a: ""
     app.kubernetes.io/name: assistant-agent
 spec:
   replicas: 1
@@ -242,7 +251,7 @@ kubectl get agentcard assistant-agent-card -o yaml
 kubectl get agentcards -w
 
 # Filter by protocol
-kubectl get agentcards -l kagenti.io/protocol=a2a
+kubectl get agentcards -l protocol.kagenti.io/a2a
 ```
 
 ### Access Agent Metadata

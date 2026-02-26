@@ -39,7 +39,7 @@ metadata:
   namespace: agents
   labels:
     kagenti.io/type: agent
-    kagenti.io/protocol: a2a
+    protocol.kagenti.io/a2a: ""
     app.kubernetes.io/name: weather-agent
 spec:
   replicas: 1
@@ -52,7 +52,7 @@ spec:
       labels:
         app.kubernetes.io/name: weather-agent
         kagenti.io/type: agent
-        kagenti.io/protocol: a2a
+        protocol.kagenti.io/a2a: ""
     spec:
       serviceAccountName: weather-agent-sa
       initContainers:

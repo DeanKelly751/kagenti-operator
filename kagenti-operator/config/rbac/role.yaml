@@ -8,17 +8,11 @@ rules:
   - ""
   resources:
   - configmaps
+  - services
   verbs:
   - get
   - list
   - watch
-- apiGroups:
-  - ""
-  resources:
-  - events
-  verbs:
-  - create
-  - patch
 - apiGroups:
   - ""
   resources:
@@ -28,15 +22,6 @@ rules:
   - list
   - patch
   - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  - services
-  verbs:
-  - get
-  - list
   - watch
 - apiGroups:
   - agent.kagenti.dev

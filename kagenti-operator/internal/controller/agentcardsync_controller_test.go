@@ -54,9 +54,9 @@ var _ = Describe("AgentCardSync Controller", func() {
 					Name:      deploymentName,
 					Namespace: namespace,
 					Labels: map[string]string{
-						"app.kubernetes.io/name": deploymentName,
-						LabelAgentType:           LabelValueAgent,
-						LabelKagentiProtocol:     "a2a",
+						"app.kubernetes.io/name":    deploymentName,
+						LabelAgentType:              LabelValueAgent,
+						ProtocolLabelPrefix + "a2a": "",
 					},
 				},
 				Spec: appsv1.DeploymentSpec{
@@ -226,9 +226,9 @@ var _ = Describe("AgentCardSync Controller", func() {
 					Name:      deploymentName,
 					Namespace: namespace,
 					Labels: map[string]string{
-						"app.kubernetes.io/name": deploymentName,
-						LabelAgentType:           LabelValueAgent,
-						LabelKagentiProtocol:     "a2a",
+						"app.kubernetes.io/name":    deploymentName,
+						LabelAgentType:              LabelValueAgent,
+						ProtocolLabelPrefix + "a2a": "",
 					},
 				},
 				Spec: appsv1.DeploymentSpec{
@@ -372,9 +372,9 @@ var _ = Describe("AgentCardSync Controller", func() {
 					Name:      statefulsetName,
 					Namespace: namespace,
 					Labels: map[string]string{
-						"app.kubernetes.io/name": statefulsetName,
-						LabelAgentType:           LabelValueAgent,
-						LabelKagentiProtocol:     "a2a",
+						"app.kubernetes.io/name":    statefulsetName,
+						LabelAgentType:              LabelValueAgent,
+						ProtocolLabelPrefix + "a2a": "",
 					},
 				},
 				Spec: appsv1.StatefulSetSpec{

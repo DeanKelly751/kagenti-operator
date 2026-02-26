@@ -86,7 +86,7 @@ The operator runs the following controllers:
 Reconciles `AgentCard` CRs by resolving the backing workload via `spec.targetRef` (duck typing), fetching the agent card from the workload's `/.well-known/agent.json` endpoint, verifying JWS signatures, evaluating SPIFFE identity binding, and updating the AgentCard status.
 
 ### AgentCard Sync Controller
-Watches Deployments and StatefulSets labeled with `kagenti.io/type=agent` and `kagenti.io/protocol=<protocol>`. Automatically creates AgentCard resources with `targetRef` pointing to the discovered workloads. Sets owner references for garbage collection.
+Watches Deployments and StatefulSets labeled with `kagenti.io/type=agent` and one or more `protocol.kagenti.io/<name>` labels (e.g., `protocol.kagenti.io/a2a`). Automatically creates AgentCard resources with `targetRef` pointing to the discovered workloads. Sets owner references for garbage collection.
 
 ### AgentBuild Controller
 Reconciles `AgentBuild` CRs by creating and managing Tekton Pipelines and PipelineRuns. Tracks build status and updates AgentBuild status with the built image reference.
