@@ -33,7 +33,8 @@ import (
 type VerificationResult struct {
 	Verified     bool
 	KeyID        string
-	SpiffeID     string // from leaf cert SAN URI
+	SpiffeID     string    // from leaf cert SAN URI (SPIRE/X5C provider)
+	OIDCIdentity string    // from Fulcio cert SAN (Sigstore provider)
 	Details      string
 	LeafNotAfter time.Time // leaf cert expiry
 }
@@ -50,17 +51,24 @@ type Provider interface {
 type ProviderType string
 
 const (
-	ProviderTypeX5C ProviderType = "x5c"
+	ProviderTypeX5C      ProviderType = "x5c"
+	ProviderTypeSigstore ProviderType = "sigstore"
 )
 
 // Config holds configuration for the signature verification provider.
 type Config struct {
 	Type ProviderType
 
+	// X5C provider config (SPIRE trust bundle)
 	TrustBundleConfigMapName   string // ConfigMap name (SPIFFE JSON format)
 	TrustBundleConfigMapNS     string
 	TrustBundleConfigMapKey    string        // default: "bundle.spiffe"
 	TrustBundleRefreshInterval time.Duration // default: 5m
+
+	// Sigstore provider config
+	SigstoreRekorURL    string // default: https://rekor.sigstore.dev
+	SigstoreFulcioURL   string // default: https://fulcio.sigstore.dev
+	SigstoreTrustedRoot string // optional: path to custom trusted root JSON
 
 	Client client.Client
 }
@@ -73,7 +81,9 @@ func NewProvider(config *Config) (Provider, error) {
 	switch config.Type {
 	case ProviderTypeX5C:
 		return NewX5CProvider(config)
+	case ProviderTypeSigstore:
+		return NewSigstoreProvider(config)
 	default:
-		return nil, fmt.Errorf("unknown provider type: %s (only 'x5c' is supported)", config.Type)
+		return nil, fmt.Errorf("unknown provider type: %s (supported: 'x5c', 'sigstore')", config.Type)
 	}
 }

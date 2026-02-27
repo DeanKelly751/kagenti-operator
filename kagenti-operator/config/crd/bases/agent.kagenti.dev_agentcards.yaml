@@ -193,10 +193,23 @@ spec:
                           description: Header contains optional unprotected JWS header
                             parameters.
                           properties:
+                            rekor_log_index:
+                              description: |-
+                                RekorLogIndex is the Rekor transparency log entry index.
+                                Required for Sigstore signatures to prove the cert was valid at signing time.
+                              format: int64
+                              type: integer
                             timestamp:
                               description: Timestamp is when the signature was created
                                 (ISO 8601 string)
                               type: string
+                            x5c:
+                              description: |-
+                                X5C contains the X.509 certificate chain (base64 DER per RFC 7515 §4.1.6).
+                                For Sigstore, this holds the Fulcio-issued short-lived certificate.
+                              items:
+                                type: string
+                              type: array
                           type: object
                         protected:
                           description: Protected is the base64url-encoded JWS protected

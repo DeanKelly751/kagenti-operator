@@ -206,6 +206,16 @@ type SignatureHeader struct {
 	// Timestamp is when the signature was created (ISO 8601 string)
 	// +optional
 	Timestamp string `json:"timestamp,omitempty"`
+
+	// X5C contains the X.509 certificate chain (base64 DER per RFC 7515 §4.1.6).
+	// For Sigstore, this holds the Fulcio-issued short-lived certificate.
+	// +optional
+	X5C []string `json:"x5c,omitempty"`
+
+	// RekorLogIndex is the Rekor transparency log entry index.
+	// Required for Sigstore signatures to prove the cert was valid at signing time.
+	// +optional
+	RekorLogIndex *int64 `json:"rekor_log_index,omitempty"`
 }
 
 // AgentCapabilities defines A2A feature support
