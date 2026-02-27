@@ -1,0 +1,11 @@
+apiVersion: kagenti.dev/v1alpha1
+kind: AgentCard
+metadata:
+  name: weather-agent
+  namespace: default
+spec:
+  syncPeriod: "30s"
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: weather-agent

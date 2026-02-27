@@ -1,0 +1,49 @@
+{
+  "name": "WeatherAgent",
+  "description": "Provides weather forecasts for any location using real-time data",
+  "url": "https://weather-agent.example.com",
+  "version": "1.0.0",
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["application/json"],
+  "skills": [
+    {
+      "name": "get-forecast",
+      "description": "Returns weather forecast for a given location",
+      "inputModes": ["text/plain"],
+      "outputModes": ["application/json"],
+      "parameters": [
+        {
+          "name": "location",
+          "type": "string",
+          "description": "City name or coordinates (lat,lon)",
+          "required": true
+        },
+        {
+          "name": "days",
+          "type": "number",
+          "description": "Number of days to forecast (1-7)",
+          "required": false,
+          "default": "3"
+        }
+      ]
+    },
+    {
+      "name": "get-current",
+      "description": "Returns current weather conditions for a location",
+      "inputModes": ["text/plain"],
+      "outputModes": ["application/json"],
+      "parameters": [
+        {
+          "name": "location",
+          "type": "string",
+          "description": "City name or coordinates (lat,lon)",
+          "required": true
+        }
+      ]
+    }
+  ]
+}
