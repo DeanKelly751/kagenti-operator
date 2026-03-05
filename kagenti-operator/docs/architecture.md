@@ -16,15 +16,14 @@ This document provides a detailed overview of the Kagenti Operator architecture,
 
 ## Overview
 
-The Kagenti Operator is a Kubernetes controller that implements the [Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/) to automate the discovery and lifecycle management of AI agents. It follows a **Deployment-first model**: users create standard Kubernetes Deployments or StatefulSets, and the operator discovers them via `AgentCard` CRs with `targetRef`. The `AgentBuild` CR handles building container images from source using Tekton pipelines.
+The Kagenti Operator is a Kubernetes controller that implements the [Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/) to automate the discovery and lifecycle management of AI agents. It follows a **Deployment-first model**: users create standard Kubernetes Deployments or StatefulSets, and the operator discovers them via `AgentCard` CRs with `targetRef`.
 
 ### Design Goals
 
 - **Deployment-First**: Users create standard Kubernetes workloads; the operator handles discovery
 - **Declarative Configuration**: Infrastructure as Code using Kubernetes CRDs
-- **Extensibility**: Template-based build system supporting custom pipelines
 - **Security**: Signature verification, identity binding, RBAC, and least-privilege principles
-- **Scalability**: Supports multiple agents and builds concurrently
+- **Scalability**: Supports multiple agents concurrently
 - **Cloud-Native**: Leverages native Kubernetes primitives and patterns
 
 ---
@@ -38,11 +37,6 @@ The Kagenti Operator is a Kubernetes controller that implements the [Operator Pa
 - Fetches and caches agent metadata (A2A agent cards) from running workloads
 - Supports signature verification and identity binding
 - Stores agent capabilities, skills, and endpoint information
-
-#### AgentBuild CRD
-- Manages container image build pipelines using Tekton
-- Supports multiple build modes (dev, buildpack, custom, etc.)
-- Tracks build status and outputs built image references
 
 ### Controllers
 
@@ -58,11 +52,6 @@ The Kagenti Operator is a Kubernetes controller that implements the [Operator Pa
 - Automatically creates AgentCard resources for discovered workloads
 - Sets owner references for garbage collection
 
-#### AgentBuild Controller
-- Watches AgentBuild resources
-- Creates and manages Tekton Pipelines and PipelineRuns
-- Tracks build status and updates AgentBuild status
-
 #### AgentCard NetworkPolicy Controller
 - Watches AgentCard resources when `--enforce-network-policies` is enabled
 - Creates **permissive** NetworkPolicies for agents with verified signatures (and binding, if configured)
@@ -72,10 +61,9 @@ The Kagenti Operator is a Kubernetes controller that implements the [Operator Pa
 ### Supporting Components
 
 #### Webhook
-- Validates AgentCard and AgentBuild resources
+- Validates AgentCard resources
 - Ensures `targetRef` is set on AgentCards
 - Mutates resources with default values
-- Injects pipeline templates based on mode
 
 #### Signature Providers
 - **X5CProvider**: Validates `x5c` certificate chains against the SPIRE X.509 trust bundle and verifies JWS signatures using the leaf public key
@@ -90,52 +78,21 @@ graph TB
         User[User/Developer]
         User -->|Creates| Deployment[Deployment/StatefulSet]
         User -->|Creates| CardCR[AgentCard CR]
-        User -->|Creates| BuildCR[AgentBuild CR]
     end
 
     subgraph "Kagenti Operator"
         Webhook[Admission Webhook]
         CardController[AgentCard Controller]
         SyncController[AgentCardSync Controller]
-        BuildController[AgentBuild Controller]
-
         CardCR -->|Validates| Webhook
-        BuildCR -->|Validates/Mutates| Webhook
 
         Webhook -->|Valid CR| CardController
-        Webhook -->|Valid CR| BuildController
-    end
-
-    subgraph "Kubernetes Resources"
-        ConfigMap[ConfigMaps<br/>Pipeline Templates]
-    end
-
-    subgraph "Tekton Pipelines"
-        Pipeline[Pipeline]
-        PipelineRun[PipelineRun]
-        Task[Tasks]
-
-        BuildController -->|Creates| Pipeline
-        BuildController -->|Creates| PipelineRun
-        Pipeline -->|Composed of| Task
-        PipelineRun -->|Executes| Pipeline
-
-        PipelineRun -->|Updates| BuildCR
-    end
-
-    subgraph "Build Workflow"
-        Git[Git Repository]
-        Registry[Container Registry]
-
-        Task -->|Clones from| Git
-        Task -->|Pushes to| Registry
     end
 
     subgraph "Runtime"
         Pod[Agent Pods]
 
         Deployment -->|Creates| Pod
-        Pod -->|Uses image from| Registry
         CardController -->|Fetches agent card from| Pod
     end
 
@@ -150,11 +107,9 @@ graph TB
 
     style User fill:#ffecb3
     style CardCR fill:#e1f5fe
-    style BuildCR fill:#e1f5fe
     style Webhook fill:#fff3e0
     style CardController fill:#ffe0b2
     style SyncController fill:#ffe0b2
-    style BuildController fill:#ffe0b2
     style Deployment fill:#d1c4e9
     style Pod fill:#c8e6c9
 ```
@@ -248,131 +203,6 @@ When `spec.identityBinding` is configured on an AgentCard:
 
 ---
 
-## AgentBuild Pipeline Architecture
-
-```
-ConfigMap (step-<name>)
-└── task-spec.yaml: Complete Tekton TaskSpec
-    ├── params: step parameters
-    ├── workspaces: required workspaces
-    └── steps: container commands
-```
-
-### Build Modes
-
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `dev` | Basic build with Dockerfile | Development with internal registry |
-| `buildpack-dev` | Cloud Native Buildpacks | Development without Dockerfile |
-| `dev-external` | Basic build, external registry | Development with external registry |
-| `preprod` | Adds security scanning | Pre-production validation |
-| `prod` | Full compliance checks | Production deployments |
-| `custom` | User-defined steps | Advanced customization |
-
-### Parameter Resolution
-
-Parameters are resolved in this order (highest to lowest priority):
-
-1. User-provided parameters in AgentBuild CR
-2. Step-specific parameters
-3. Global template parameters
-4. Step default parameters
-
-```yaml
-# User provides minimal config
-parameters:
-  - name: SOURCE_REPO_URL
-    value: "github.com/myorg/myapp"
-
-# System merges with defaults
-# Final pipeline gets:
-#   SOURCE_REPO_URL: "github.com/myorg/myapp" (user)
-#   SOURCE_REVISION: "main" (template default)
-#   BUILD_CONTEXT: "." (step default)
-```
-
-### Build Execution Flow
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant Webhook
-    participant Controller
-    participant ConfigMap
-    participant Tekton
-    participant Registry
-
-    User->>Webhook: Create AgentBuild CR
-    Webhook->>Webhook: Validate & inject template
-    Webhook->>Controller: Validated CR
-
-    Controller->>ConfigMap: Load pipeline template
-    ConfigMap-->>Controller: Template definition
-
-    Controller->>ConfigMap: Load step specs
-    ConfigMap-->>Controller: Task specifications
-
-    Controller->>Controller: Merge parameters
-    Controller->>Tekton: Create Pipeline
-    Controller->>Tekton: Create PipelineRun
-
-    Tekton->>Tekton: Clone repository
-    Tekton->>Tekton: Build image
-    Tekton->>Registry: Push image
-
-    Tekton-->>Controller: Build complete
-    Controller->>Controller: Update status
-    Controller-->>User: AgentBuild.status.builtImage
-```
-
----
-
-## Reconciliation Loops
-
-### AgentBuild Reconciliation
-
-```go
-func (r *AgentBuildReconciler) Reconcile(ctx context.Context, req Request) (Result, error) {
-    // 1. Fetch AgentBuild
-    build := &AgentBuild{}
-    if err := r.Get(ctx, req.NamespacedName, build); err != nil {
-        return Result{}, client.IgnoreNotFound(err)
-    }
-
-    // 2. Check if already complete
-    if build.Status.Phase == PhaseSucceeded || build.Status.Phase == PhaseFailed {
-        return Result{}, nil
-    }
-
-    // 3. Load pipeline template
-    template, err := r.loadTemplate(ctx, build.Spec.Mode)
-    if err != nil {
-        return Result{}, err
-    }
-
-    // 4. Create Pipeline
-    pipeline, err := r.createPipeline(ctx, build, template)
-    if err != nil {
-        return Result{}, err
-    }
-
-    // 5. Create PipelineRun
-    pipelineRun, err := r.createPipelineRun(ctx, build, pipeline)
-    if err != nil {
-        return Result{}, err
-    }
-
-    // 6. Watch PipelineRun status
-    if err := r.updateBuildStatus(ctx, build, pipelineRun); err != nil {
-        return Result{}, err
-    }
-
-    return Result{RequeueAfter: 30*time.Second}, nil
-}
-```
-
----
-
 ## Security Model
 
 ### RBAC
@@ -380,7 +210,7 @@ func (r *AgentBuildReconciler) Reconcile(ctx context.Context, req Request) (Resu
 The operator implements least-privilege access control:
 
 #### Operator Permissions
-- Read/Write: AgentCard, AgentBuild CRs
+- Read/Write: AgentCard CRs
 - Read: Deployments, StatefulSets, Services, Pods
 - Read: ConfigMaps, Secrets
 - Create: Events
@@ -444,7 +274,7 @@ metadata:
   name: kagenti-operator-manager-role
 rules:
   - apiGroups: ["agent.kagenti.dev"]
-    resources: ["agentcards", "agentbuilds"]
+    resources: ["agentcards"]
     verbs: ["*"]
 ```
 
@@ -463,7 +293,7 @@ metadata:
   namespace: team1
 rules:
   - apiGroups: ["agent.kagenti.dev"]
-    resources: ["agentcards", "agentbuilds"]
+    resources: ["agentcards"]
     verbs: ["*"]
 ```
 
