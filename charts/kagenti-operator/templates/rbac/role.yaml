@@ -57,21 +57,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups: ["rbac.authorization.k8s.io"]
-  resources:
-  - clusterroles
-  - clusterrolebindings
-  - roles
-  - rolebindings
-  - serviceaccounts
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
 - apiGroups:
   - apps
   resources:
@@ -104,7 +89,6 @@ rules:
 - apiGroups:
   - agent.kagenti.dev
   resources:
-  - agentbuilds
   - agentcards
   verbs:
   - create
@@ -117,14 +101,12 @@ rules:
 - apiGroups:
   - agent.kagenti.dev
   resources:
-  - agentbuilds/finalizers
   - agentcards/finalizers
   verbs:
   - update
 - apiGroups:
   - agent.kagenti.dev
   resources:
-  - agentbuilds/status
   - agentcards/status
   verbs:
   - get
@@ -158,24 +140,3 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - tekton.dev
-  resources:
-  - clustertasks
-  - customruns
-  - pipelineruns
-  - pipelines
-  - stepactions
-  - taskruns
-  - tasks
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups: [""]
-  resources: ["events"]
-  verbs: ["create", "patch", "update"]
