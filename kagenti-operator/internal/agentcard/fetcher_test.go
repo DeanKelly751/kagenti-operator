@@ -1,3 +1,19 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package agentcard
 
 import (
@@ -8,13 +24,15 @@ import (
 	"testing"
 )
 
+const testAgentCardJSON = `{"name":"test-agent","version":"1.0","url":"http://example.com"}`
+
 func TestDefaultFetcher_SuccessfulA2ACardFetch(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != A2AAgentCardPath {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"name":"test-agent","version":"1.0","url":"http://example.com"}`))
+		_, _ = w.Write([]byte(testAgentCardJSON))
 	}))
 	defer server.Close()
 
@@ -30,6 +48,40 @@ func TestDefaultFetcher_SuccessfulA2ACardFetch(t *testing.T) {
 	}
 }
 
+func TestFetchA2ACard_LegacyFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == A2ALegacyAgentCardPath {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(testAgentCardJSON))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	fetcher := NewFetcher()
+	card, err := fetcher.Fetch(context.Background(), A2AProtocol, srv.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if card.Name != "test-agent" {
+		t.Errorf("expected name %q, got %q", "test-agent", card.Name)
+	}
+}
+
+func TestFetchA2ACard_BothNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	fetcher := NewFetcher()
+	_, err := fetcher.Fetch(context.Background(), A2AProtocol, srv.URL)
+	if err == nil {
+		t.Fatal("expected error when both endpoints return 404")
+	}
+}
+
 func TestDefaultFetcher_UnsupportedProtocol(t *testing.T) {
 	_, err := NewFetcher().Fetch(context.Background(), "unsupported", "http://example.com")
 	if err == nil {
@@ -40,36 +92,26 @@ func TestDefaultFetcher_UnsupportedProtocol(t *testing.T) {
 	}
 }
 
-func TestDefaultFetcher_HTTPErrors(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		status int
-	}{
-		{"404", http.StatusNotFound},
-		{"500", http.StatusInternalServerError},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(tc.status)
-				w.Write([]byte("error body"))
-			}))
-			defer server.Close()
+func TestDefaultFetcher_HTTPError500(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error body"))
+	}))
+	defer server.Close()
 
-			_, err := NewFetcher().Fetch(context.Background(), A2AProtocol, server.URL)
-			if err == nil {
-				t.Fatalf("expected error for HTTP %d", tc.status)
-			}
-			if !strings.Contains(err.Error(), "unexpected status code") {
-				t.Errorf("unexpected error: %v", err)
-			}
-		})
+	_, err := NewFetcher().Fetch(context.Background(), A2AProtocol, server.URL)
+	if err == nil {
+		t.Fatal("expected error for HTTP 500")
+	}
+	if !strings.Contains(err.Error(), "unexpected status code") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 
 func TestDefaultFetcher_InvalidJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("not valid json"))
+		_, _ = w.Write([]byte("not valid json"))
 	}))
 	defer server.Close()
 

@@ -19,6 +19,7 @@ package agentcard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,9 +32,10 @@ import (
 var fetcherLogger = ctrl.Log.WithName("agentcard").WithName("fetcher")
 
 const (
-	A2AProtocol         = "a2a"
-	A2AAgentCardPath    = "/.well-known/agent.json"
-	DefaultFetchTimeout = 10 * time.Second
+	A2AProtocol            = "a2a"
+	A2AAgentCardPath       = "/.well-known/agent-card.json"
+	A2ALegacyAgentCardPath = "/.well-known/agent.json"
+	DefaultFetchTimeout    = 10 * time.Second
 )
 
 type Fetcher interface {
@@ -62,7 +64,39 @@ func (f *DefaultFetcher) Fetch(ctx context.Context, protocol string, serviceURL 
 }
 
 func (f *DefaultFetcher) fetchA2ACard(ctx context.Context, serviceURL string) (*agentv1alpha1.AgentCardData, error) {
-	agentCardURL := serviceURL + A2AAgentCardPath
+	card, err := f.fetchAgentCardFromPath(ctx, serviceURL, A2AAgentCardPath)
+	if err == nil {
+		return card, nil
+	}
+
+	if !errors.Is(err, errNotFound) {
+		return nil, err
+	}
+
+	fetcherLogger.Info("Agent card not found at current endpoint, trying legacy endpoint",
+		"currentPath", A2AAgentCardPath,
+		"legacyPath", A2ALegacyAgentCardPath)
+
+	card, legacyErr := f.fetchAgentCardFromPath(ctx, serviceURL, A2ALegacyAgentCardPath)
+	if legacyErr != nil {
+		// Return the original error since the primary path is canonical.
+		return nil, err
+	}
+
+	fetcherLogger.Info("Agent card served from deprecated endpoint",
+		"deprecated", true,
+		"migrateTo", A2AAgentCardPath,
+		"legacyPath", A2ALegacyAgentCardPath,
+		"agentName", card.Name)
+
+	return card, nil
+}
+
+// errNotFound is returned when the agent card endpoint returns HTTP 404.
+var errNotFound = errors.New("agent card not found")
+
+func (f *DefaultFetcher) fetchAgentCardFromPath(ctx context.Context, serviceURL, path string) (*agentv1alpha1.AgentCardData, error) {
+	agentCardURL := serviceURL + path
 	fetcherLogger.Info("Fetching A2A agent card", "url", agentCardURL)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, agentCardURL, nil)
@@ -75,9 +109,13 @@ func (f *DefaultFetcher) fetchA2ACard(ctx context.Context, serviceURL string) (*
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch agent card: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	const maxCardSize = 1 << 20 // 1 MiB
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errNotFound
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxCardSize))
