@@ -1,0 +1,21 @@
+# CODEOWNERS for kagenti-operator
+# See https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default: maintainers team owns everything
+* @kagenti/maintainers
+
+# API types and CRDs — require careful review
+kagenti-operator/api/ @kagenti/maintainers
+kagenti-operator/config/crd/ @kagenti/maintainers
+
+# Controllers and core logic
+kagenti-operator/internal/ @kagenti/maintainers
+
+# Webhooks
+kagenti-operator/internal/webhook/ @kagenti/maintainers
+
+# Helm charts
+charts/ @kagenti/maintainers
+
+# CI and automation
+.github/ @kagenti/admins

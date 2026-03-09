@@ -21,10 +21,34 @@
 go.work
 go.work.sum
 
-# env file
+# Environment and secrets
 .env
+.env.*
+.env.local
+*.key
+*.pem
+*.p12
+*.jks
+credentials.*
+secrets.*
+*kubeconfig*
 
-# ignore dist/ at any level
-**/dist/
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 
+# OS files
 .DS_Store
+Thumbs.db
+
+# Build artifacts
+**/dist/
+**/bin/
+
+# Temporary and debug files
+*.log
+debug
+Dockerfile.cross
