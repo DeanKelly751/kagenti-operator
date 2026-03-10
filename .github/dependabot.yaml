@@ -5,3 +5,8 @@ updates:
   directory: "/"
   schedule:
     interval: "daily"
+  ignore:
+    # golangci-lint-action v7+ requires golangci-lint v2.x;
+    # we pin v1.64.8, so block major bumps until we migrate.
+    - dependency-name: "golangci/golangci-lint-action"
+      update-types: ["version-update:semver-major"]
