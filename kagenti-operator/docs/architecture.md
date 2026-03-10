@@ -38,6 +38,12 @@ The Kagenti Operator is a Kubernetes controller that implements the [Operator Pa
 - Supports signature verification and identity binding
 - Stores agent capabilities, skills, and endpoint information
 
+#### AgentRuntime CRD
+- Configures identity (SPIFFE, IdP client registration) and observability (OTEL traces) for agent/tool workloads
+- Uses `targetRef` to reference backing workloads (Deployment, StatefulSet)
+- Provides per-workload overrides for trust domain, trace endpoints, and sampling rates
+- Complements AgentCard by handling runtime configuration rather than metadata discovery
+
 ### Controllers
 
 #### AgentCard Controller
@@ -78,6 +84,7 @@ graph TB
         User[User/Developer]
         User -->|Creates| Deployment[Deployment/StatefulSet]
         User -->|Creates| CardCR[AgentCard CR]
+        User -->|Creates| RuntimeCR[AgentRuntime CR]
     end
 
     subgraph "Kagenti Operator"
@@ -85,6 +92,7 @@ graph TB
         CardController[AgentCard Controller]
         SyncController[AgentCardSync Controller]
         CardCR -->|Validates| Webhook
+        RuntimeCR -->|Validates| Webhook
 
         Webhook -->|Valid CR| CardController
     end
@@ -104,9 +112,11 @@ graph TB
     SyncController -->|Watches| Deployment
     SyncController -->|Auto-creates| CardCR
     CardCR -->|targetRef| Deployment
+    RuntimeCR -->|targetRef| Deployment
 
     style User fill:#ffecb3
     style CardCR fill:#e1f5fe
+    style RuntimeCR fill:#e1f5fe
     style Webhook fill:#fff3e0
     style CardController fill:#ffe0b2
     style SyncController fill:#ffe0b2

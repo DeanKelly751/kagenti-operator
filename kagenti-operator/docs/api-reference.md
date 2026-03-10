@@ -5,6 +5,7 @@ This document provides a comprehensive reference for the Kagenti Operator Custom
 ## Custom Resources
 
 - [AgentCard](#agentcard) — Fetches and stores agent metadata for dynamic discovery
+- [AgentRuntime](#agentruntime) — Configures identity and observability for agent/tool workloads
 
 ---
 
@@ -342,6 +343,177 @@ For Deployments and StatefulSets to be automatically discovered by the operator,
 | `kagenti.io/type` | `agent` | Yes | Identifies the workload as an agent |
 | `protocol.kagenti.io/<name>` | `""` (existence implies support) | Yes (at least one) | Protocol(s) the agent speaks (e.g., `protocol.kagenti.io/a2a`, `protocol.kagenti.io/mcp`) |
 | `app.kubernetes.io/name` | `<agent-name>` | Recommended | Standard Kubernetes app name label |
+
+---
+
+## AgentRuntime
+
+The `AgentRuntime` Custom Resource configures identity (SPIFFE, IdP client registration) and observability (OTEL traces) for agent and tool workloads. Unlike AgentCard, which handles discovery and metadata fetching, AgentRuntime provides runtime configuration for workload identity and telemetry.
+
+### API Group and Version
+
+- **API Group:** `agent.kagenti.dev`
+- **API Version:** `v1alpha1`
+- **Kind:** `AgentRuntime`
+- **Short Names:** `art`, `agentrt`
+
+### Relationship to AgentCard
+
+AgentRuntime and AgentCard serve complementary purposes:
+
+- **AgentCard**: Fetches and stores agent metadata (capabilities, skills, endpoints) for dynamic discovery. Handles signature verification and identity binding validation.
+- **AgentRuntime**: Configures identity (SPIFFE trust domain, IdP client registration) and observability (OTEL trace endpoints, sampling) for running workloads.
+
+Both resources use the shared `TargetRef` type to reference the backing workload (Deployment, StatefulSet, etc.).
+
+### Spec Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | Classifies the workload as `agent` or `tool` |
+| `targetRef` | [TargetRef](#targetref) | Yes | Identifies the workload backing this runtime (uses the same TargetRef type as AgentCard) |
+| `identity` | [IdentitySpec](#identityspec) | No | Optional per-workload identity overrides |
+| `trace` | [TraceSpec](#tracespec) | No | Optional per-workload observability overrides |
+
+#### IdentitySpec
+
+Configures workload identity and IdP registration for an AgentRuntime.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `spiffe` | [SPIFFEIdentity](#spiffeidentity) | No | SPIFFE identity configuration overrides |
+| `clientRegistration` | [ClientRegistration](#clientregistration) | No | IdP client registration configuration |
+
+#### SPIFFEIdentity
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `trustDomain` | string | No | Overrides the operator-level `--spire-trust-domain` for this workload. If empty, the operator flag value is used. Must match pattern: `^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$` |
+
+#### ClientRegistration
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `provider` | string | Yes | IdP provider type (e.g., "keycloak") |
+| `realm` | string | Yes | IdP realm/tenant |
+| `adminCredentialsSecret` | SecretReference | Yes | References the Secret containing IdP admin credentials |
+
+#### TraceSpec
+
+Configures observability for an AgentRuntime.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `endpoint` | string | No | OTEL collector endpoint override |
+| `protocol` | string | No | OTEL export protocol (`grpc` or `http`) |
+| `sampling` | [SamplingSpec](#samplingspec) | No | Trace sampling configuration |
+
+#### SamplingSpec
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `rate` | float | Yes | Sampling rate (0.0-1.0, inclusive) |
+
+### Status Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `phase` | string | High-level state of the AgentRuntime (`Pending`, `Active`, or `Error`) |
+| `configuredPods` | int32 | Count of pods with expected labels/configuration |
+| `conditions` | [][Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) | Current state of the AgentRuntime |
+
+### Examples
+
+#### Basic Agent Runtime
+
+```yaml
+apiVersion: agent.kagenti.dev/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: weather-agent-runtime
+  namespace: default
+spec:
+  type: agent
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: weather-agent
+```
+
+#### Agent Runtime with Identity and Trace Overrides
+
+```yaml
+apiVersion: agent.kagenti.dev/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: weather-agent-runtime
+  namespace: default
+spec:
+  type: agent
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: weather-agent
+  identity:
+    spiffe:
+      trustDomain: custom.example.com
+    clientRegistration:
+      provider: keycloak
+      realm: agents
+      adminCredentialsSecret:
+        name: keycloak-admin-creds
+        namespace: default
+  trace:
+    endpoint: otel-collector.observability.svc.cluster.local:4317
+    protocol: grpc
+    sampling:
+      rate: 0.1
+```
+
+#### Tool Runtime
+
+```yaml
+apiVersion: agent.kagenti.dev/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: calculator-tool-runtime
+  namespace: default
+spec:
+  type: tool
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: calculator-tool
+  trace:
+    endpoint: otel-collector.observability.svc.cluster.local:4318
+    protocol: http
+    sampling:
+      rate: 1.0
+```
+
+### kubectl Usage Examples
+
+```bash
+# List all agent runtimes (using short name)
+kubectl get art
+
+# List agent runtimes with full name
+kubectl get agentruntimes
+
+# Example output:
+# NAME                      TYPE    TARGET          PHASE    AGE
+# weather-agent-runtime     agent   weather-agent   Active   5m
+# calculator-tool-runtime   tool    calculator-tool Active   3m
+
+# Get detailed information
+kubectl describe agentruntime weather-agent-runtime
+
+# View runtime phase
+kubectl get art weather-agent-runtime -o jsonpath='{.status.phase}'
+
+# View configured pods count
+kubectl get art weather-agent-runtime -o jsonpath='{.status.configuredPods}'
+```
 
 ---
 
