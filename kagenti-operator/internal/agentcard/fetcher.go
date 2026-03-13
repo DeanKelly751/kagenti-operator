@@ -25,6 +25,11 @@ import (
 	"net/http"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
@@ -38,8 +43,13 @@ const (
 	DefaultFetchTimeout    = 10 * time.Second
 )
 
+const (
+	SignedCardConfigMapSuffix = "-card-signed"
+	SignedCardConfigMapKey    = "agent-card.json"
+)
+
 type Fetcher interface {
-	Fetch(ctx context.Context, protocol string, serviceURL string) (*agentv1alpha1.AgentCardData, error)
+	Fetch(ctx context.Context, protocol string, serviceURL string, agentName string, namespace string) (*agentv1alpha1.AgentCardData, error)
 }
 
 type DefaultFetcher struct {
@@ -54,7 +64,7 @@ func NewFetcher() Fetcher {
 	}
 }
 
-func (f *DefaultFetcher) Fetch(ctx context.Context, protocol string, serviceURL string) (*agentv1alpha1.AgentCardData, error) {
+func (f *DefaultFetcher) Fetch(ctx context.Context, protocol string, serviceURL string, _ string, _ string) (*agentv1alpha1.AgentCardData, error) {
 	switch protocol {
 	case A2AProtocol:
 		return f.fetchA2ACard(ctx, serviceURL)
@@ -138,6 +148,46 @@ func (f *DefaultFetcher) fetchAgentCardFromPath(ctx context.Context, serviceURL,
 		"url", agentCardData.URL)
 
 	return &agentCardData, nil
+}
+
+// ConfigMapFetcher reads signed agent cards from a ConfigMap before falling
+// back to the standard HTTP fetch. The init-container agentcard-signer writes
+// the signed card to a ConfigMap named "{agentName}-card-signed".
+type ConfigMapFetcher struct {
+	reader   client.Reader
+	fallback *DefaultFetcher
+}
+
+func NewConfigMapFetcher(reader client.Reader) Fetcher {
+	return &ConfigMapFetcher{
+		reader:   reader,
+		fallback: &DefaultFetcher{httpClient: &http.Client{Timeout: DefaultFetchTimeout}},
+	}
+}
+
+func (f *ConfigMapFetcher) Fetch(ctx context.Context, protocol string, serviceURL string, agentName string, namespace string) (*agentv1alpha1.AgentCardData, error) {
+	if agentName != "" && namespace != "" {
+		cmName := agentName + SignedCardConfigMapSuffix
+		var cm corev1.ConfigMap
+		err := f.reader.Get(ctx, types.NamespacedName{Name: cmName, Namespace: namespace}, &cm)
+		if err == nil {
+			if cardJSON, ok := cm.Data[SignedCardConfigMapKey]; ok {
+				var cardData agentv1alpha1.AgentCardData
+				if jsonErr := json.Unmarshal([]byte(cardJSON), &cardData); jsonErr == nil {
+					fetcherLogger.Info("Fetched signed agent card from ConfigMap",
+						"configMap", cmName, "namespace", namespace, "agentName", cardData.Name)
+					return &cardData, nil
+				}
+				fetcherLogger.Info("ConfigMap contains invalid JSON, falling back to HTTP",
+					"configMap", cmName, "namespace", namespace)
+			}
+		} else if !apierrors.IsNotFound(err) {
+			fetcherLogger.Info("Error reading ConfigMap, falling back to HTTP",
+				"configMap", cmName, "namespace", namespace, "error", err.Error())
+		}
+	}
+
+	return f.fallback.Fetch(ctx, protocol, serviceURL, agentName, namespace)
 }
 
 func GetServiceURL(agentName, namespace string, port int32) string {

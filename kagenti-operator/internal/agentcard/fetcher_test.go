@@ -22,6 +22,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 const testAgentCardJSON = `{"name":"test-agent","version":"1.0","url":"http://example.com"}`
@@ -36,7 +41,7 @@ func TestDefaultFetcher_SuccessfulA2ACardFetch(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := NewFetcher().Fetch(context.Background(), A2AProtocol, server.URL)
+	result, err := NewFetcher().Fetch(context.Background(), A2AProtocol, server.URL, "", "")
 	if err != nil {
 		t.Fatalf("Fetch failed: %v", err)
 	}
@@ -60,7 +65,7 @@ func TestFetchA2ACard_LegacyFallback(t *testing.T) {
 	defer srv.Close()
 
 	fetcher := NewFetcher()
-	card, err := fetcher.Fetch(context.Background(), A2AProtocol, srv.URL)
+	card, err := fetcher.Fetch(context.Background(), A2AProtocol, srv.URL, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -76,14 +81,14 @@ func TestFetchA2ACard_BothNotFound(t *testing.T) {
 	defer srv.Close()
 
 	fetcher := NewFetcher()
-	_, err := fetcher.Fetch(context.Background(), A2AProtocol, srv.URL)
+	_, err := fetcher.Fetch(context.Background(), A2AProtocol, srv.URL, "", "")
 	if err == nil {
 		t.Fatal("expected error when both endpoints return 404")
 	}
 }
 
 func TestDefaultFetcher_UnsupportedProtocol(t *testing.T) {
-	_, err := NewFetcher().Fetch(context.Background(), "unsupported", "http://example.com")
+	_, err := NewFetcher().Fetch(context.Background(), "unsupported", "http://example.com", "", "")
 	if err == nil {
 		t.Fatal("expected error for unsupported protocol")
 	}
@@ -99,7 +104,7 @@ func TestDefaultFetcher_HTTPError500(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := NewFetcher().Fetch(context.Background(), A2AProtocol, server.URL)
+	_, err := NewFetcher().Fetch(context.Background(), A2AProtocol, server.URL, "", "")
 	if err == nil {
 		t.Fatal("expected error for HTTP 500")
 	}
@@ -115,7 +120,7 @@ func TestDefaultFetcher_InvalidJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := NewFetcher().Fetch(context.Background(), A2AProtocol, server.URL)
+	_, err := NewFetcher().Fetch(context.Background(), A2AProtocol, server.URL, "", "")
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -129,5 +134,101 @@ func TestGetServiceURL(t *testing.T) {
 	want := "http://my-agent.default.svc.cluster.local:8080"
 	if got != want {
 		t.Errorf("GetServiceURL: got %q, want %q", got, want)
+	}
+}
+
+func newFakeScheme() *runtime.Scheme {
+	s := runtime.NewScheme()
+	_ = corev1.AddToScheme(s)
+	return s
+}
+
+func TestConfigMapFetcher_ConfigMapFound(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-agent" + SignedCardConfigMapSuffix,
+			Namespace: "test-ns",
+		},
+		Data: map[string]string{
+			SignedCardConfigMapKey: testAgentCardJSON,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newFakeScheme()).
+		WithObjects(cm).
+		Build()
+	fetcher := NewConfigMapFetcher(fakeClient)
+
+	card, err := fetcher.Fetch(context.Background(), A2AProtocol, "", "my-agent", "test-ns")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if card.Name != "test-agent" {
+		t.Errorf("Name: got %q, want %q", card.Name, "test-agent")
+	}
+	if card.Version != "1.0" {
+		t.Errorf("Version: got %q, want %q", card.Version, "1.0")
+	}
+}
+
+func TestConfigMapFetcher_ConfigMapNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == A2AAgentCardPath {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(testAgentCardJSON))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newFakeScheme()).
+		Build()
+	fetcher := NewConfigMapFetcher(fakeClient)
+
+	card, err := fetcher.Fetch(context.Background(), A2AProtocol, srv.URL, "no-such-agent", "test-ns")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if card.Name != "test-agent" {
+		t.Errorf("Name: got %q, want %q", card.Name, "test-agent")
+	}
+}
+
+func TestConfigMapFetcher_InvalidJSON(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bad-agent" + SignedCardConfigMapSuffix,
+			Namespace: "test-ns",
+		},
+		Data: map[string]string{
+			SignedCardConfigMapKey: "not valid json{{{",
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == A2AAgentCardPath {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(testAgentCardJSON))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newFakeScheme()).
+		WithObjects(cm).
+		Build()
+	fetcher := NewConfigMapFetcher(fakeClient)
+
+	card, err := fetcher.Fetch(context.Background(), A2AProtocol, srv.URL, "bad-agent", "test-ns")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if card.Name != "test-agent" {
+		t.Errorf("Name: got %q, want %q", card.Name, "test-agent")
 	}
 }

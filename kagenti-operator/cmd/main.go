@@ -247,7 +247,7 @@ func main() {
 		Client:                mgr.GetClient(),
 		Scheme:                mgr.GetScheme(),
 		Recorder:              mgr.GetEventRecorderFor("agentcard-controller"),
-		AgentFetcher:          agentcard.NewFetcher(),
+		AgentFetcher:          agentcard.NewConfigMapFetcher(mgr.GetAPIReader()),
 		SignatureProvider:     sigProvider,
 		RequireSignature:      requireA2ASignature,
 		SignatureAuditMode:    signatureAuditMode,
@@ -271,8 +271,9 @@ func main() {
 	}
 
 	if err = (&controller.AgentCardSyncReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		SpireTrustDomain: spireTrustDomain,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentCardSync")
 		os.Exit(1)

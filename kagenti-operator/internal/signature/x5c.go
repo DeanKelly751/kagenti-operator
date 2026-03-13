@@ -23,8 +23,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -83,8 +85,10 @@ func init() {
 	}
 }
 
-// X5CProvider verifies JWS signatures via x5c chains against a SPIRE trust bundle
-// (ConfigMap in SPIFFE JSON format, from SPIRE's BundlePublisher k8s_configmap plugin).
+// X5CProvider verifies JWS signatures via x5c chains against a SPIRE trust bundle.
+// The trust bundle ConfigMap may contain either PEM certificates (e.g. bundle.crt
+// from ZTWIM/SPIRE) or SPIFFE JSON (from SPIRE's BundlePublisher k8s_configmap plugin).
+// The format is auto-detected at load time.
 type X5CProvider struct {
 	client          client.Client
 	configMapName   string
@@ -332,10 +336,74 @@ func (p *X5CProvider) refreshTrustBundle(ctx context.Context) error {
 
 	newHash := hashString(raw)
 
+	var pool *x509.CertPool
+	var count int
+	var format string
+
+	if strings.Contains(raw, "-----BEGIN CERTIFICATE-----") {
+		pool, count = parsePEMBundle(raw)
+		format = "PEM"
+	} else {
+		var err error
+		pool, count, err = parseSPIFFEJSONBundle(raw)
+		if err != nil {
+			return err
+		}
+		format = "SPIFFE JSON"
+	}
+
+	if count == 0 {
+		x5cTrustBundleLoadErrorsTotal.WithLabelValues("empty_bundle").Inc()
+		return fmt.Errorf("trust bundle contains no certificates (format: %s)", format)
+	}
+
+	p.mu.Lock()
+	oldHash := p.bundleHash
+	p.trustBundle = pool
+	p.lastBundleLoad = time.Now()
+	p.bundleHash = newHash
+	p.mu.Unlock()
+
+	if oldHash != "" && oldHash != newHash {
+		x5cLogger.Info("Trust bundle changed (CA rotation detected)", "format", format, "certificates", count)
+	} else {
+		x5cLogger.Info("Trust bundle loaded", "format", format, "certificates", count)
+	}
+	return nil
+}
+
+// parsePEMBundle parses PEM-encoded certificates (e.g. bundle.crt from ZTWIM/SPIRE).
+func parsePEMBundle(raw string) (*x509.CertPool, int) {
+	pool := x509.NewCertPool()
+	count := 0
+	rest := []byte(raw)
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			x5cTrustBundleLoadErrorsTotal.WithLabelValues("invalid_cert").Inc()
+			x5cLogger.Error(err, "Skipping invalid PEM certificate block")
+			continue
+		}
+		pool.AddCert(cert)
+		count++
+	}
+	return pool, count
+}
+
+// parseSPIFFEJSONBundle parses a SPIFFE trust bundle document (JSON with x5c keys).
+func parseSPIFFEJSONBundle(raw string) (*x509.CertPool, int, error) {
 	var bundle spiffeBundleJSON
 	if err := json.Unmarshal([]byte(raw), &bundle); err != nil {
 		x5cTrustBundleLoadErrorsTotal.WithLabelValues("invalid_json").Inc()
-		return fmt.Errorf("failed to parse SPIFFE bundle JSON: %w", err)
+		return nil, 0, fmt.Errorf("failed to parse SPIFFE bundle JSON: %w", err)
 	}
 
 	pool := x509.NewCertPool()
@@ -348,36 +416,18 @@ func (p *X5CProvider) refreshTrustBundle(ctx context.Context) error {
 			der, err := base64.StdEncoding.DecodeString(b64)
 			if err != nil {
 				x5cTrustBundleLoadErrorsTotal.WithLabelValues("invalid_base64").Inc()
-				return fmt.Errorf("failed to decode x5c cert from SPIFFE bundle: %w", err)
+				return nil, 0, fmt.Errorf("failed to decode x5c cert from SPIFFE bundle: %w", err)
 			}
 			cert, err := x509.ParseCertificate(der)
 			if err != nil {
 				x5cTrustBundleLoadErrorsTotal.WithLabelValues("invalid_cert").Inc()
-				return fmt.Errorf("failed to parse certificate from SPIFFE bundle: %w", err)
+				return nil, 0, fmt.Errorf("failed to parse certificate from SPIFFE bundle: %w", err)
 			}
 			pool.AddCert(cert)
 			count++
 		}
 	}
-
-	if count == 0 {
-		x5cTrustBundleLoadErrorsTotal.WithLabelValues("empty_bundle").Inc()
-		return fmt.Errorf("SPIFFE bundle contains no x509-svid certificates")
-	}
-
-	p.mu.Lock()
-	oldHash := p.bundleHash
-	p.trustBundle = pool
-	p.lastBundleLoad = time.Now()
-	p.bundleHash = newHash
-	p.mu.Unlock()
-
-	if oldHash != "" && oldHash != newHash {
-		x5cLogger.Info("Trust bundle changed (CA rotation detected)", "certificates", count)
-	} else {
-		x5cLogger.Info("Trust bundle loaded", "certificates", count)
-	}
-	return nil
+	return pool, count, nil
 }
 
 func hashString(s string) string {
