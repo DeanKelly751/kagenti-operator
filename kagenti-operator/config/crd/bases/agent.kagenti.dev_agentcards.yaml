@@ -220,6 +220,15 @@ spec:
                         description:
                           description: Description explains what this skill does
                           type: string
+                        examples:
+                          description: Examples are sample scenarios demonstrating
+                            how the skill can be used
+                          items:
+                            type: string
+                          type: array
+                        id:
+                          description: ID is a unique identifier for this skill
+                          type: string
                         inputModes:
                           description: InputModes are the media types this skill accepts
                           items:
@@ -260,6 +269,12 @@ spec:
                                   "number", "boolean", "object", "array")
                                 type: string
                             type: object
+                          type: array
+                        tags:
+                          description: Tags are keywords describing classes of capabilities
+                            for this skill
+                          items:
+                            type: string
                           type: array
                       type: object
                     type: array
