@@ -8,6 +8,8 @@ rules:
   - ""
   resources:
   - configmaps
+  - namespaces
+  - secrets
   - services
   verbs:
   - get
@@ -20,6 +22,14 @@ rules:
   verbs:
   - create
   - patch
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
+  - create
+  - get
+  - update
 - apiGroups:
   - ""
   resources:

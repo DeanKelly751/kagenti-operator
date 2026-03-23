@@ -1,0 +1,234 @@
+package config
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/fsnotify/fsnotify"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/yaml"
+)
+
+var log = logf.Log.WithName("config")
+
+// ConfigLoader loads config from file and watches for changes
+type ConfigLoader struct {
+	configPath string
+
+	mu            sync.RWMutex
+	currentConfig *PlatformConfig
+
+	onChange []func(*PlatformConfig)
+}
+
+func NewConfigLoader(configPath string) *ConfigLoader {
+	return &ConfigLoader{
+		configPath:    configPath,
+		currentConfig: CompiledDefaults(), // Start with compiled defaults
+	}
+}
+
+// Load reads config from file and merges with compiled defaults
+func (l *ConfigLoader) Load() error {
+	log.Info("Loading platform config", "path", l.configPath)
+
+	// Start with compiled defaults (the ultimate fallback)
+	config := CompiledDefaults()
+
+	// Read config file
+	data, err := os.ReadFile(l.configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Info("Config file not found, using compiled defaults only")
+			l.mu.Lock()
+			l.currentConfig = config
+			callbacks := make([]func(*PlatformConfig), len(l.onChange))
+			copy(callbacks, l.onChange)
+			l.mu.Unlock()
+			logConfig(config, "compiled-defaults")
+			for _, cb := range callbacks {
+				cb(config.DeepCopy())
+			}
+			return nil
+		}
+		return err
+	}
+
+	// Parse YAML - this overlays onto the defaults
+	// Fields not specified in file keep their compiled default values
+	if err := yaml.Unmarshal(data, config); err != nil {
+		return err
+	}
+
+	// Validate the merged config
+	if err := config.Validate(); err != nil {
+		return err
+	}
+
+	// Update current config (thread-safe)
+	l.mu.Lock()
+	l.currentConfig = config
+	l.mu.Unlock()
+
+	log.Info("Platform config loaded successfully from file")
+	logConfig(config, "configmap")
+
+	// Snapshot callbacks under lock, then invoke outside lock
+	// so callbacks can safely call Get() without deadlock.
+	l.mu.RLock()
+	callbacks := make([]func(*PlatformConfig), len(l.onChange))
+	copy(callbacks, l.onChange)
+	l.mu.RUnlock()
+
+	for _, cb := range callbacks {
+		cb(config.DeepCopy())
+	}
+
+	return nil
+}
+
+// Get returns current config (thread-safe)
+func (l *ConfigLoader) Get() *PlatformConfig {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	// Return a copy to prevent modification
+	return l.currentConfig.DeepCopy()
+}
+
+// Watch starts watching the config file for changes
+func (l *ConfigLoader) Watch(ctx context.Context) error {
+	// Watch the directory, not the file directly
+	// ConfigMap volumes use symlinks that get replaced on update
+	dir := filepath.Dir(l.configPath)
+
+	// If the directory doesn't exist yet (e.g. volume not mounted),
+	// skip watching — defaults are already loaded.
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		log.Info("Config directory not found, skipping watcher (using defaults)", "dir", dir)
+		return nil
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return err
+	}
+
+	if err := watcher.Add(dir); err != nil {
+		watcher.Close()
+		return err
+	}
+
+	log.Info("Watching config directory for changes", "dir", dir)
+
+	go func() {
+		defer watcher.Close()
+
+		// Debounce rapid changes (ConfigMap updates can trigger multiple events)
+		var debounceTimer *time.Timer
+		defer func() {
+			if debounceTimer != nil {
+				debounceTimer.Stop()
+			}
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				log.Info("Config watcher stopped")
+				return
+
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+
+				// ConfigMap updates create new symlinks
+				if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove) != 0 {
+					log.Info("Config change detected", "event", event.Name, "op", event.Op)
+
+					// Debounce: wait 1 second before reloading
+					if debounceTimer != nil {
+						debounceTimer.Stop()
+					}
+					debounceTimer = time.AfterFunc(1*time.Second, func() {
+						if err := l.Load(); err != nil {
+							log.Error(err, "Failed to reload config")
+						} else {
+							log.Info("Config reloaded successfully")
+						}
+					})
+				}
+
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Error(err, "Config watcher error")
+			}
+		}
+	}()
+
+	return nil
+}
+
+// OnChange registers a callback for config changes.
+// Safe to call concurrently with Load/Watch.
+func (l *ConfigLoader) OnChange(cb func(*PlatformConfig)) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.onChange = append(l.onChange, cb)
+}
+
+// logConfig logs all configuration settings with the given source label
+func logConfig(cfg *PlatformConfig, source string) {
+	log.Info("========== PLATFORM CONFIGURATION ==========")
+	log.Info("[config] source", "source", source)
+	log.Info("[config] images",
+		"envoyProxy", cfg.Images.EnvoyProxy,
+		"proxyInit", cfg.Images.ProxyInit,
+		"spiffeHelper", cfg.Images.SpiffeHelper,
+		"clientRegistration", cfg.Images.ClientRegistration,
+		"pullPolicy", cfg.Images.PullPolicy,
+	)
+	log.Info("[config] proxy",
+		"port", cfg.Proxy.Port,
+		"uid", cfg.Proxy.UID,
+		"inboundProxyPort", cfg.Proxy.InboundProxyPort,
+		"adminPort", cfg.Proxy.AdminPort,
+	)
+	log.Info("[config] resources.envoyProxy",
+		"requests", cfg.Resources.EnvoyProxy.Requests,
+		"limits", cfg.Resources.EnvoyProxy.Limits,
+	)
+	log.Info("[config] resources.proxyInit",
+		"requests", cfg.Resources.ProxyInit.Requests,
+		"limits", cfg.Resources.ProxyInit.Limits,
+	)
+	log.Info("[config] resources.spiffeHelper",
+		"requests", cfg.Resources.SpiffeHelper.Requests,
+		"limits", cfg.Resources.SpiffeHelper.Limits,
+	)
+	log.Info("[config] resources.clientRegistration",
+		"requests", cfg.Resources.ClientRegistration.Requests,
+		"limits", cfg.Resources.ClientRegistration.Limits,
+	)
+	log.Info("[config] tokenExchange",
+		"tokenUrl", cfg.TokenExchange.TokenURL,
+		"defaultAudience", cfg.TokenExchange.DefaultAudience,
+		"defaultScopes", cfg.TokenExchange.DefaultScopes,
+	)
+	log.Info("[config] spiffe",
+		"trustDomain", cfg.Spiffe.TrustDomain,
+		"socketPath", cfg.Spiffe.SocketPath,
+	)
+	log.Info("[config] sidecars",
+		"envoyProxy.enabled", cfg.Sidecars.EnvoyProxy.Enabled,
+		"spiffeHelper.enabled", cfg.Sidecars.SpiffeHelper.Enabled,
+		"clientRegistration.enabled", cfg.Sidecars.ClientRegistration.Enabled,
+	)
+	log.Info("=============================================")
+}

@@ -66,7 +66,7 @@ spec:
           env:
             {{- range $key, $value := .Values.controllerManager.container.env }}
             - name: {{ $key }}
-              value: {{ $value }}
+              value: {{ $value | quote }}
             {{- end }}
           {{- end }}
           livenessProbe:
@@ -83,8 +83,15 @@ spec:
             {{- toYaml .Values.controllerManager.container.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.controllerManager.container.securityContext | nindent 12 }}
-          {{- if and .Values.certmanager.enable (or .Values.webhook.enable .Values.metrics.enable) }}
           volumeMounts:
+            {{- if .Values.webhook.enable }}
+            - name: platform-config
+              mountPath: /etc/kagenti
+              readOnly: true
+            - name: feature-gates
+              mountPath: /etc/kagenti/feature-gates
+              readOnly: true
+            {{- end }}
             {{- if and .Values.webhook.enable .Values.certmanager.enable }}
             - name: webhook-cert
               mountPath: /tmp/k8s-webhook-server/serving-certs
@@ -95,13 +102,19 @@ spec:
               mountPath: /tmp/k8s-metrics-server/metrics-certs
               readOnly: true
             {{- end }}
-          {{- end }}
       securityContext:
         {{- toYaml .Values.controllerManager.securityContext | nindent 8 }}
       serviceAccountName: {{ .Values.controllerManager.serviceAccountName }}
       terminationGracePeriodSeconds: {{ .Values.controllerManager.terminationGracePeriodSeconds }}
-      {{- if and .Values.certmanager.enable (or .Values.webhook.enable .Values.metrics.enable) }}
       volumes:
+        {{- if .Values.webhook.enable }}
+        - name: platform-config
+          configMap:
+            name: kagenti-platform-config
+        - name: feature-gates
+          configMap:
+            name: kagenti-feature-gates
+        {{- end }}
         {{- if and .Values.webhook.enable .Values.certmanager.enable }}
         - name: webhook-cert
           secret:
@@ -112,4 +125,3 @@ spec:
           secret:
             secretName: kagenti-operator-metrics-server-cert
         {{- end }}
-      {{- end }}

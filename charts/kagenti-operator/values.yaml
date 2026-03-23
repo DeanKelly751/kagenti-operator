@@ -103,3 +103,93 @@ signatureVerification:
     refreshInterval: "5m"
   # How far before SVID expiry to trigger proactive workload restart
   svidExpiryGracePeriod: "30m"
+
+# Feature gates — highest-priority layer in the injection precedence chain.
+# Set globalEnabled to false to disable ALL sidecar injection (kill switch).
+# Set individual gates to false to disable specific sidecars cluster-wide.
+featureGates:
+  globalEnabled: true
+  envoyProxy: true
+  spiffeHelper: true
+  clientRegistration: true
+  # injectTools controls whether tool workloads (kagenti.io/type=tool) receive
+  # sidecar injection. Defaults to false — tools are not injected by default.
+  injectTools: false
+  # perWorkloadConfigResolution controls whether namespace ConfigMaps/Secrets are
+  # read on every admission request (true) or cached per namespace (false).
+  # Default false — cached mode is faster and sufficient when namespace ConfigMaps
+  # rarely change. Cache is cleared on webhook pod restart.
+  perWorkloadConfigResolution: false
+  # combinedSidecar controls whether injection uses a single combined authbridge
+  # container instead of separate envoy-proxy + spiffe-helper + client-registration.
+  # Requires the authbridge image. Default false — separate sidecars.
+  combinedSidecar: false
+
+# Platform defaults for AuthBridge sidecar injection.
+# These are the lowest-priority layer — overridden by feature gates,
+# namespace labels/ConfigMaps, and workload labels/AgentRuntime CRs.
+defaults:
+  # Container images with version tags
+  images:
+    envoyProxy: ghcr.io/kagenti/kagenti-extensions/envoy-with-processor:latest
+    proxyInit: ghcr.io/kagenti/kagenti-extensions/proxy-init:latest
+    spiffeHelper: ghcr.io/spiffe/spiffe-helper:0.11.0
+    clientRegistration: ghcr.io/kagenti/kagenti-extensions/client-registration:latest
+    authbridge: ghcr.io/kagenti/kagenti-extensions/authbridge:latest
+    pullPolicy: IfNotPresent
+
+  # Proxy settings
+  proxy:
+    port: 15123
+    uid: 1337
+    adminPort: 9901
+    inboundProxyPort: 15124
+
+  # Resource defaults (conservative for dev)
+  # Note: requests must be <= limits
+  resources:
+    envoyProxy:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    proxyInit:
+      requests:
+        cpu: 10m
+        memory: 10Mi
+      limits:
+        cpu: 10m
+        memory: 10Mi
+    spiffeHelper:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+    clientRegistration:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+    authbridge:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  # Per-sidecar enable/disable at the platform level (lowest-priority layer).
+  # These are overridden by feature gates, namespace labels, and workload labels.
+  sidecars:
+    envoyProxy:
+      enabled: true
+    spiffeHelper:
+      enabled: true
+    clientRegistration:
+      enabled: true

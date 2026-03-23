@@ -47,6 +47,8 @@ import (
 	"github.com/kagenti/operator/internal/keycloak"
 	"github.com/kagenti/operator/internal/signature"
 	"github.com/kagenti/operator/internal/tekton"
+	webhookconfig "github.com/kagenti/operator/internal/webhook/config"
+	"github.com/kagenti/operator/internal/webhook/injector"
 	webhookv1alpha1 "github.com/kagenti/operator/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
@@ -73,6 +75,10 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+
+	var enableClientRegistration bool
+	var configPath string
+	var featureGatesPath string
 
 	var requireA2ASignature bool
 	var signatureAuditMode bool
@@ -103,6 +109,10 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.BoolVar(&enableClientRegistration, "enable-client-registration", true,
+		"If set, AuthBridge webhook will register tool clients in Keycloak")
+	flag.StringVar(&configPath, "config-path", "/etc/kagenti/config.yaml", "Path to platform config file")
+	flag.StringVar(&featureGatesPath, "feature-gates-path", "/etc/kagenti/feature-gates/feature-gates.yaml", "Path to feature gates config file")
 	flag.BoolVar(&requireA2ASignature, "require-a2a-signature", false,
 		"Require A2A agent cards to have a valid signature")
 	flag.BoolVar(&signatureAuditMode, "signature-audit-mode", false,
@@ -133,6 +143,46 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	ctx := ctrl.SetupSignalHandler()
+
+	// ========================================
+	// Load platform configuration (AuthBridge)
+	// ========================================
+	configLoader := webhookconfig.NewConfigLoader(configPath)
+	if err := configLoader.Load(); err != nil {
+		setupLog.Error(err, "Failed to load platform config")
+		os.Exit(1)
+	}
+	configLoader.OnChange(func(cfg *webhookconfig.PlatformConfig) {
+		setupLog.Info("Platform config updated",
+			"envoyImage", cfg.Images.EnvoyProxy,
+			"proxyPort", cfg.Proxy.Port)
+	})
+	if err := configLoader.Watch(ctx); err != nil {
+		setupLog.Error(err, "Failed to start config watcher")
+		// Non-fatal - continue without hot reload
+	}
+
+	// ========================================
+	// Load feature gates (AuthBridge)
+	// ========================================
+	featureGateLoader := webhookconfig.NewFeatureGateLoader(featureGatesPath)
+	if err := featureGateLoader.Load(); err != nil {
+		setupLog.Error(err, "Failed to load feature gates")
+		os.Exit(1)
+	}
+	featureGateLoader.OnChange(func(fg *webhookconfig.FeatureGates) {
+		setupLog.Info("Feature gates updated",
+			"globalEnabled", fg.GlobalEnabled,
+			"envoyProxy", fg.EnvoyProxy,
+			"spiffeHelper", fg.SpiffeHelper,
+			"clientRegistration", fg.ClientRegistration)
+	})
+	if err := featureGateLoader.Watch(ctx); err != nil {
+		setupLog.Error(err, "Failed to start feature gates watcher")
+		// Non-fatal - continue without hot reload
+	}
 
 	// Mitigate CVE-2023-44487 (HTTP/2 Rapid Reset).
 	disableHTTP2 := func(c *tls.Config) {
@@ -361,6 +411,21 @@ func main() {
 		setupLog.Error(err, "unable to create webhook", "webhook", "AgentRuntime")
 		os.Exit(1)
 	}
+
+	// AuthBridge sidecar injection webhook
+	// nolint:goconst
+	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		podMutator := injector.NewPodMutator(
+			mgr.GetClient(),
+			enableClientRegistration,
+			configLoader.Get,
+			featureGateLoader.Get,
+		)
+		if err = webhookv1alpha1.SetupAuthBridgeWebhookWithManager(mgr, podMutator); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "AuthBridge")
+			os.Exit(1)
+		}
+	}
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {
@@ -389,7 +454,7 @@ func main() {
 	}
 
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
