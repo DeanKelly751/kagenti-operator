@@ -335,19 +335,8 @@ func KubectlApplyStdin(yaml, namespace string) (string, error) {
 		args = append(args, "-n", namespace)
 	}
 	cmd := exec.Command("kubectl", args...)
-
-	dir, _ := GetProjectDir()
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GO111MODULE=on")
 	cmd.Stdin = strings.NewReader(yaml)
-
-	command := strings.Join(cmd.Args, " ")
-	_, _ = fmt.Fprintf(GinkgoWriter, "running: %s\n", command)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(output), fmt.Errorf("%s failed with error: (%v) %s", command, err, string(output))
-	}
-	return string(output), nil
+	return Run(cmd)
 }
 
 // KubectlGetJsonpath gets a value using jsonpath from a resource.
@@ -411,7 +400,9 @@ func PatchControllerArgs(namespace, deploy string, addArgs []string) (origArgs [
 	}
 
 	By(fmt.Sprintf("patching controller with args: %v", addArgs))
-	newArgs := append(origArgs, addArgs...)
+	newArgs := make([]string, len(origArgs), len(origArgs)+len(addArgs))
+	copy(newArgs, origArgs)
+	newArgs = append(newArgs, addArgs...)
 	argsJSON, jsonErr := json.Marshal(newArgs)
 	if jsonErr != nil {
 		return origArgs, fmt.Errorf("failed to marshal new args: %w", jsonErr)
@@ -465,7 +456,9 @@ func RestoreControllerArgs(namespace, deploy string, origArgs []string) error {
 func DeployController(namespace, img string) error {
 	By("creating manager namespace")
 	cmd := exec.Command("kubectl", "create", "ns", namespace)
-	_, _ = Run(cmd) // ignore if already exists
+	if _, err := Run(cmd); err != nil && !strings.Contains(err.Error(), "already exists") {
+		return err
+	}
 
 	By("labeling the namespace to enforce the restricted security policy")
 	cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,

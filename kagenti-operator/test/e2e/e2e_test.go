@@ -493,6 +493,15 @@ var _ = Describe("AgentCard E2E", Ordered, func() {
 			if origArgs != nil {
 				err := utils.RestoreControllerArgs(controllerNamespace, controllerDeployment, origArgs)
 				Expect(err).NotTo(HaveOccurred())
+
+				By("verifying controller args were restored")
+				currentArgs, readErr := utils.KubectlGetJsonpath("deployment", controllerDeployment,
+					controllerNamespace, "{.spec.template.spec.containers[0].args}")
+				Expect(readErr).NotTo(HaveOccurred())
+				for _, arg := range []string{"--require-a2a-signature", "--spire-trust-domain"} {
+					Expect(currentArgs).NotTo(ContainSubstring(arg),
+						"controller args not fully restored: still contains "+arg)
+				}
 			}
 		})
 
@@ -513,6 +522,13 @@ var _ = Describe("AgentCard E2E", Ordered, func() {
 				if auditOrigArgs != nil {
 					err := utils.RestoreControllerArgs(controllerNamespace, controllerDeployment, auditOrigArgs)
 					Expect(err).NotTo(HaveOccurred())
+
+					By("verifying audit mode flag was removed")
+					currentArgs, readErr := utils.KubectlGetJsonpath("deployment", controllerDeployment,
+						controllerNamespace, "{.spec.template.spec.containers[0].args}")
+					Expect(readErr).NotTo(HaveOccurred())
+					Expect(currentArgs).NotTo(ContainSubstring("--signature-audit-mode"),
+						"controller args not restored: still contains --signature-audit-mode")
 				}
 			})
 
