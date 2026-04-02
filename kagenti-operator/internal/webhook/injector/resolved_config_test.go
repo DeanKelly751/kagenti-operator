@@ -36,7 +36,7 @@ func TestResolveConfig_NilInputs(t *testing.T) {
 func TestResolveConfig_NamespaceOnly(t *testing.T) {
 	ns := &NamespaceConfig{
 		KeycloakURL:    "http://keycloak:8080",
-		KeycloakRealm:  "demo",
+		KeycloakRealm:  "kagenti",
 		TokenURL:       "http://keycloak:8080/token",
 		Issuer:         "http://keycloak:8080/realms/demo",
 		TargetAudience: "my-audience",

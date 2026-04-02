@@ -35,10 +35,7 @@ const (
 	ProxyInitContainerName   = "proxy-init"
 	AuthBridgeContainerName  = "authbridge"
 
-	// Client registration container configuration
-	// Keep in sync with AuthBridge/client-registration/Dockerfile
-	ClientRegistrationUID = 1000
-	ClientRegistrationGID = 1000
+	SharedVolumesFSGroup = 0
 )
 
 // ContainerBuilder creates container specs from resolved config.
@@ -104,10 +101,13 @@ func (b *ContainerBuilder) BuildSpiffeHelperContainer() corev1.Container {
 				MountPath: "/shared",
 			},
 		},
+		// No hardcoded UID/GID — let the platform assign the user.
+		// On OpenShift, MustRunAsRange assigns a UID from the namespace range.
+		// On vanilla Kubernetes, the container runs as the image's default UID.
+		// fsGroup=0 on the pod ensures all containers share GID 0 for file access.
 		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:    ptr.To(int64(ClientRegistrationUID)),
-			RunAsGroup:   ptr.To(int64(ClientRegistrationGID)),
-			RunAsNonRoot: ptr.To(true),
+			RunAsNonRoot:             ptr.To(true),
+			AllowPrivilegeEscalation: ptr.To(false),
 		},
 	}
 }
@@ -212,9 +212,8 @@ tail -f /dev/null
 		Env:          env,
 		VolumeMounts: volumeMounts,
 		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:    ptr.To(int64(ClientRegistrationUID)),
-			RunAsGroup:   ptr.To(int64(ClientRegistrationGID)),
-			RunAsNonRoot: ptr.To(true),
+			RunAsNonRoot:             ptr.To(true),
+			AllowPrivilegeEscalation: ptr.To(false),
 		},
 	}
 }
@@ -253,6 +252,9 @@ func (b *ContainerBuilder) buildClientRegistrationEnvResolved(clientName string,
 		{Name: "CLIENT_NAME", Value: clientName},
 		{Name: "SECRET_FILE_PATH", Value: "/shared/client-secret.txt"},
 		{Name: "PLATFORM_CLIENT_IDS", Value: b.resolved.PlatformClientIDs},
+		{Name: "CLIENT_AUTH_TYPE", Value: b.resolved.ClientAuthType},
+		{Name: "SPIFFE_IDP_ALIAS", Value: b.resolved.SpiffeIdpAlias},
+		{Name: "JWT_AUDIENCE", Value: b.resolved.JWTAudience},
 	}
 }
 
@@ -314,6 +316,36 @@ func (b *ContainerBuilder) buildClientRegistrationEnvLegacy(clientName string, s
 				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: AuthBridgeConfigMapName},
 					Key:                  "PLATFORM_CLIENT_IDS",
+					Optional:             ptr.To(true),
+				},
+			},
+		},
+		{
+			Name: "CLIENT_AUTH_TYPE",
+			ValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: AuthBridgeConfigMapName},
+					Key:                  "CLIENT_AUTH_TYPE",
+					Optional:             ptr.To(true),
+				},
+			},
+		},
+		{
+			Name: "SPIFFE_IDP_ALIAS",
+			ValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: AuthBridgeConfigMapName},
+					Key:                  "SPIFFE_IDP_ALIAS",
+					Optional:             ptr.To(true),
+				},
+			},
+		},
+		{
+			Name: "JWT_AUDIENCE",
+			ValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: AuthBridgeConfigMapName},
+					Key:                  "JWT_AUDIENCE",
 					Optional:             ptr.To(true),
 				},
 			},
@@ -395,8 +427,10 @@ func (b *ContainerBuilder) BuildEnvoyProxyContainerWithSpireOption(spireEnabled 
 		},
 		Env: env,
 		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:  ptr.To(b.cfg.Proxy.UID),
-			RunAsGroup: ptr.To(b.cfg.Proxy.UID),
+			RunAsUser:                ptr.To(b.cfg.Proxy.UID),
+			RunAsGroup:               ptr.To(b.cfg.Proxy.UID),
+			RunAsNonRoot:             ptr.To(true),
+			AllowPrivilegeEscalation: ptr.To(false),
 		},
 		VolumeMounts: volumeMounts,
 	}
@@ -600,8 +634,10 @@ func (b *ContainerBuilder) BuildAuthBridgeContainer(name, namespace string, spir
 		},
 		Env: env,
 		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:  ptr.To(b.cfg.Proxy.UID),
-			RunAsGroup: ptr.To(b.cfg.Proxy.UID),
+			RunAsUser:                ptr.To(b.cfg.Proxy.UID),
+			RunAsGroup:               ptr.To(b.cfg.Proxy.UID),
+			RunAsNonRoot:             ptr.To(true),
+			AllowPrivilegeEscalation: ptr.To(false),
 		},
 		VolumeMounts: volumeMounts,
 	}
