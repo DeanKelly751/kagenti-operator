@@ -112,7 +112,8 @@ func main() {
 	flag.BoolVar(&enableClientRegistration, "enable-client-registration", true,
 		"If set, AuthBridge webhook will register tool clients in Keycloak")
 	flag.StringVar(&configPath, "config-path", "/etc/kagenti/config.yaml", "Path to platform config file")
-	flag.StringVar(&featureGatesPath, "feature-gates-path", "/etc/kagenti/feature-gates/feature-gates.yaml", "Path to feature gates config file")
+	flag.StringVar(&featureGatesPath, "feature-gates-path",
+		"/etc/kagenti/feature-gates/feature-gates.yaml", "Path to feature gates config file")
 	flag.BoolVar(&requireA2ASignature, "require-a2a-signature", false,
 		"Require A2A agent cards to have a valid signature")
 	flag.BoolVar(&signatureAuditMode, "signature-audit-mode", false,

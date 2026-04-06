@@ -118,14 +118,14 @@ func (l *ConfigLoader) Watch(ctx context.Context) error {
 	}
 
 	if err := watcher.Add(dir); err != nil {
-		watcher.Close()
+		_ = watcher.Close()
 		return err
 	}
 
 	log.Info("Watching config directory for changes", "dir", dir)
 
 	go func() {
-		defer watcher.Close()
+		defer func() { _ = watcher.Close() }()
 
 		// Debounce rapid changes (ConfigMap updates can trigger multiple events)
 		var debounceTimer *time.Timer

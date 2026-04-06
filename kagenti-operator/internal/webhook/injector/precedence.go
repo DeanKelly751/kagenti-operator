@@ -4,6 +4,11 @@ import (
 	"github.com/kagenti/operator/internal/webhook/config"
 )
 
+const (
+	labelValueTrue  = "true"
+	labelValueFalse = "false"
+)
+
 // PrecedenceEvaluator determines which sidecars should be injected for a workload
 // by evaluating a per-sidecar precedence chain. Each layer can short-circuit with "no".
 //
@@ -73,7 +78,7 @@ func (e *PrecedenceEvaluator) evaluateClientRegistration(workloadLabelValue stri
 			Layer:  "feature-gate",
 		}
 	}
-	if workloadLabelValue == "true" {
+	if workloadLabelValue == labelValueTrue {
 		return SidecarDecision{
 			Inject: true,
 			Reason: "workload opted in to legacy client-registration (kagenti.io/client-registration-inject=true)",
@@ -103,7 +108,7 @@ func (e *PrecedenceEvaluator) evaluateSidecar(
 	}
 
 	// Layer 2: Per-sidecar workload opt-out label
-	if workloadLabelValue == "false" {
+	if workloadLabelValue == labelValueFalse {
 		return SidecarDecision{
 			Inject: false,
 			Reason: "workload label disabled " + sidecarName,

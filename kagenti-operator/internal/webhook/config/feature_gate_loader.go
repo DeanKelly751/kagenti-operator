@@ -109,14 +109,14 @@ func (l *FeatureGateLoader) Watch(ctx context.Context) error {
 	}
 
 	if err := watcher.Add(dir); err != nil {
-		watcher.Close()
+		_ = watcher.Close()
 		return fmt.Errorf("watching feature gates directory %s: %w", dir, err)
 	}
 
 	log.Info("Watching feature gates directory for changes", "dir", dir)
 
 	go func() {
-		defer watcher.Close()
+		defer func() { _ = watcher.Close() }()
 
 		var debounceTimer *time.Timer
 		defer func() {

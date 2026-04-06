@@ -96,6 +96,8 @@ func NewPodMutator(
 }
 
 // InjectAuthBridge evaluates the multi-layer precedence chain and conditionally injects sidecars.
+//
+//nolint:gocyclo // sequential injection steps form a single logical pipeline
 func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSpec, namespace, crName string, labels, annotations map[string]string) (bool, error) {
 	mutatorLog.Info("InjectAuthBridge called", "namespace", namespace, "crName", crName, "labels", labels)
 
