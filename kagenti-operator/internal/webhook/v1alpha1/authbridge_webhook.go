@@ -117,16 +117,30 @@ func (w *AuthBridgeWebhook) Handle(ctx context.Context, req admission.Request) a
 	return admission.PatchResponseFromRaw(req.Object.Raw, marshaledMutated)
 }
 
-// deriveWorkloadName extracts a workload name from the Pod for ServiceAccount
-// and client-registration naming. For controller-managed Pods, GenerateName
-// is set (e.g. "myapp-7d4f8b9c5-") and we trim the trailing hyphen — this
-// yields the ReplicaSet name (e.g. "myapp-7d4f8b9c5"), not the Deployment
-// name. Resolving the Deployment name requires a ReplicaSet owner-ref lookup,
-// which is planned for Phase 2 (AgentRuntime CR integration, issue #177).
+// deriveWorkloadName extracts the top-level workload name (Deployment/StatefulSet)
+// from the Pod. For Deployment-managed Pods, GenerateName is "<rs-name>-" where
+// the ReplicaSet name is "<deployment>-<pod-template-hash>". We strip the
+// pod-template-hash suffix to recover the Deployment name so it matches
+// AgentRuntime.spec.targetRef.name.
 // For bare Pods, we use the Pod name directly.
 func deriveWorkloadName(pod *corev1.Pod) string {
 	if pod.GenerateName != "" {
-		return strings.TrimRight(pod.GenerateName, "-")
+		rsName := strings.TrimRight(pod.GenerateName, "-")
+
+		// Use the pod-template-hash label to strip the ReplicaSet suffix
+		// and recover the Deployment name.
+		if hash, ok := pod.Labels["pod-template-hash"]; ok && hash != "" {
+			suffix := "-" + hash
+			if strings.HasSuffix(rsName, suffix) {
+				deployName := strings.TrimSuffix(rsName, suffix)
+				if deployName != "" {
+					return deployName
+				}
+			}
+		}
+
+		// Fallback: return the ReplicaSet name if no hash label
+		return rsName
 	}
 	if pod.Name != "" {
 		return pod.Name
