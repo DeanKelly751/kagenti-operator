@@ -19,6 +19,7 @@ package injector
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/kagenti/operator/internal/webhook/config"
 	corev1 "k8s.io/api/core/v1"
@@ -292,6 +293,12 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 		}
 	}
 
+	// Mount operator-managed Keycloak client credentials if annotation is present
+	ApplyKeycloakClientCredentialsSecretVolumes(podSpec, annotations)
+
+	// Log how credentials are delivered for this pod
+	logClientRegistrationPaths(namespace, crName, labels, currentGates.CombinedSidecar, decision, annotations)
+
 	// Set fsGroup for shared volume access when SPIRE is enabled
 	if spireEnabled {
 		ensureFSGroup(podSpec)
@@ -359,6 +366,39 @@ func volumeExists(volumes []corev1.Volume, name string) bool {
 		}
 	}
 	return false
+}
+
+// logClientRegistrationPaths logs how Keycloak credentials are delivered to this pod.
+func logClientRegistrationPaths(namespace, crName string, labels map[string]string, combinedSidecar bool, decision InjectionDecision, annotations map[string]string) {
+	keycloakClientCredentialsSecret := strings.TrimSpace(annotations[AnnotationKeycloakClientSecretName])
+
+	var paths []string
+	if keycloakClientCredentialsSecret != "" {
+		paths = append(paths, "operator-secret")
+	}
+
+	if combinedSidecar {
+		if decision.EnvoyProxy.Inject && decision.ClientRegistration.Inject {
+			paths = append(paths, "combined-authbridge")
+		}
+	} else if decision.ClientRegistration.Inject {
+		paths = append(paths, "sidecar")
+	}
+
+	if len(paths) == 0 {
+		paths = append(paths, "skip")
+	}
+
+	mutatorLog.Info("AuthBridge client registration: how credentials are supplied for this Pod",
+		"namespace", namespace,
+		"workloadKey", crName,
+		"kagentiType", labels[KagentiTypeLabel],
+		"deliveryPaths", strings.Join(paths, ","),
+		"keycloakClientCredentialsSecretName", keycloakClientCredentialsSecret,
+		"combinedSidecarMode", combinedSidecar,
+		"injectClientRegistrationSidecar", decision.ClientRegistration.Inject,
+		"injectEnvoyOrAuthbridge", decision.EnvoyProxy.Inject,
+	)
 }
 
 // ensureFSGroup sets fsGroup in the pod security context to enable shared volume access.

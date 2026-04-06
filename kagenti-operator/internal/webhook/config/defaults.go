@@ -13,7 +13,7 @@ func CompiledDefaults() *PlatformConfig {
 		Images: ImageConfig{
 			EnvoyProxy:         "ghcr.io/kagenti/kagenti-extensions/envoy-with-processor:latest",
 			ProxyInit:          "ghcr.io/kagenti/kagenti-extensions/proxy-init:latest",
-			SpiffeHelper:       "ghcr.io/kagenti/kagenti-extensions/spiffe-helper:v0.11.0",
+			SpiffeHelper:       "ghcr.io/kagenti/kagenti-extensions/spiffe-helper:latest",
 			ClientRegistration: "ghcr.io/kagenti/kagenti-extensions/client-registration:latest",
 			AuthBridge:         "ghcr.io/kagenti/kagenti-extensions/authbridge:latest",
 			PullPolicy:         corev1.PullIfNotPresent,
@@ -71,8 +71,8 @@ func CompiledDefaults() *PlatformConfig {
 					corev1.ResourceMemory: resource.MustParse("128Mi"),
 				},
 				Limits: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("500m"),
-					corev1.ResourceMemory: resource.MustParse("512Mi"),
+					corev1.ResourceCPU:    resource.MustParse("300m"),
+					corev1.ResourceMemory: resource.MustParse("384Mi"),
 				},
 			},
 		},

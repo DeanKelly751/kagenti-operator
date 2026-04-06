@@ -83,8 +83,20 @@ func (w *AuthBridgeWebhook) Handle(ctx context.Context, req admission.Request) a
 	// but GenerateName is set by the owning controller (e.g. "myapp-7d4f8b9c5-").
 	resourceName := deriveWorkloadName(&pod)
 
-	// Check if already injected (idempotency)
+	// Check if already injected (idempotency / reinvocation)
 	if w.isAlreadyInjected(&pod.Spec) {
+		// Reinvocation: sidecars exist but Keycloak Secret mounts may still be
+		// missing (annotation added after first webhook pass).
+		if injector.NeedsKeycloakClientCredentialsVolumePatch(&pod.Spec, pod.Annotations) {
+			injector.ApplyKeycloakClientCredentialsSecretVolumes(&pod.Spec, pod.Annotations)
+			marshaledMutated, err := json.Marshal(&pod)
+			if err != nil {
+				return admission.Errored(http.StatusInternalServerError, err)
+			}
+			authbridgelog.Info("Applied operator client-reg Secret mounts on reinvocation",
+				"namespace", req.Namespace, "name", resourceName)
+			return admission.PatchResponseFromRaw(req.Object.Raw, marshaledMutated)
+		}
 		authbridgelog.Info("Skipping - sidecars already injected",
 			"namespace", req.Namespace,
 			"name", resourceName)
