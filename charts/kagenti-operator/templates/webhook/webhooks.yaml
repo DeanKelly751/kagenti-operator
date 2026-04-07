@@ -18,6 +18,7 @@ webhooks:
       name: {{ include "chart.fullname" . }}-webhook-service
       namespace: {{ .Release.Namespace }}
       path: /mutate-workloads-authbridge
+      port: 443
   failurePolicy: Fail
   reinvocationPolicy: IfNeeded
   timeoutSeconds: 10

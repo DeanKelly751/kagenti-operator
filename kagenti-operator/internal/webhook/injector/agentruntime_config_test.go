@@ -189,15 +189,16 @@ func TestReadAgentRuntimeOverrides_NoTargetRefMatch(t *testing.T) {
 }
 
 func TestReadAgentRuntimeOverrides_CRDNotInstalled(t *testing.T) {
-	// Empty scheme — no AgentRuntime types registered
+	// Empty scheme — no AgentRuntime types registered.
+	// The List call should return an error (CRD unknown to the client).
 	scheme := runtime.NewScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	overrides, err := ReadAgentRuntimeOverrides(context.Background(), fakeClient, "ns1", "my-agent")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error when CRD is not installed, got nil")
 	}
 	if overrides != nil {
-		t.Fatalf("expected nil overrides when CRD not installed, got %+v", overrides)
+		t.Fatalf("expected nil overrides on error, got %+v", overrides)
 	}
 }

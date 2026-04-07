@@ -18,6 +18,7 @@ package injector
 
 import (
 	"context"
+	"fmt"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -54,10 +55,7 @@ type AgentRuntimeOverrides struct {
 func ReadAgentRuntimeOverrides(ctx context.Context, c client.Reader, namespace, workloadName string) (*AgentRuntimeOverrides, error) {
 	list := &agentv1alpha1.AgentRuntimeList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
-		// CRD not installed or API error — expected during graceful degradation
-		arConfigLog.V(1).Info("AgentRuntime CRD not available or list failed",
-			"namespace", namespace, "error", err)
-		return nil, nil
+		return nil, fmt.Errorf("listing AgentRuntime CRs in %s: %w", namespace, err)
 	}
 
 	// Find the AgentRuntime whose spec.targetRef.name matches the workload

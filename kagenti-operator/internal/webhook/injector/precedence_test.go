@@ -10,10 +10,6 @@ func allEnabledGates() *config.FeatureGates {
 	return config.DefaultFeatureGates()
 }
 
-func allEnabledConfig() *config.PlatformConfig {
-	return config.CompiledDefaults()
-}
-
 func noLabels() map[string]string {
 	return map[string]string{}
 }
@@ -22,7 +18,6 @@ func TestPrecedenceEvaluator(t *testing.T) {
 	tests := []struct {
 		name             string
 		featureGates     *config.FeatureGates
-		platformConfig   *config.PlatformConfig
 		workloadLabels   map[string]string
 		expectEnvoy      bool
 		expectProxyInit  bool
@@ -39,7 +34,7 @@ func TestPrecedenceEvaluator(t *testing.T) {
 				SpiffeHelper:       true,
 				ClientRegistration: true,
 			},
-			platformConfig:   allEnabledConfig(),
+
 			workloadLabels:   noLabels(),
 			expectEnvoy:      false,
 			expectProxyInit:  false, // follows envoy
@@ -55,7 +50,7 @@ func TestPrecedenceEvaluator(t *testing.T) {
 				SpiffeHelper:       false,
 				ClientRegistration: true,
 			},
-			platformConfig:  allEnabledConfig(),
+
 			workloadLabels:  noLabels(),
 			expectEnvoy:     true,
 			expectProxyInit: true,
@@ -70,7 +65,7 @@ func TestPrecedenceEvaluator(t *testing.T) {
 				SpiffeHelper:       true,
 				ClientRegistration: false,
 			},
-			platformConfig:  allEnabledConfig(),
+
 			workloadLabels:  noLabels(),
 			expectEnvoy:     true,
 			expectProxyInit: true,
@@ -80,9 +75,9 @@ func TestPrecedenceEvaluator(t *testing.T) {
 
 		// === Workload label tests ===
 		{
-			name:             "workload label disables envoy - envoy and proxy-init skipped",
-			featureGates:     allEnabledGates(),
-			platformConfig:   allEnabledConfig(),
+			name:         "workload label disables envoy - envoy and proxy-init skipped",
+			featureGates: allEnabledGates(),
+
 			workloadLabels:   map[string]string{LabelEnvoyProxyInject: "false"},
 			expectEnvoy:      false,
 			expectProxyInit:  false,
@@ -91,9 +86,9 @@ func TestPrecedenceEvaluator(t *testing.T) {
 			expectEnvoyLayer: "workload-label",
 		},
 		{
-			name:            "workload label disables spiffe only",
-			featureGates:    allEnabledGates(),
-			platformConfig:  allEnabledConfig(),
+			name:         "workload label disables spiffe only",
+			featureGates: allEnabledGates(),
+
 			workloadLabels:  map[string]string{LabelSpiffeHelperInject: "false"},
 			expectEnvoy:     true,
 			expectProxyInit: true,
@@ -101,9 +96,9 @@ func TestPrecedenceEvaluator(t *testing.T) {
 			expectClientReg: false, // opt-in: no label → not injected
 		},
 		{
-			name:            "workload label disables client-registration explicitly",
-			featureGates:    allEnabledGates(),
-			platformConfig:  allEnabledConfig(),
+			name:         "workload label disables client-registration explicitly",
+			featureGates: allEnabledGates(),
+
 			workloadLabels:  map[string]string{LabelClientRegistrationInject: "false"},
 			expectEnvoy:     true,
 			expectProxyInit: true,
@@ -111,9 +106,9 @@ func TestPrecedenceEvaluator(t *testing.T) {
 			expectClientReg: false,
 		},
 		{
-			name:            "client-registration label true - opt-in sidecar injected",
-			featureGates:    allEnabledGates(),
-			platformConfig:  allEnabledConfig(),
+			name:         "client-registration label true - opt-in sidecar injected",
+			featureGates: allEnabledGates(),
+
 			workloadLabels:  map[string]string{LabelClientRegistrationInject: "true"},
 			expectEnvoy:     true,
 			expectProxyInit: true,
@@ -121,9 +116,9 @@ func TestPrecedenceEvaluator(t *testing.T) {
 			expectClientReg: true,
 		},
 		{
-			name:            "workload label true value on envoy - no effect on others",
-			featureGates:    allEnabledGates(),
-			platformConfig:  allEnabledConfig(),
+			name:         "workload label true value on envoy - no effect on others",
+			featureGates: allEnabledGates(),
+
 			workloadLabels:  map[string]string{LabelEnvoyProxyInject: "true"},
 			expectEnvoy:     true,
 			expectProxyInit: true,
@@ -131,9 +126,9 @@ func TestPrecedenceEvaluator(t *testing.T) {
 			expectClientReg: false, // opt-in: no client-reg label → not injected
 		},
 		{
-			name:            "workload labels absent - envoy+spiffe injected, client-reg not (opt-in)",
-			featureGates:    allEnabledGates(),
-			platformConfig:  allEnabledConfig(),
+			name:         "workload labels absent - envoy+spiffe injected, client-reg not (opt-in)",
+			featureGates: allEnabledGates(),
+
 			workloadLabels:  noLabels(),
 			expectEnvoy:     true,
 			expectProxyInit: true,
@@ -141,9 +136,9 @@ func TestPrecedenceEvaluator(t *testing.T) {
 			expectClientReg: false, // opt-in: default is operator-managed
 		},
 		{
-			name:           "all workload opt-out labels set - all skipped",
-			featureGates:   allEnabledGates(),
-			platformConfig: allEnabledConfig(),
+			name:         "all workload opt-out labels set - all skipped",
+			featureGates: allEnabledGates(),
+
 			workloadLabels: map[string]string{
 				LabelEnvoyProxyInject:         "false",
 				LabelSpiffeHelperInject:       "false",
@@ -156,9 +151,9 @@ func TestPrecedenceEvaluator(t *testing.T) {
 			expectEnvoyLayer: "workload-label",
 		},
 		{
-			name:           "all labels opt-in - everything injected",
-			featureGates:   allEnabledGates(),
-			platformConfig: allEnabledConfig(),
+			name:         "all labels opt-in - everything injected",
+			featureGates: allEnabledGates(),
+
 			workloadLabels: map[string]string{
 				LabelClientRegistrationInject: "true",
 			},
@@ -177,7 +172,7 @@ func TestPrecedenceEvaluator(t *testing.T) {
 				SpiffeHelper:       true,
 				ClientRegistration: true,
 			},
-			platformConfig:   allEnabledConfig(),
+
 			workloadLabels:   map[string]string{LabelEnvoyProxyInject: "true"},
 			expectEnvoy:      false,
 			expectProxyInit:  false,
@@ -193,7 +188,7 @@ func TestPrecedenceEvaluator(t *testing.T) {
 				SpiffeHelper:       true,
 				ClientRegistration: false,
 			},
-			platformConfig:  allEnabledConfig(),
+
 			workloadLabels:  map[string]string{LabelClientRegistrationInject: "true"},
 			expectEnvoy:     true,
 			expectProxyInit: true,
@@ -201,9 +196,9 @@ func TestPrecedenceEvaluator(t *testing.T) {
 			expectClientReg: false, // gate off overrides opt-in label
 		},
 		{
-			name:             "all gates pass, no client-reg label - envoy+spiffe injected",
-			featureGates:     allEnabledGates(),
-			platformConfig:   allEnabledConfig(),
+			name:         "all gates pass, no client-reg label - envoy+spiffe injected",
+			featureGates: allEnabledGates(),
+
 			workloadLabels:   noLabels(),
 			expectEnvoy:      true,
 			expectProxyInit:  true,
@@ -221,7 +216,7 @@ func TestPrecedenceEvaluator(t *testing.T) {
 				SpiffeHelper:       true,
 				ClientRegistration: true,
 			},
-			platformConfig:  allEnabledConfig(),
+
 			workloadLabels:  noLabels(),
 			expectEnvoy:     false,
 			expectProxyInit: false,
@@ -229,9 +224,9 @@ func TestPrecedenceEvaluator(t *testing.T) {
 			expectClientReg: false, // opt-in: no label
 		},
 		{
-			name:            "envoy skipped via workload label - proxy-init also skipped",
-			featureGates:    allEnabledGates(),
-			platformConfig:  allEnabledConfig(),
+			name:         "envoy skipped via workload label - proxy-init also skipped",
+			featureGates: allEnabledGates(),
+
 			workloadLabels:  map[string]string{LabelEnvoyProxyInject: "false"},
 			expectEnvoy:     false,
 			expectProxyInit: false,
@@ -242,7 +237,7 @@ func TestPrecedenceEvaluator(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			evaluator := NewPrecedenceEvaluator(tt.featureGates, tt.platformConfig)
+			evaluator := NewPrecedenceEvaluator(tt.featureGates)
 			decision := evaluator.Evaluate(tt.workloadLabels)
 
 			if decision.EnvoyProxy.Inject != tt.expectEnvoy {

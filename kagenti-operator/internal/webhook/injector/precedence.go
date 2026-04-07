@@ -23,8 +23,8 @@ type PrecedenceEvaluator struct {
 	featureGates *config.FeatureGates
 }
 
-// NewPrecedenceEvaluator creates a new evaluator with the given feature gates and platform config.
-func NewPrecedenceEvaluator(fg *config.FeatureGates, pc *config.PlatformConfig) *PrecedenceEvaluator {
+// NewPrecedenceEvaluator creates a new evaluator with the given feature gates.
+func NewPrecedenceEvaluator(fg *config.FeatureGates) *PrecedenceEvaluator {
 	if fg == nil {
 		fg = config.DefaultFeatureGates()
 	}

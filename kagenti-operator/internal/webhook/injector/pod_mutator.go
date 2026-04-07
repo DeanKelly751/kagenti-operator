@@ -136,7 +136,7 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 	}
 
 	// Evaluate the per-sidecar precedence chain
-	evaluator := NewPrecedenceEvaluator(currentGates, currentConfig)
+	evaluator := NewPrecedenceEvaluator(currentGates)
 	decision := evaluator.Evaluate(labels)
 
 	// Log each sidecar decision
@@ -167,9 +167,9 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 	// deployed before the CR is created will not be injected.
 	arOverrides, err := ReadAgentRuntimeOverrides(ctx, m.Client, namespace, crName)
 	if err != nil {
-		mutatorLog.Error(err, "failed to read AgentRuntime, skipping injection",
+		mutatorLog.Error(err, "failed to read AgentRuntime",
 			"namespace", namespace, "crName", crName)
-		return false, nil
+		return false, err
 	}
 	if arOverrides == nil {
 		mutatorLog.Info("Skipping mutation: no matching AgentRuntime CR found",
