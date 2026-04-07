@@ -72,11 +72,12 @@ The Kagenti Operator is a Kubernetes controller that implements the [Operator Pa
 - Computes config hash from 3-layer merged configuration (cluster defaults → namespace defaults → CR overrides)
 - Triggers rolling updates when configuration changes (any layer)
 - On CR deletion: preserves type label, updates config-hash to defaults-only, removes managed-by label
-- Coordinates with the kagenti-extensions webhook which injects sidecars at Pod CREATE time
+- Coordinates with the AuthBridge mutating webhook (in-process) which injects sidecars at Pod CREATE time
 
 ### Supporting Components
 
 #### Webhooks
+- **AuthBridge Mutating Webhook**: Intercepts Pod CREATE requests and injects sidecar containers (envoy-proxy, proxy-init, spiffe-helper, client-registration) based on feature gates, workload labels, and AgentRuntime CR configuration. See [AuthBridge Webhook Design](authbridge-webhook.md) for the full precedence chain and configuration merge.
 - **AgentCard Validator**: Ensures `targetRef` is set on AgentCards. Rejects duplicate `targetRef` entries (prevents multiple AgentCards targeting the same workload in a namespace).
 - **AgentRuntime Validator**: Rejects duplicate `targetRef` entries (prevents multiple AgentRuntime CRs targeting the same workload in a namespace). Uses authoritative API server reads to eliminate informer cache-lag races.
 
@@ -97,24 +98,21 @@ graph TB
     end
 
     subgraph "Kagenti Operator"
-        Webhook[Admission Webhook]
+        ValidationWebhook[Validating Webhooks]
+        InjectionWebhook[AuthBridge Mutating Webhook]
         CardController[AgentCard Controller]
         SyncController[AgentCardSync Controller]
         RuntimeController[AgentRuntime Controller]
-        CardCR -->|Validates| Webhook
-        RuntimeCR -->|Validates| Webhook
+        CardCR -->|Validates| ValidationWebhook
+        RuntimeCR -->|Validates| ValidationWebhook
 
-        Webhook -->|Valid CR| CardController
+        ValidationWebhook -->|Valid CR| CardController
     end
 
     subgraph "Config Sources"
         ClusterCM[Cluster Defaults ConfigMaps]
         NsCM[Namespace Defaults ConfigMap]
         TrustBundle[SPIRE Trust Bundle ConfigMap]
-    end
-
-    subgraph "Kagenti Webhook Pod"
-        InjectionWebhook[Mutating Webhook]
     end
 
     subgraph "Runtime"
@@ -141,7 +139,8 @@ graph TB
     style User fill:#ffecb3
     style CardCR fill:#e1f5fe
     style RuntimeCR fill:#e1f5fe
-    style Webhook fill:#fff3e0
+    style ValidationWebhook fill:#fff3e0
+    style InjectionWebhook fill:#fff3e0
     style CardController fill:#ffe0b2
     style SyncController fill:#ffe0b2
     style Deployment fill:#d1c4e9
@@ -219,7 +218,7 @@ The AgentRuntime Controller reconciles AgentRuntime CRs by resolving the target 
 
 #### Controller ↔ Webhook Interaction
 
-The controller and the AuthBridge mutating webhook work together:
+The controller and the AuthBridge mutating webhook (both in the same operator binary) work together:
 
 ```
 AgentRuntime CR created/updated
@@ -438,5 +437,7 @@ The operator exposes metrics via Prometheus:
 - [Dynamic Agent Discovery](./dynamic-agent-discovery.md) — AgentCard discovery system
 - [Signature Verification](./agentcard-signature-verification.md) — JWS signature setup guide
 - [Identity Binding](./agentcard-identity-binding.md) — SPIFFE identity binding guide
+- [AuthBridge Webhook Design](./authbridge-webhook.md) — Sidecar injection precedence and configuration
+- [Operator-Managed Client Registration](./operator-managed-client-registration.md) — Keycloak credential lifecycle
 - [Developer Guide](./dev.md) — Contributing to the operator
 - [Getting Started](../GETTING_STARTED.md) — Tutorials and examples

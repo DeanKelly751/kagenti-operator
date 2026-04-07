@@ -1,8 +1,8 @@
 # Operator-managed Keycloak client registration
 
-This document describes the split responsibility between **kagenti-operator** and **kagenti-webhook** for registering agent workloads as OAuth clients in Keycloak and delivering credentials to AuthBridge sidecars.
+This document describes the split responsibility between the **operator controllers** and the **AuthBridge mutating webhook** for registering agent workloads as OAuth clients in Keycloak and delivering credentials to AuthBridge sidecars.
 
-The implementation lives in two repositories today (`kagenti-operator`, `kagenti-extensions` / `kagenti-webhook`); the same feature branch name is used in both until the code is consolidated into a single repo.
+Both the operator controllers and the webhook now live in a single binary in this repository (`kagenti-operator`).
 
 ---
 
@@ -49,9 +49,9 @@ The webhook continues to inject **proxy-init**, **envoy** / **authbridge**, and 
 | `kagenti.io/client-registration-inject` | `"true"` | **Legacy**: webhook injects the client-registration sidecar (or enables registration in combined authbridge); operator **does not** manage registration for this workload. |
 | `kagenti.io/keycloak-client-credentials-secret-name` | Secret name | Set by the operator on the **pod template**; webhook reads it from **Pod** annotations at admission time and mounts the Secret. |
 
-The string values for the label key and the annotation key are **duplicated** in both repos and must stay in sync:
+The label and annotation key constants are shared within the repository:
 
-- Operator: `LabelClientRegistrationInject`, `AnnotationKeycloakClientSecretName` in `clientregistration_controller.go`.
+- Controller: `LabelClientRegistrationInject`, `AnnotationKeycloakClientSecretName` in `clientregistration_controller.go`.
 - Webhook: `LabelClientRegistrationInject` in `constants.go`, `AnnotationKeycloakClientSecretName` in `keycloak_client_credentials.go`.
 
 ### 2.2 Which workloads the operator reconciles
@@ -86,10 +86,10 @@ Other workloads are ignored by this controller.
 
 | Component | Flag / gate | Role |
 |-----------|-------------|------|
-| Operator | `--enable-operator-client-registration` (default **false**) | Master switch for the ClientRegistration controller. |
-| Operator | `--spire-trust-domain` | Required for SPIFFE-shaped client IDs when `authbridge-config` has `SPIRE_ENABLED=true`. |
-| Webhook | `--enable-client-registration` | Cluster-wide gate for client-registration **injection** (precedence still applies). |
-| Webhook | Feature gates ConfigMap | `clientRegistration`, `injectTools`, `globalEnabled`, etc., same as for injected sidecars. |
+| Operator (controller) | `--enable-operator-client-registration` (default **false**) | Master switch for the ClientRegistration controller. |
+| Operator (controller) | `--spire-trust-domain` | Required for SPIFFE-shaped client IDs when `authbridge-config` has `SPIRE_ENABLED=true`. |
+| Operator (webhook) | `--enable-client-registration` | Cluster-wide gate for client-registration **injection** (precedence still applies). |
+| Operator (webhook) | Feature gates file (`/etc/kagenti/feature-gates/feature-gates.yaml`) | `clientRegistration`, `injectTools`, `globalEnabled`, etc., same as for injected sidecars. |
 
 ---
 
@@ -99,7 +99,7 @@ Other workloads are ignored by this controller.
 
 - **`authbridge-config`** ConfigMap in the workload namespace with at least `KEYCLOAK_URL`, `KEYCLOAK_REALM`, and consistent `SPIRE_ENABLED` with the mesh.
 - **`keycloak-admin-secret`** in the same namespace with `KEYCLOAK_ADMIN_USERNAME` and `KEYCLOAK_ADMIN_PASSWORD`.
-- **Webhook** and **operator** versions that both implement this contract (deploy together).
+- **kagenti-operator** deployed with webhook enabled (`webhook.enable: true` in Helm values).
 
 ### 3.2 Workload
 
@@ -141,11 +141,12 @@ That shape is intentional for this controller:
 
 ### 4.1 Recommended rollout order
 
-1. **Upgrade operator** (with ClientRegistration controller and Keycloak client package).
-2. **Upgrade webhook** (operator Secret mounts + reinvocation path).
-3. **Configure** `--spire-trust-domain` on the operator if agent namespaces use SPIRE (`SPIRE_ENABLED=true`).
+1. **Upgrade kagenti-operator** to a version that includes the AuthBridge webhook and ClientRegistration controller.
+2. **Enable the webhook** via Helm values (`webhook.enable: true`) and optionally `--enable-operator-client-registration`.
+3. **Configure** `--spire-trust-domain` if agent namespaces use SPIRE (`SPIRE_ENABLED=true`).
+4. **Remove the kagenti-extensions webhook** chart dependency from the umbrella chart once the operator webhook is verified.
 
-Rolling webhook before operator can leave default workloads **without** registration until the operator is available; rolling operator before webhook can create Secrets and annotations **without** mounts until the new webhook is live. Short overlap is acceptable if you migrate workloads **after** both are deployed.
+Since both the webhook and controller ship in the same binary, there is no ordering concern between them.
 
 ### 4.2 Operator-managed registration (default)
 
@@ -168,9 +169,11 @@ Disabling **`--enable-operator-client-registration`** stops new reconciliation b
 
 Switching from **sidecar** to **operator** registration may change the **client ID** string (e.g. from SPIFFE-based to `namespace/name` when SPIRE is off, or same SPIFFE shape when SPIRE is on). Plan for **one-time** Keycloak client cleanup or renamed clients if both paths ran for the same logical workload.
 
-### 4.5 Future consolidation
+### 4.5 Consolidation status
 
-When webhook and operator live in one repository, keep this document as the single **source of truth** for the contract; co-locate constants in one package to avoid drift between annotation/label keys.
+The webhook and operator now live in one repository (`kagenti-operator`). This document is the single **source of truth** for the contract. Constants are co-located in the `internal/webhook/injector` package to avoid drift between annotation/label keys.
+
+The webhook was previously part of `kagenti-extensions`; migration tracking is in [kagenti-extensions#266](https://github.com/kagenti/kagenti-extensions/issues/266).
 
 ---
 
