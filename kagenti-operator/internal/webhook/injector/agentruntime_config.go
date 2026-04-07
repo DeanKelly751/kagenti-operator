@@ -21,6 +21,8 @@ import (
 	"fmt"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -55,6 +57,16 @@ type AgentRuntimeOverrides struct {
 func ReadAgentRuntimeOverrides(ctx context.Context, c client.Reader, namespace, workloadName string) (*AgentRuntimeOverrides, error) {
 	list := &agentv1alpha1.AgentRuntimeList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		// If the AgentRuntime CRD is not installed, there are no CRs to find.
+		// Treat this the same as "no matching CR" so the webhook skips injection
+		// gracefully instead of blocking pod creation.
+		// meta.IsNoMatchError catches real API server responses;
+		// runtime.IsNotRegisteredError catches scheme-level errors (e.g. fake client).
+		if meta.IsNoMatchError(err) || runtime.IsNotRegisteredError(err) {
+			arConfigLog.V(1).Info("AgentRuntime CRD not installed, skipping",
+				"namespace", namespace)
+			return nil, nil
+		}
 		return nil, fmt.Errorf("listing AgentRuntime CRs in %s: %w", namespace, err)
 	}
 

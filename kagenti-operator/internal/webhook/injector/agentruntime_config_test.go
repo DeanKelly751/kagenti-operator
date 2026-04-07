@@ -190,15 +190,17 @@ func TestReadAgentRuntimeOverrides_NoTargetRefMatch(t *testing.T) {
 
 func TestReadAgentRuntimeOverrides_CRDNotInstalled(t *testing.T) {
 	// Empty scheme — no AgentRuntime types registered.
-	// The List call should return an error (CRD unknown to the client).
+	// The List call returns a NoKindMatch error, which should be treated as
+	// "no matching CR" (nil, nil) so the webhook skips injection gracefully
+	// instead of blocking pod creation.
 	scheme := runtime.NewScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	overrides, err := ReadAgentRuntimeOverrides(context.Background(), fakeClient, "ns1", "my-agent")
-	if err == nil {
-		t.Fatal("expected error when CRD is not installed, got nil")
+	if err != nil {
+		t.Fatalf("expected nil error for missing CRD (graceful skip), got: %v", err)
 	}
 	if overrides != nil {
-		t.Fatalf("expected nil overrides on error, got %+v", overrides)
+		t.Fatalf("expected nil overrides, got %+v", overrides)
 	}
 }
