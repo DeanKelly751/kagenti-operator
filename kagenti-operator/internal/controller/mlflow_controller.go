@@ -126,6 +126,7 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	saName := dep.Spec.Template.Spec.ServiceAccountName
 	if saName == "" {
 		saName = "default"
+		logger.Info("deployment has no explicit serviceAccountName, falling back to 'default'", "deployment", dep.Name)
 	}
 
 	if err := r.ensureRoleBinding(ctx, dep, saName); err != nil {
@@ -196,6 +197,11 @@ func (r *MLflowReconciler) resolveTrackingURI(ctx context.Context) string {
 	return ""
 }
 
+// mlflowEnvVars returns the environment variables to inject into agent containers.
+// TODO(mlflow): MLFLOW_TRACKING_SERVER_CERT_PATH is OpenShift-specific — the
+// service-ca operator injects service-ca.crt into the SA volume. On vanilla
+// Kubernetes this file does not exist and MLflow clients will fail TLS verification.
+// This should be made configurable (Helm value / annotation) before supporting non-OpenShift clusters.
 func mlflowEnvVars(trackingURI, experimentID, experimentName string) map[string]string {
 	return map[string]string{
 		"MLFLOW_TRACKING_URI":              trackingURI,

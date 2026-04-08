@@ -90,7 +90,7 @@ networkPolicy:
 
 # [MLFLOW]: MLflow experiment tracking integration
 mlflow:
-  enable: true
+  enable: false
 
 # [SIGNATURE VERIFICATION]: A2A agent card signature verification via SPIRE x5c
 signatureVerification:

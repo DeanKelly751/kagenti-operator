@@ -126,7 +126,7 @@ func main() {
 	flag.BoolVar(&enableOperatorClientRegistration, "enable-operator-client-registration", false,
 		"Reconcile Keycloak client registration for agent/tool workloads unless "+
 			"kagenti.io/client-registration-inject=true (legacy sidecar)")
-	flag.BoolVar(&enableMLflow, "enable-mlflow", true,
+	flag.BoolVar(&enableMLflow, "enable-mlflow", false,
 		"Enable MLflow experiment tracking integration")
 
 	flag.StringVar(&spireTrustDomain, "spire-trust-domain", "",
