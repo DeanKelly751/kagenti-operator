@@ -191,6 +191,17 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyMetricsServerStarted).Should(Succeed())
 
+			By("waiting for the webhook endpoint to be ready")
+			verifyWebhookEndpointReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "endpoints",
+					"kagenti-operator-webhook-service", "-n", namespace,
+					"-o", "jsonpath={.subsets[0].addresses[0].ip}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty(), "webhook endpoint not yet populated")
+			}
+			Eventually(verifyWebhookEndpointReady).Should(Succeed())
+
 			By("creating the curl-metrics pod to access the metrics endpoint")
 			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
 				"--namespace", namespace,
