@@ -21,6 +21,7 @@ webhooks:
       - kube-system
       - kube-public
       - kube-node-lease
+      - kagenti-operator-system
     matchLabels:
       kagenti-enabled: "true"
   objectSelector:
