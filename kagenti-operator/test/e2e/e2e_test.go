@@ -203,34 +203,39 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyWebhookEndpointReady).Should(Succeed())
 
 			By("creating the curl-metrics pod to access the metrics endpoint")
-			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
-				"--namespace", namespace,
-				"--image=curlimages/curl:latest",
-				"--overrides",
-				fmt.Sprintf(`{
-					"spec": {
-						"containers": [{
-							"name": "curl",
-							"image": "curlimages/curl:latest",
-							"command": ["/bin/sh", "-c"],
-							"args": ["curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics"],
-							"securityContext": {
-								"allowPrivilegeEscalation": false,
-								"capabilities": {
-									"drop": ["ALL"]
-								},
-								"runAsNonRoot": true,
-								"runAsUser": 1000,
-								"seccompProfile": {
-									"type": "RuntimeDefault"
+			Eventually(func() error {
+				cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
+					"--namespace", namespace,
+					"--image=curlimages/curl:latest",
+					"--overrides",
+					fmt.Sprintf(`{
+						"spec": {
+							"containers": [{
+								"name": "curl",
+								"image": "curlimages/curl:latest",
+								"command": ["/bin/sh", "-c"],
+								"args": ["curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics"],
+								"securityContext": {
+									"allowPrivilegeEscalation": false,
+									"capabilities": {
+										"drop": ["ALL"]
+									},
+									"runAsNonRoot": true,
+									"runAsUser": 1000,
+									"seccompProfile": {
+										"type": "RuntimeDefault"
+									}
 								}
-							}
-						}],
-						"serviceAccount": "%s"
-					}
-				}`, token, metricsServiceName, namespace, serviceAccountName))
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-metrics pod")
+							}],
+							"serviceAccountName": "%s"
+						}
+					}`, token, metricsServiceName, namespace, serviceAccountName))
+				_, runErr := utils.Run(cmd)
+				if runErr != nil && strings.Contains(runErr.Error(), "already exists") {
+					return nil
+				}
+				return runErr
+			}, 1*time.Minute, 5*time.Second).Should(Succeed(), "Failed to create curl-metrics pod")
 
 			By("waiting for the curl-metrics pod to complete.")
 			verifyCurlUp := func(g Gomega) {
