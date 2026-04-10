@@ -293,13 +293,6 @@ func InstallSpire(trustDomain string) error {
 		"--wait",
 		"--timeout", "5m",
 	)
-	if _, err := Run(cmd); err != nil {
-		return err
-	}
-
-	By("labeling spire-bundle configmap for controller cache visibility")
-	cmd = exec.Command("kubectl", "label", "--overwrite", "configmap", "spire-bundle",
-		"-n", "spire-system", "kagenti.io/defaults=true")
 	_, err := Run(cmd)
 	return err
 }

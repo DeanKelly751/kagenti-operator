@@ -27,6 +27,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -253,38 +254,51 @@ func main() {
 		})
 	}
 
+	// Scope the ConfigMap informer to only kagenti-relevant ConfigMaps.
+	// Without this, the controller would cache ALL ConfigMaps cluster-wide.
+	//
+	// Three types of ConfigMaps are relevant:
+	// 1. Cluster-level defaults in kagenti-system:
+	//    - kagenti-platform-config (platform-wide sidecar config)
+	//    - kagenti-feature-gates (which AuthBridge components are enabled)
+	//    Both are deployed by the kagenti-operator Helm chart and share the
+	//    label app.kubernetes.io/name=kagenti-operator-chart.
+	//
+	// 2. Namespace-level defaults in agent namespaces:
+	//    ConfigMaps labeled kagenti.io/defaults=true, deployed by platform
+	//    engineers via Helm/Kustomize to override cluster defaults per namespace.
+	//
+	// 3. SPIRE trust bundle (when signature verification is enabled):
+	//    The trust bundle ConfigMap (e.g. spire-bundle) in its configured namespace,
+	//    selected by metadata.name via a field selector.
+	cmCacheNamespaces := map[string]cache.Config{
+		controller.ClusterDefaultsNamespace: {
+			LabelSelector: labels.SelectorFromSet(map[string]string{
+				"app.kubernetes.io/name": "kagenti-operator-chart",
+			}),
+		},
+		cache.AllNamespaces: {
+			LabelSelector: labels.SelectorFromSet(map[string]string{
+				controller.LabelNamespaceDefaults: "true",
+			}),
+		},
+	}
+	if requireA2ASignature && spireTrustBundleConfigMapNS != "" {
+		cmCacheNamespaces[spireTrustBundleConfigMapNS] = cache.Config{
+			FieldSelector: fields.SelectorFromSet(fields.Set{
+				"metadata.name": spireTrustBundleConfigMapName,
+			}),
+		}
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:  scheme,
 		Metrics: metricsServerOptions,
 		Cache: cache.Options{
 			DefaultNamespaces: getNamespacesToWatch(),
-			// Scope the ConfigMap informer to only kagenti-relevant ConfigMaps.
-			// Without this, the controller would cache ALL ConfigMaps cluster-wide.
-			//
-			// Two types of ConfigMaps are relevant:
-			// 1. Cluster-level defaults in kagenti-system:
-			//    - kagenti-platform-config (platform-wide sidecar config)
-			//    - kagenti-feature-gates (which AuthBridge components are enabled)
-			//    Both are deployed by the kagenti-operator Helm chart and share the
-			//    label app.kubernetes.io/name=kagenti-operator-chart.
-			//
-			// 2. Namespace-level defaults in agent namespaces:
-			//    ConfigMaps labeled kagenti.io/defaults=true, deployed by platform
-			//    engineers via Helm/Kustomize to override cluster defaults per namespace.
 			ByObject: map[client.Object]cache.ByObject{
 				&corev1.ConfigMap{}: {
-					Namespaces: map[string]cache.Config{
-						controller.ClusterDefaultsNamespace: {
-							LabelSelector: labels.SelectorFromSet(map[string]string{
-								"app.kubernetes.io/name": "kagenti-operator-chart",
-							}),
-						},
-						cache.AllNamespaces: {
-							LabelSelector: labels.SelectorFromSet(map[string]string{
-								controller.LabelNamespaceDefaults: "true",
-							}),
-						},
-					},
+					Namespaces: cmCacheNamespaces,
 				},
 			},
 		},
