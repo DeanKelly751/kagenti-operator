@@ -1033,8 +1033,10 @@ rules:
 			_, err = utils.KubectlApplyStdin(runtimeOverridesTargetDeploymentFixture(), agentRuntimeTestNamespace)
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(utils.WaitForDeploymentReady("runtime-minimal-target", agentRuntimeTestNamespace, 2*time.Minute)).To(Succeed())
-			Expect(utils.WaitForDeploymentReady("runtime-overrides-target", agentRuntimeTestNamespace, 2*time.Minute)).To(Succeed())
+			Expect(utils.WaitForDeploymentReady(
+				"runtime-minimal-target", agentRuntimeTestNamespace, 2*time.Minute)).To(Succeed())
+			Expect(utils.WaitForDeploymentReady(
+				"runtime-overrides-target", agentRuntimeTestNamespace, 2*time.Minute)).To(Succeed())
 
 			By("creating minimal AgentRuntime CR (no overrides)")
 			_, err = utils.KubectlApplyStdin(runtimeMinimalCRFixture(), agentRuntimeTestNamespace)
