@@ -167,7 +167,7 @@ var _ = Describe("AuthBridge Pod Webhook", func() {
 	})
 
 	Context("when a Pod has kagenti.io/type=agent but no AgentRuntime CR", func() {
-		It("should not inject sidecars", func() {
+		It("should inject sidecars with defaults-only config", func() {
 			pod := newTestPod("no-runtime-pod", map[string]string{
 				"kagenti.io/type":   "agent",
 				"kagenti.io/inject": "enabled",
@@ -179,8 +179,8 @@ var _ = Describe("AuthBridge Pod Webhook", func() {
 			err = k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(containerNames(pod.Spec.Containers)).NotTo(ContainElement(injector.EnvoyProxyContainerName))
-			Expect(initContainerNames(pod.Spec.InitContainers)).NotTo(ContainElement(injector.ProxyInitContainerName))
+			Expect(containerNames(pod.Spec.Containers)).To(ContainElement(injector.EnvoyProxyContainerName))
+			Expect(initContainerNames(pod.Spec.InitContainers)).To(ContainElement(injector.ProxyInitContainerName))
 		})
 	})
 

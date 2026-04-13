@@ -133,8 +133,9 @@ func TestEnsureServiceAccount_AlreadyExistsNoLabels(t *testing.T) {
 	}
 }
 
-func TestInjectAuthBridge_NoAgentRuntime_SkipsInjection(t *testing.T) {
-	// Agent pod with correct labels but no AgentRuntime CR → no injection.
+func TestInjectAuthBridge_NoAgentRuntime_InjectsWithDefaults(t *testing.T) {
+	// Agent pod with correct labels but no AgentRuntime CR → inject with
+	// defaults-only config (platform + namespace defaults, no CR overrides).
 	m := newTestMutator()
 	ctx := context.Background()
 
@@ -147,12 +148,19 @@ func TestInjectAuthBridge_NoAgentRuntime_SkipsInjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InjectAuthBridge() returned error: %v", err)
 	}
-	if injected {
-		t.Fatal("expected InjectAuthBridge to return false when no AgentRuntime CR exists")
+	if !injected {
+		t.Fatal("expected InjectAuthBridge to return true with defaults-only config")
 	}
-	if len(podSpec.Containers) != 0 || len(podSpec.InitContainers) != 0 {
-		t.Errorf("expected no containers injected, got containers=%v initContainers=%v",
-			podSpec.Containers, podSpec.InitContainers)
+
+	// Verify specific sidecar containers are present
+	if !containerExists(podSpec.Containers, EnvoyProxyContainerName) {
+		t.Errorf("expected %s container to be injected", EnvoyProxyContainerName)
+	}
+	if !containerExists(podSpec.Containers, SpiffeHelperContainerName) {
+		t.Errorf("expected %s container to be injected", SpiffeHelperContainerName)
+	}
+	if !containerExists(podSpec.InitContainers, ProxyInitContainerName) {
+		t.Errorf("expected %s init container to be injected", ProxyInitContainerName)
 	}
 }
 

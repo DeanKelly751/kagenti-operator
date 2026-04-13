@@ -162,9 +162,10 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 		return false, nil
 	}
 
-	// AgentRuntime CR must exist for injection to proceed. This makes
-	// AgentRuntime creation the trigger for sidecar injection — pods
-	// deployed before the CR is created will not be injected.
+	// Read AgentRuntime CR overrides. If no CR exists the webhook still
+	// injects sidecars using defaults-only config (platform + namespace
+	// defaults, no per-workload overrides). ResolveConfig handles nil
+	// overrides transparently.
 	arOverrides, err := ReadAgentRuntimeOverrides(ctx, m.Client, namespace, crName)
 	if err != nil {
 		mutatorLog.Error(err, "failed to read AgentRuntime",
@@ -172,9 +173,8 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 		return false, err
 	}
 	if arOverrides == nil {
-		mutatorLog.Info("Skipping mutation: no matching AgentRuntime CR found",
+		mutatorLog.Info("No AgentRuntime CR found, injecting with defaults-only config",
 			"namespace", namespace, "crName", crName)
-		return false, nil
 	}
 
 	// Derive SPIRE mode from the injection decision: if spiffe-helper is being

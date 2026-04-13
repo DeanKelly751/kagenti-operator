@@ -442,6 +442,16 @@ func main() {
 			setupLog.Error(err, "unable to create webhook", "webhook", "AuthBridge")
 			os.Exit(1)
 		}
+
+		// Defaults-only config reconciler: propagates ConfigMap changes to
+		// workloads that have kagenti.io/type but no AgentRuntime CR.
+		if err = (&injector.DefaultsConfigReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "DefaultsConfig")
+			os.Exit(1)
+		}
 	}
 	// +kubebuilder:scaffold:builder
 
