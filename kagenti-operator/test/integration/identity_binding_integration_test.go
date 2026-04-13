@@ -140,6 +140,10 @@ func testMatchingBindingEvaluation(t *testing.T) {
 	t.Log("TEST 1: Matching Binding Evaluation")
 	t.Log("========================================")
 
+	// Create the ServiceAccount referenced by the Deployment so pods can start.
+	sa := createServiceAccount(t, ctx, testNamespace, saName)
+	defer deleteResource(ctx, sa)
+
 	// Create Deployment with agent labels
 	deployment := createTestDeployment(t, ctx, testNamespace, deploymentName, saName, 1)
 	defer deleteResource(ctx, deployment)
@@ -217,6 +221,10 @@ func testNonMatchingBindingEvaluation(t *testing.T) {
 	t.Log("\n========================================")
 	t.Log("TEST 2: Non-Matching Binding Evaluation")
 	t.Log("========================================")
+
+	// Create the ServiceAccount referenced by the Deployment so pods can start.
+	sa := createServiceAccount(t, ctx, testNamespace, saName)
+	defer deleteResource(ctx, sa)
 
 	// Create Deployment with agent labels
 	deployment := createTestDeployment(t, ctx, testNamespace, deploymentName, saName, 1)
@@ -372,6 +380,18 @@ func createTestDeployment(t *testing.T, ctx context.Context, ns, name, saName st
 
 	t.Logf("  Created Deployment: %s (replicas=%d)", name, replicas)
 	return deployment
+}
+
+func createServiceAccount(t *testing.T, ctx context.Context, ns, name string) *corev1.ServiceAccount {
+	t.Helper()
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+	}
+	if err := k8sClient.Create(ctx, sa); err != nil {
+		t.Fatalf("Failed to create ServiceAccount: %v", err)
+	}
+	t.Logf("  Created ServiceAccount: %s", name)
+	return sa
 }
 
 func deleteResource(ctx context.Context, obj client.Object) {
