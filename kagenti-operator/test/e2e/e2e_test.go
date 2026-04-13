@@ -867,6 +867,9 @@ rules:
 			}, 30*time.Second, 5*time.Second).Should(Succeed())
 		})
 
+		// Note: the AgentCard auto-created by AgentCardSync (runtime-agent-target-deployment-card)
+		// persists after AgentRuntime deletion because kagenti.io/type=agent is preserved on the
+		// Deployment and AgentCardSync owns the card independently of the AgentRuntime lifecycle.
 		It("should clean up on deletion", func() {
 			By("deleting the AgentRuntime CR")
 			cmd := exec.Command("kubectl", "delete", "agentruntime", "test-agent-runtime",
@@ -931,6 +934,15 @@ rules:
 				g.Expect(phase).To(Equal("Error"))
 			}).Should(Succeed())
 
+			By("verifying error condition mentions the target")
+			Eventually(func(g Gomega) {
+				msg, err := utils.KubectlGetJsonpath("agentruntime", "test-missing-target",
+					agentRuntimeTestNamespace,
+					"{.status.conditions[?(@.type=='Ready')].message}")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(msg).To(ContainSubstring("nonexistent-deployment"))
+			}).Should(Succeed())
+
 			By("cleaning up")
 			cmd := exec.Command("kubectl", "delete", "agentruntime", "test-missing-target",
 				"-n", agentRuntimeTestNamespace, "--ignore-not-found")
@@ -958,12 +970,13 @@ rules:
 			}).Should(Succeed())
 
 			By("verifying no AgentCard is created for tool-type workload")
-			Consistently(func() string {
+			Consistently(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "agentcards", "-n", agentRuntimeTestNamespace,
 					"-o", "jsonpath={.items[*].metadata.name}")
-				output, _ := utils.Run(cmd)
-				return output
-			}, 15*time.Second, 3*time.Second).ShouldNot(ContainSubstring("runtime-tool-target"))
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(ContainSubstring("runtime-tool-target"))
+			}, 15*time.Second, 3*time.Second).Should(Succeed())
 
 			By("cleaning up")
 			cmd := exec.Command("kubectl", "delete", "agentruntime", "test-tool-runtime",
