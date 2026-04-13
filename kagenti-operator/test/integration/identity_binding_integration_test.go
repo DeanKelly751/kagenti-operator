@@ -166,9 +166,10 @@ func testMatchingBindingEvaluation(t *testing.T) {
 	// returns the expected SPIFFE ID, so the reconciler exercises the full
 	// binding evaluation path (not just pre-set status).
 	reconciler := &controller.AgentCardReconciler{
-		Client:       k8sClient,
-		Scheme:       scheme,
-		AgentFetcher: &mockFetcher{},
+		Client:           k8sClient,
+		Scheme:           scheme,
+		AgentFetcher:     &mockFetcher{},
+		RequireSignature: true,
 		SignatureProvider: &mockSignatureProvider{
 			spiffeID: expectedSpiffeID,
 			verified: true,
@@ -241,15 +242,17 @@ func testNonMatchingBindingEvaluation(t *testing.T) {
 	// Wait for the Deployment to become Available before reconciling.
 	waitForDeploymentAvailable(t, ctx, deploymentName, testNamespace, 30*time.Second)
 
-	// The workload's actual SPIFFE ID (from mock provider) does NOT match the allowlist
-	actualSpiffeID := fmt.Sprintf("spiffe://%s/ns/%s/sa/%s", trustDomain, testNamespace, saName)
+	// The workload's actual SPIFFE ID (from mock provider) is from a different
+	// trust domain, so it does NOT match the AgentCard's trust domain.
+	actualSpiffeID := fmt.Sprintf("spiffe://other-domain/ns/%s/sa/%s", testNamespace, saName)
 
 	// Create and run AgentCard reconciler with a mock provider returning the actual
 	// (non-matching) SPIFFE ID
 	reconciler := &controller.AgentCardReconciler{
-		Client:       k8sClient,
-		Scheme:       scheme,
-		AgentFetcher: &mockFetcher{},
+		Client:           k8sClient,
+		Scheme:           scheme,
+		AgentFetcher:     &mockFetcher{},
+		RequireSignature: true,
 		SignatureProvider: &mockSignatureProvider{
 			spiffeID: actualSpiffeID,
 			verified: true,
