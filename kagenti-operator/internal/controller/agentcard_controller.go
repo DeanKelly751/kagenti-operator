@@ -75,6 +75,11 @@ const (
 	// when the operator detects that the signing SVID is expiring or the CA has rotated.
 	AnnotationResignTrigger = "agentcard.kagenti.dev/resign-trigger"
 
+	// AnnotationResignLeafExpiry records the LeafNotAfter of the cert that prompted the
+	// last resign-triggered restart. Prevents cyclic restarts when the SVID TTL is ≤ 2×grace:
+	// the operator skips re-triggering if the current cert's expiry matches the stored value.
+	AnnotationResignLeafExpiry = "agentcard.kagenti.dev/resign-leaf-expiry"
+
 	// AnnotationBundleHash records the trust bundle hash at the time of the last signing.
 	AnnotationBundleHash = "agentcard.kagenti.dev/bundle-hash"
 
@@ -1153,6 +1158,12 @@ func (r *AgentCardReconciler) maybeRestartForResign(ctx context.Context, agentCa
 	reason := ""
 
 	if !vr.LeafNotAfter.IsZero() && time.Until(vr.LeafNotAfter) < grace {
+		// Skip if we already triggered a restart for this exact cert expiry.
+		// This prevents cyclic restarts when SVID TTL ≤ 2×grace (issue #246).
+		storedExpiry := podAnnotations[AnnotationResignLeafExpiry]
+		if storedExpiry == vr.LeafNotAfter.Format(time.RFC3339) {
+			return
+		}
 		needsRestart = true
 		reason = fmt.Sprintf("SVID leaf cert expiring at %s", vr.LeafNotAfter.Format(time.RFC3339))
 	}
@@ -1177,10 +1188,10 @@ func (r *AgentCardReconciler) maybeRestartForResign(ctx context.Context, agentCa
 		r.Recorder.Event(agentCard, corev1.EventTypeNormal, "ResignTriggered", reason)
 	}
 
-	r.triggerRolloutRestart(ctx, acc, key, currentBundleHash)
+	r.triggerRolloutRestart(ctx, acc, key, currentBundleHash, vr.LeafNotAfter)
 }
 
-func (r *AgentCardReconciler) triggerRolloutRestart(ctx context.Context, acc *podTemplateAccessor, key types.NamespacedName, bundleHash string) {
+func (r *AgentCardReconciler) triggerRolloutRestart(ctx context.Context, acc *podTemplateAccessor, key types.NamespacedName, bundleHash string, leafNotAfter time.Time) {
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := r.Get(ctx, key, acc.obj); err != nil {
 			return err
@@ -1191,6 +1202,9 @@ func (r *AgentCardReconciler) triggerRolloutRestart(ctx context.Context, acc *po
 			podAnnotations = make(map[string]string)
 		}
 		podAnnotations[AnnotationResignTrigger] = time.Now().Format(time.RFC3339)
+		if !leafNotAfter.IsZero() {
+			podAnnotations[AnnotationResignLeafExpiry] = leafNotAfter.Format(time.RFC3339)
+		}
 		setPodTemplateAnnotations(acc, podAnnotations)
 
 		objAnnotations := acc.obj.GetAnnotations()

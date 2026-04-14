@@ -80,6 +80,32 @@ func getResignTrigger(ctx context.Context, name, ns string) string {
 	return d.Spec.Template.Annotations[AnnotationResignTrigger]
 }
 
+func getResignLeafExpiry(ctx context.Context, name, ns string) string {
+	d := &appsv1.Deployment{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, d); err != nil {
+		return ""
+	}
+	if d.Spec.Template.Annotations == nil {
+		return ""
+	}
+	return d.Spec.Template.Annotations[AnnotationResignLeafExpiry]
+}
+
+func setResignTriggerAndLeafExpiry(ctx context.Context, name, ns, triggerTime, leafExpiry string) {
+	Eventually(func() error {
+		d := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, d); err != nil {
+			return err
+		}
+		if d.Spec.Template.Annotations == nil {
+			d.Spec.Template.Annotations = make(map[string]string)
+		}
+		d.Spec.Template.Annotations[AnnotationResignTrigger] = triggerTime
+		d.Spec.Template.Annotations[AnnotationResignLeafExpiry] = leafExpiry
+		return k8sClient.Update(ctx, d)
+	}).Should(Succeed())
+}
+
 // reconcileTwice runs two reconcile cycles: the first adds the finalizer,
 // the second performs the actual card fetch, verification, and status update.
 func reconcileTwice(reconciler *AgentCardReconciler, name, ns string) {
@@ -201,6 +227,180 @@ var _ = Describe("Proactive Restart for Re-signing", func() {
 			reconcileTwice(reconciler, agentCardName, namespace)
 
 			Eventually(func() string { return getResignTrigger(ctx, deploymentName, namespace) }, timeout, interval).ShouldNot(BeEmpty())
+		})
+	})
+
+	Context("No cyclic restart for same expiring cert (issue #246)", func() {
+		const (
+			deploymentName = "restart-cycle-agent"
+			agentCardName  = "restart-cycle-card"
+			namespace      = "default"
+		)
+
+		AfterEach(func() {
+			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
+			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
+			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
+		})
+
+		It("should not trigger restart when the same cert expiry was already handled", func() {
+			privKey, pubPEM := generateTestRSAKeyPair()
+			createDeploymentWithService(ctx, deploymentName, namespace)
+			setBundleHashAnnotation(ctx, deploymentName, namespace, "same-hash")
+
+			// Simulate a cert that is within the grace period (expiring in 5 min).
+			leafExpiry := time.Now().Add(5 * time.Minute)
+
+			// Pre-set resign-trigger and resign-leaf-expiry as if a previous
+			// reconcile already triggered a restart for this exact cert.
+			// The trigger was set > grace period ago (cooldown expired).
+			oldTrigger := time.Now().Add(-DefaultSVIDExpiryGracePeriod - time.Minute)
+			setResignTriggerAndLeafExpiry(ctx, deploymentName, namespace,
+				oldTrigger.Format(time.RFC3339), leafExpiry.Format(time.RFC3339))
+
+			makeCardData := func() *agentv1alpha1.AgentCardData {
+				cd := &agentv1alpha1.AgentCardData{
+					Name: "Cycle Agent", Version: "1.0.0", URL: "http://localhost:8000",
+				}
+				jwsSig := buildTestJWS(cd, privKey, "key-1", "")
+				cd.Signatures = []agentv1alpha1.AgentCardSignature{jwsSig}
+				return cd
+			}
+
+			agentCard := &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{Name: agentCardName, Namespace: namespace},
+				Spec: agentv1alpha1.AgentCardSpec{
+					SyncPeriod: "30s",
+					TargetRef:  &agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: deploymentName},
+				},
+			}
+			Expect(k8sClient.Create(ctx, agentCard)).To(Succeed())
+
+			reconciler := &AgentCardReconciler{
+				Client:           k8sClient,
+				Scheme:           k8sClient.Scheme(),
+				AgentFetcher:     &mockFetcherFunc{fn: makeCardData},
+				RequireSignature: true,
+				SignatureProvider: &mockSignatureProviderWithBundleHash{
+					pubKeyPEM: pubPEM, bundleHash: "same-hash", leafExpiry: leafExpiry,
+				},
+			}
+
+			reconcileTwice(reconciler, agentCardName, namespace)
+
+			// The resign-trigger should NOT be updated — it should remain the old value.
+			trigger := getResignTrigger(ctx, deploymentName, namespace)
+			Expect(trigger).To(Equal(oldTrigger.Format(time.RFC3339)))
+		})
+
+		It("should trigger restart when cert is renewed with a new expiry that is also near grace", func() {
+			privKey, pubPEM := generateTestRSAKeyPair()
+			createDeploymentWithService(ctx, deploymentName, namespace)
+			setBundleHashAnnotation(ctx, deploymentName, namespace, "same-hash")
+
+			// Old cert was handled (expiry was stored).
+			oldLeafExpiry := time.Now().Add(-10 * time.Minute) // already expired
+			oldTrigger := time.Now().Add(-DefaultSVIDExpiryGracePeriod - time.Minute)
+			setResignTriggerAndLeafExpiry(ctx, deploymentName, namespace,
+				oldTrigger.Format(time.RFC3339), oldLeafExpiry.Format(time.RFC3339))
+
+			// New cert has a DIFFERENT expiry but is also within grace.
+			newLeafExpiry := time.Now().Add(5 * time.Minute)
+
+			makeCardData := func() *agentv1alpha1.AgentCardData {
+				cd := &agentv1alpha1.AgentCardData{
+					Name: "Cycle Agent", Version: "1.0.0", URL: "http://localhost:8000",
+				}
+				jwsSig := buildTestJWS(cd, privKey, "key-1", "")
+				cd.Signatures = []agentv1alpha1.AgentCardSignature{jwsSig}
+				return cd
+			}
+
+			agentCard := &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{Name: agentCardName, Namespace: namespace},
+				Spec: agentv1alpha1.AgentCardSpec{
+					SyncPeriod: "30s",
+					TargetRef:  &agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: deploymentName},
+				},
+			}
+			Expect(k8sClient.Create(ctx, agentCard)).To(Succeed())
+
+			reconciler := &AgentCardReconciler{
+				Client:           k8sClient,
+				Scheme:           k8sClient.Scheme(),
+				AgentFetcher:     &mockFetcherFunc{fn: makeCardData},
+				RequireSignature: true,
+				SignatureProvider: &mockSignatureProviderWithBundleHash{
+					pubKeyPEM: pubPEM, bundleHash: "same-hash", leafExpiry: newLeafExpiry,
+				},
+			}
+
+			reconcileTwice(reconciler, agentCardName, namespace)
+
+			// Should trigger restart because the cert is different from the one we already handled.
+			trigger := getResignTrigger(ctx, deploymentName, namespace)
+			Expect(trigger).NotTo(Equal(oldTrigger.Format(time.RFC3339)))
+			Expect(trigger).NotTo(BeEmpty())
+
+			// And the stored leaf expiry should now match the new cert.
+			storedExpiry := getResignLeafExpiry(ctx, deploymentName, namespace)
+			Expect(storedExpiry).To(Equal(newLeafExpiry.Format(time.RFC3339)))
+		})
+	})
+
+	Context("SVID restart stores leaf expiry annotation", func() {
+		const (
+			deploymentName = "restart-expiry-store-agent"
+			agentCardName  = "restart-expiry-store-card"
+			namespace      = "default"
+		)
+
+		AfterEach(func() {
+			cleanupResource(ctx, &agentv1alpha1.AgentCard{}, agentCardName, namespace)
+			cleanupResource(ctx, &appsv1.Deployment{}, deploymentName, namespace)
+			cleanupResource(ctx, &corev1.Service{}, deploymentName, namespace)
+		})
+
+		It("should store resign-leaf-expiry when triggering SVID restart", func() {
+			privKey, pubPEM := generateTestRSAKeyPair()
+			createDeploymentWithService(ctx, deploymentName, namespace)
+			setBundleHashAnnotation(ctx, deploymentName, namespace, "same-hash")
+
+			leafExpiry := time.Now().Add(DefaultSVIDExpiryGracePeriod / 6)
+
+			makeCardData := func() *agentv1alpha1.AgentCardData {
+				cd := &agentv1alpha1.AgentCardData{
+					Name: "Expiry Store Agent", Version: "1.0.0", URL: "http://localhost:8000",
+				}
+				jwsSig := buildTestJWS(cd, privKey, "key-1", "")
+				cd.Signatures = []agentv1alpha1.AgentCardSignature{jwsSig}
+				return cd
+			}
+
+			agentCard := &agentv1alpha1.AgentCard{
+				ObjectMeta: metav1.ObjectMeta{Name: agentCardName, Namespace: namespace},
+				Spec: agentv1alpha1.AgentCardSpec{
+					SyncPeriod: "30s",
+					TargetRef:  &agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: deploymentName},
+				},
+			}
+			Expect(k8sClient.Create(ctx, agentCard)).To(Succeed())
+
+			reconciler := &AgentCardReconciler{
+				Client:           k8sClient,
+				Scheme:           k8sClient.Scheme(),
+				AgentFetcher:     &mockFetcherFunc{fn: makeCardData},
+				RequireSignature: true,
+				SignatureProvider: &mockSignatureProviderWithBundleHash{
+					pubKeyPEM: pubPEM, bundleHash: "same-hash", leafExpiry: leafExpiry,
+				},
+			}
+
+			reconcileTwice(reconciler, agentCardName, namespace)
+
+			Eventually(func() string { return getResignTrigger(ctx, deploymentName, namespace) }, timeout, interval).ShouldNot(BeEmpty())
+			storedExpiry := getResignLeafExpiry(ctx, deploymentName, namespace)
+			Expect(storedExpiry).To(Equal(leafExpiry.Format(time.RFC3339)))
 		})
 	})
 
