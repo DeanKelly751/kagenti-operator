@@ -23,6 +23,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
+	"time"
 
 	"github.com/kagenti/operator/internal/mlflow"
 	. "github.com/onsi/ginkgo/v2"
@@ -91,6 +93,17 @@ var _ = Describe("MLflow Controller", func() {
 		Expect(result).To(Equal(ctrl.Result{}))
 	}
 
+	// newTempTokenPath creates a temporary SA token file and returns its path
+	// along with a cleanup function.
+	newTempTokenPath := func() (string, func()) {
+		tmpDir, err := os.MkdirTemp("", "mlflow-test-*")
+		Expect(err).NotTo(HaveOccurred())
+		tokenPath := filepath.Join(tmpDir, "token")
+		err = os.WriteFile(tokenPath, []byte("test-token"), 0600)
+		Expect(err).NotTo(HaveOccurred())
+		return tokenPath, func() { _ = os.RemoveAll(tmpDir) }
+	}
+
 	// newMLflowTestServer creates an httptest server that responds to MLflow API calls.
 	// It also creates a temporary SA token file and returns a cleanup function.
 	newMLflowTestServer := func(experimentID string) (*httptest.Server, string, func()) {
@@ -114,15 +127,24 @@ var _ = Describe("MLflow Controller", func() {
 			}
 		}))
 
-		tmpDir, err := os.MkdirTemp("", "mlflow-test-*")
-		Expect(err).NotTo(HaveOccurred())
-		tokenPath := filepath.Join(tmpDir, "token")
-		err = os.WriteFile(tokenPath, []byte("test-token"), 0600)
-		Expect(err).NotTo(HaveOccurred())
-
+		tokenPath, cleanupToken := newTempTokenPath()
 		cleanup := func() {
 			server.Close()
-			_ = os.RemoveAll(tmpDir)
+			cleanupToken()
+		}
+		return server, tokenPath, cleanup
+	}
+
+	// newMLflowFailServer creates an httptest server that always returns 500.
+	newMLflowFailServer := func() (*httptest.Server, string, func()) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}))
+
+		tokenPath, cleanupToken := newTempTokenPath()
+		cleanup := func() {
+			server.Close()
+			cleanupToken()
 		}
 		return server, tokenPath, cleanup
 	}
@@ -138,7 +160,7 @@ var _ = Describe("MLflow Controller", func() {
 				return serverURL
 			},
 			NewMLflowClient: func(baseURL string) *mlflow.Client {
-				return &mlflow.Client{BaseURL: baseURL, TokenPath: tokenPath}
+				return &mlflow.Client{BaseURL: baseURL, TokenPath: tokenPath, MaxRetries: -1}
 			},
 		}
 	}
@@ -253,6 +275,52 @@ var _ = Describe("MLflow Controller", func() {
 				Name: "kagenti-mlflow-mlflow-default-sa", Namespace: namespace,
 			}, rb)).To(Succeed())
 			Expect(rb.Subjects[0].Name).To(Equal("default"))
+		})
+	})
+
+	Context("When MLflow API returns an error", func() {
+		It("should requeue after 30s", func() {
+			server, tokenPath, cleanup := newMLflowFailServer()
+			defer cleanup()
+
+			dep := newAgentDeployment("mlflow-fail", namespace)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			r := newReconcilerWithServer(server.URL, tokenPath)
+			result, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: "mlflow-fail", Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(30 * time.Second))
+		})
+	})
+
+	Context("When the Deployment is already configured", func() {
+		It("should be idempotent and not call the MLflow API", func() {
+			var apiCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				apiCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+
+			dep := newAgentDeployment("mlflow-idempotent", namespace)
+			dep.Spec.Template.Annotations = map[string]string{
+				AnnotationMLflowExperimentID:   "exp-100",
+				AnnotationMLflowExperimentName: "mlflow-idempotent",
+				AnnotationMLflowTrackingURI:    server.URL,
+			}
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			r := &MLflowReconciler{
+				Client:             k8sClient,
+				Scheme:             scheme.Scheme,
+				ResolveTrackingURI: func(_ context.Context) string { return server.URL },
+			}
+			reconcileAndExpectNoOp(r, "mlflow-idempotent", namespace)
+			Expect(apiCalls.Load()).To(Equal(int32(0)))
 		})
 	})
 
