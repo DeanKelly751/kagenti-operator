@@ -46,6 +46,23 @@ var (
 		},
 		[]string{"provider", "error_type"},
 	)
+
+	SigstoreVerificationTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kagenti_sigstore_verification_total",
+			Help: "Sigstore agent-card bundle verification attempts",
+		},
+		[]string{"result", "reason"},
+	)
+
+	SigstoreVerificationDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "kagenti_sigstore_verification_duration_seconds",
+			Help:    "Sigstore bundle verification duration",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{},
+	)
 )
 
 func init() {
@@ -53,6 +70,8 @@ func init() {
 		SignatureVerificationTotal,
 		SignatureVerificationDuration,
 		SignatureVerificationErrors,
+		SigstoreVerificationTotal,
+		SigstoreVerificationDuration,
 	} {
 		if err := metrics.Registry.Register(c); err != nil {
 			if _, ok := err.(prometheus.AlreadyRegisteredError); !ok {
@@ -76,4 +95,12 @@ func RecordVerification(provider string, verified bool, auditMode bool) {
 
 func RecordError(provider string, errorType string) {
 	SignatureVerificationErrors.WithLabelValues(provider, errorType).Inc()
+}
+
+func RecordSigstoreVerification(verified bool, reason string) {
+	res := "failed"
+	if verified {
+		res = "success"
+	}
+	SigstoreVerificationTotal.WithLabelValues(res, reason).Inc()
 }

@@ -36,6 +36,25 @@ type AgentCardSpec struct {
 	// IdentityBinding specifies SPIFFE identity binding configuration
 	// +optional
 	IdentityBinding *IdentityBinding `json:"identityBinding,omitempty"`
+
+	// SigstoreVerification optional per-AgentCard overrides for Sigstore bundle verification (RFC Phase 2B).
+	// +optional
+	SigstoreVerification *SigstoreVerification `json:"sigstoreVerification,omitempty"`
+}
+
+// SigstoreVerification configures expected Fulcio identity for the agent-card.sigstore.json bundle.
+type SigstoreVerification struct {
+	// CertificateIdentity is the expected OIDC subject (Fulcio SAN), e.g. a GitHub Actions workflow ref.
+	// +optional
+	CertificateIdentity string `json:"certificateIdentity,omitempty"`
+
+	// CertificateOIDCIssuer is the expected OIDC issuer URL (Fulcio extension).
+	// +optional
+	CertificateOIDCIssuer string `json:"certificateOIDCIssuer,omitempty"`
+
+	// RekorURL reserved for future private-Rekor wiring; verification uses the trusted root material.
+	// +optional
+	RekorURL string `json:"rekorURL,omitempty"`
 }
 
 // IdentityBinding configures workload identity binding for an AgentCard.
@@ -123,6 +142,18 @@ type AgentCardStatus struct {
 	// BindingStatus contains the result of identity binding evaluation
 	// +optional
 	BindingStatus *BindingStatus `json:"bindingStatus,omitempty"`
+
+	// SigstoreBundleVerified is true when the optional agent-card.sigstore.json bundle was verified.
+	// +optional
+	SigstoreBundleVerified *bool `json:"sigstoreBundleVerified,omitempty"`
+
+	// SigstoreIdentity is the verified Fulcio certificate identity (SAN) when verification succeeds.
+	// +optional
+	SigstoreIdentity string `json:"sigstoreIdentity,omitempty"`
+
+	// RekorLogIndex is the Rekor log index from the verified bundle, when present.
+	// +optional
+	RekorLogIndex string `json:"rekorLogIndex,omitempty"`
 }
 
 // BindingStatus represents the result of identity binding evaluation
@@ -340,6 +371,7 @@ type SkillParameter struct {
 // +kubebuilder:printcolumn:name="Target",type="string",JSONPath=".status.targetRef.name",description="Target Workload"
 // +kubebuilder:printcolumn:name="Agent",type="string",JSONPath=".status.card.name",description="Agent Name"
 // +kubebuilder:printcolumn:name="Verified",type="boolean",JSONPath=".status.validSignature",description="Signature Verified"
+// +kubebuilder:printcolumn:name="Sigstore",type="boolean",JSONPath=".status.sigstoreBundleVerified",description="Sigstore bundle verified"
 // +kubebuilder:printcolumn:name="Bound",type="boolean",JSONPath=".status.bindingStatus.bound",description="Identity Bound"
 // +kubebuilder:printcolumn:name="Synced",type="string",JSONPath=".status.conditions[?(@.type=='Synced')].status",description="Sync Status"
 // +kubebuilder:printcolumn:name="LastSync",type="date",JSONPath=".status.lastSyncTime",description="Last Sync Time"

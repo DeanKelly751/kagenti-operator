@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -95,6 +96,14 @@ func main() {
 	var spireTrustBundleRefreshInterval time.Duration
 	var svidExpiryGracePeriod time.Duration
 
+	var enableSigstoreVerification bool
+	var sigstoreAuditMode bool
+	var sigstoreCertificateIdentity string
+	var sigstoreCertificateOIDCIssuer string
+	var sigstoreTrustedRootConfigMap string
+	var sigstoreTrustedRootConfigMapNS string
+	var sigstoreTrustedRootConfigMapKey string
+
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -141,6 +150,21 @@ func main() {
 		"How often to re-read the trust bundle")
 	flag.DurationVar(&svidExpiryGracePeriod, "svid-expiry-grace-period", 30*time.Minute,
 		"How far before the signing SVID expires to trigger a proactive workload restart for re-signing")
+
+	flag.BoolVar(&enableSigstoreVerification, "enable-sigstore-verification", false,
+		"Verify optional agent-card.sigstore.json Sigstore bundles for agent cards")
+	flag.BoolVar(&sigstoreAuditMode, "sigstore-audit-mode", false,
+		"When true, Sigstore verification failures do not fail reconciliation when a bundle is present")
+	flag.StringVar(&sigstoreCertificateIdentity, "sigstore-certificate-identity", "",
+		"Expected Fulcio certificate identity (OIDC subject) for Sigstore bundles")
+	flag.StringVar(&sigstoreCertificateOIDCIssuer, "sigstore-certificate-oidc-issuer", "",
+		"Expected OIDC issuer URL in Fulcio certificates for Sigstore bundles")
+	flag.StringVar(&sigstoreTrustedRootConfigMap, "sigstore-trusted-root-configmap", "",
+		"Optional ConfigMap name containing Sigstore trusted root JSON (skips public TUF fetch when set)")
+	flag.StringVar(&sigstoreTrustedRootConfigMapNS, "sigstore-trusted-root-configmap-namespace", "",
+		"Namespace of the Sigstore trusted root ConfigMap")
+	flag.StringVar(&sigstoreTrustedRootConfigMapKey, "sigstore-trusted-root-configmap-key", "trusted_root.json",
+		"ConfigMap data key for Sigstore trusted root JSON")
 
 	opts := zap.Options{
 		Development: false,
@@ -337,6 +361,54 @@ func main() {
 			"auditMode", signatureAuditMode)
 	}
 
+	var sigstoreTrustRoot []byte
+	if enableSigstoreVerification {
+		if sigstoreCertificateIdentity == "" || sigstoreCertificateOIDCIssuer == "" {
+			setupLog.Error(errors.New("missing required flags"),
+				"--sigstore-certificate-identity and --sigstore-certificate-oidc-issuer are required when --enable-sigstore-verification=true")
+			os.Exit(1)
+		}
+		if sigstoreTrustedRootConfigMap != "" {
+			if sigstoreTrustedRootConfigMapNS == "" {
+				setupLog.Error(errors.New("missing required flag"),
+					"--sigstore-trusted-root-configmap-namespace is required when --sigstore-trusted-root-configmap is set")
+				os.Exit(1)
+			}
+			cm := &corev1.ConfigMap{}
+			if err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+				Namespace: sigstoreTrustedRootConfigMapNS,
+				Name:      sigstoreTrustedRootConfigMap,
+			}, cm); err != nil {
+				setupLog.Error(err, "failed to read Sigstore trusted root ConfigMap")
+				os.Exit(1)
+			}
+			raw, ok := cm.Data[sigstoreTrustedRootConfigMapKey]
+			if !ok || raw == "" {
+				setupLog.Error(errors.New("missing trusted root data"),
+					"Sigstore trusted root ConfigMap has no data for key", "key", sigstoreTrustedRootConfigMapKey)
+				os.Exit(1)
+			}
+			sigstoreTrustRoot = []byte(raw)
+		}
+	}
+
+	var sigstoreVerifier signature.BundleVerifier
+	if enableSigstoreVerification {
+		var sErr error
+		sigstoreVerifier, sErr = signature.NewSigstoreVerifier(&signature.SigstoreConfig{
+			CertificateIdentity:   sigstoreCertificateIdentity,
+			CertificateOIDCIssuer: sigstoreCertificateOIDCIssuer,
+			TrustRootJSON:         sigstoreTrustRoot,
+		})
+		if sErr != nil {
+			setupLog.Error(sErr, "unable to create Sigstore verifier")
+			os.Exit(1)
+		}
+		setupLog.Info("Sigstore agent-card bundle verification enabled",
+			"auditMode", sigstoreAuditMode,
+			"customTrustedRoot", sigstoreTrustedRootConfigMap != "")
+	}
+
 	if err = (&controller.AgentCardReconciler{
 		Client:                mgr.GetClient(),
 		Scheme:                mgr.GetScheme(),
@@ -345,6 +417,10 @@ func main() {
 		SignatureProvider:     sigProvider,
 		RequireSignature:      requireA2ASignature,
 		SignatureAuditMode:    signatureAuditMode,
+		SigstoreVerifier:      sigstoreVerifier,
+		SigstoreAuditMode:     sigstoreAuditMode,
+		SigstoreCertIdentity:  sigstoreCertificateIdentity,
+		SigstoreOIDCIssuer:    sigstoreCertificateOIDCIssuer,
 		SpireTrustDomain:      spireTrustDomain,
 		SVIDExpiryGracePeriod: svidExpiryGracePeriod,
 	}).SetupWithManager(mgr); err != nil {

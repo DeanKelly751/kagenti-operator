@@ -36,6 +36,9 @@ type VerificationResult struct {
 	SpiffeID     string // from leaf cert SAN URI
 	Details      string
 	LeafNotAfter time.Time // leaf cert expiry
+	// SigstoreBundleVerifier populates the following when verifying .sigstore.json bundles.
+	SigstoreCertificateIdentity string
+	RekorLogIndex               string
 }
 
 // Provider verifies A2A AgentCard JWS signatures (spec section 8.4).
@@ -45,6 +48,13 @@ type Provider interface {
 	Name() string
 	// BundleHash returns a hash of the current trust bundle for change detection.
 	BundleHash() string
+}
+
+// BundleVerifier verifies Sigstore bundles for raw artifact bytes (RFC Phase 2B).
+// certificateIdentity and certificateOIDCIssuer override the verifier defaults when non-empty (per-AgentCard spec).
+type BundleVerifier interface {
+	VerifyBundle(ctx context.Context, artifactBytes, bundleBytes []byte, certificateIdentity, certificateOIDCIssuer string) (*VerificationResult, error)
+	Name() string
 }
 
 type ProviderType string

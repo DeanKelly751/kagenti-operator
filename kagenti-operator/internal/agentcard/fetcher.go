@@ -46,11 +46,20 @@ const (
 const (
 	SignedCardConfigMapSuffix = "-card-signed"
 	SignedCardConfigMapKey    = "agent-card.json"
+	// SigstoreBundleConfigMapKey holds the cosign/sigstore JSON bundle for the same card bytes (RFC Phase 2B).
+	SigstoreBundleConfigMapKey = "agent-card.sigstore.json"
 )
+
+// FetchResult is the outcome of fetching an agent card (RFC: raw bytes + optional Sigstore bundle).
+type FetchResult struct {
+	CardData    *agentv1alpha1.AgentCardData
+	RawCardJSON []byte
+	BundleJSON  []byte
+}
 
 type Fetcher interface {
 	Fetch(ctx context.Context, protocol, serviceURL, agentName, namespace string,
-	) (*agentv1alpha1.AgentCardData, error)
+	) (*FetchResult, error)
 }
 
 type DefaultFetcher struct {
@@ -67,7 +76,7 @@ func NewFetcher() Fetcher {
 
 func (f *DefaultFetcher) Fetch(
 	ctx context.Context, protocol, serviceURL, _, _ string,
-) (*agentv1alpha1.AgentCardData, error) {
+) (*FetchResult, error) {
 	switch protocol {
 	case A2AProtocol:
 		return f.fetchA2ACard(ctx, serviceURL)
@@ -76,10 +85,10 @@ func (f *DefaultFetcher) Fetch(
 	}
 }
 
-func (f *DefaultFetcher) fetchA2ACard(ctx context.Context, serviceURL string) (*agentv1alpha1.AgentCardData, error) {
-	card, err := f.fetchAgentCardFromPath(ctx, serviceURL, A2AAgentCardPath)
+func (f *DefaultFetcher) fetchA2ACard(ctx context.Context, serviceURL string) (*FetchResult, error) {
+	res, err := f.fetchAgentCardFromPath(ctx, serviceURL, A2AAgentCardPath)
 	if err == nil {
-		return card, nil
+		return res, nil
 	}
 
 	if !errors.Is(err, errNotFound) {
@@ -90,9 +99,8 @@ func (f *DefaultFetcher) fetchA2ACard(ctx context.Context, serviceURL string) (*
 		"currentPath", A2AAgentCardPath,
 		"legacyPath", A2ALegacyAgentCardPath)
 
-	card, legacyErr := f.fetchAgentCardFromPath(ctx, serviceURL, A2ALegacyAgentCardPath)
+	res, legacyErr := f.fetchAgentCardFromPath(ctx, serviceURL, A2ALegacyAgentCardPath)
 	if legacyErr != nil {
-		// Return the original error since the primary path is canonical.
 		return nil, err
 	}
 
@@ -100,15 +108,15 @@ func (f *DefaultFetcher) fetchA2ACard(ctx context.Context, serviceURL string) (*
 		"deprecated", true,
 		"migrateTo", A2AAgentCardPath,
 		"legacyPath", A2ALegacyAgentCardPath,
-		"agentName", card.Name)
+		"agentName", res.CardData.Name)
 
-	return card, nil
+	return res, nil
 }
 
 // errNotFound is returned when the agent card endpoint returns HTTP 404.
 var errNotFound = errors.New("agent card not found")
 
-func (f *DefaultFetcher) fetchAgentCardFromPath(ctx context.Context, serviceURL, path string) (*agentv1alpha1.AgentCardData, error) {
+func (f *DefaultFetcher) fetchAgentCardFromPath(ctx context.Context, serviceURL, path string) (*FetchResult, error) {
 	agentCardURL := serviceURL + path
 	fetcherLogger.Info("Fetching A2A agent card", "url", agentCardURL)
 
@@ -140,6 +148,8 @@ func (f *DefaultFetcher) fetchAgentCardFromPath(ctx context.Context, serviceURL,
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
+	raw := append([]byte(nil), body...)
+
 	var agentCardData agentv1alpha1.AgentCardData
 	if err := json.Unmarshal(body, &agentCardData); err != nil {
 		return nil, fmt.Errorf("failed to parse agent card JSON: %w", err)
@@ -150,7 +160,11 @@ func (f *DefaultFetcher) fetchAgentCardFromPath(ctx context.Context, serviceURL,
 		"version", agentCardData.Version,
 		"url", agentCardData.URL)
 
-	return &agentCardData, nil
+	return &FetchResult{
+		CardData:    &agentCardData,
+		RawCardJSON: raw,
+		BundleJSON:  nil,
+	}, nil
 }
 
 // ConfigMapFetcher reads signed agent cards from a ConfigMap before falling
@@ -170,18 +184,28 @@ func NewConfigMapFetcher(reader client.Reader) Fetcher {
 
 func (f *ConfigMapFetcher) Fetch(
 	ctx context.Context, protocol, serviceURL, agentName, namespace string,
-) (*agentv1alpha1.AgentCardData, error) {
+) (*FetchResult, error) {
 	if agentName != "" && namespace != "" {
 		cmName := agentName + SignedCardConfigMapSuffix
 		var cm corev1.ConfigMap
 		err := f.reader.Get(ctx, types.NamespacedName{Name: cmName, Namespace: namespace}, &cm)
 		if err == nil {
 			if cardJSON, ok := cm.Data[SignedCardConfigMapKey]; ok {
+				raw := []byte(cardJSON)
 				var cardData agentv1alpha1.AgentCardData
-				if jsonErr := json.Unmarshal([]byte(cardJSON), &cardData); jsonErr == nil {
+				if jsonErr := json.Unmarshal(raw, &cardData); jsonErr == nil {
+					var bundle []byte
+					if b, ok := cm.Data[SigstoreBundleConfigMapKey]; ok && b != "" {
+						bundle = []byte(b)
+					}
 					fetcherLogger.Info("Fetched signed agent card from ConfigMap",
-						"configMap", cmName, "namespace", namespace, "agentName", cardData.Name)
-					return &cardData, nil
+						"configMap", cmName, "namespace", namespace, "agentName", cardData.Name,
+						"hasSigstoreBundle", len(bundle) > 0)
+					return &FetchResult{
+						CardData:    &cardData,
+						RawCardJSON: raw,
+						BundleJSON:  bundle,
+					}, nil
 				}
 				fetcherLogger.Info("ConfigMap contains invalid JSON, falling back to HTTP",
 					"configMap", cmName, "namespace", namespace)

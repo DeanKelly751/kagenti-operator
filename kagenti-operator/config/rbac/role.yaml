@@ -91,6 +91,13 @@ rules:
   - update
   - watch
 - apiGroups:
+  - apps
+  resources:
+  - deployments/finalizers
+  - statefulsets/finalizers
+  verbs:
+  - update
+- apiGroups:
   - mlflow.opendatahub.io
   resources:
   - mlflows
@@ -98,13 +105,6 @@ rules:
   - get
   - list
   - watch
-- apiGroups:
-  - apps
-  resources:
-  - deployments/finalizers
-  - statefulsets/finalizers
-  verbs:
-  - update
 - apiGroups:
   - networking.k8s.io
   resources:

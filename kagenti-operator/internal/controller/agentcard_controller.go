@@ -95,6 +95,11 @@ const (
 	ReasonSignatureValid        = "SignatureValid"
 	ReasonSignatureInvalid      = "SignatureInvalid"
 	ReasonSignatureInvalidAudit = "SignatureInvalidAudit"
+
+	ReasonSigstoreVerified                = "Verified"
+	ReasonSigstoreBundleNotFound          = "BundleNotFound"
+	ReasonSigstoreVerificationFailed      = "VerificationFailed"
+	ReasonSigstoreVerificationFailedAudit = "VerificationFailedAudit"
 )
 
 var (
@@ -124,6 +129,11 @@ type AgentCardReconciler struct {
 	SignatureProvider  signature.Provider
 	RequireSignature   bool
 	SignatureAuditMode bool
+
+	SigstoreVerifier     signature.BundleVerifier
+	SigstoreAuditMode    bool
+	SigstoreCertIdentity string
+	SigstoreOIDCIssuer   string
 
 	// SpireTrustDomain can be overridden per-AgentCard via spec.identityBinding.trustDomain.
 	SpireTrustDomain string
@@ -225,7 +235,7 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	servicePort := r.getServicePort(service)
 	serviceURL := agentcard.GetServiceURL(workload.ServiceName, agentCard.Namespace, servicePort)
 
-	cardData, err := r.AgentFetcher.Fetch(ctx, protocol, serviceURL, workload.ServiceName, agentCard.Namespace)
+	fetchRes, err := r.AgentFetcher.Fetch(ctx, protocol, serviceURL, workload.ServiceName, agentCard.Namespace)
 	if err != nil {
 		agentCardLogger.Error(err, "Failed to fetch agent card", "workload", workload.Name, "url", serviceURL)
 		if condErr := r.updateCondition(ctx, agentCard, "Synced", metav1.ConditionFalse, "FetchFailed", err.Error()); condErr != nil {
@@ -233,6 +243,7 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 	}
+	cardData := fetchRes.CardData
 
 	var verificationResult *signature.VerificationResult
 	if r.RequireSignature {
@@ -262,6 +273,16 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 					r.Recorder.Event(agentCard, corev1.EventTypeWarning, "SignatureFailed", verificationResult.Details)
 				}
 			}
+		}
+	}
+
+	var sigstoreResult *signature.VerificationResult
+	if r.SigstoreVerifier != nil {
+		var sErr error
+		sigstoreResult, sErr = r.verifySigstoreBundle(ctx, agentCard, fetchRes)
+		if sErr != nil {
+			agentCardLogger.Error(sErr, "Sigstore verification error", "workload", workload.Name)
+			return ctrl.Result{}, sErr
 		}
 	}
 
@@ -305,7 +326,7 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if r.RequireSignature {
 		vr = verificationResult
 	}
-	if err := r.updateAgentCardStatus(ctx, agentCard, cardData, protocol, cardId, resolvedTargetRef, vr, binding, identityMatch); err != nil {
+	if err := r.updateAgentCardStatus(ctx, agentCard, cardData, protocol, cardId, resolvedTargetRef, vr, binding, identityMatch, sigstoreResult); err != nil {
 		agentCardLogger.Error(err, "Failed to update AgentCard status")
 		return ctrl.Result{}, err
 	}
@@ -328,6 +349,13 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				"details", verificationResult.Details)
 			return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 		}
+	}
+
+	if r.SigstoreVerifier != nil && len(fetchRes.BundleJSON) > 0 && sigstoreResult != nil && !sigstoreResult.Verified && !r.SigstoreAuditMode {
+		agentCardLogger.Info("Sigstore bundle verification failed, rejecting agent card",
+			"workload", workload.Name,
+			"details", sigstoreResult.Details)
+		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 	}
 
 	syncPeriod := r.getSyncPeriod(agentCard)
@@ -546,7 +574,7 @@ func (r *AgentCardReconciler) getSyncPeriod(agentCard *agentv1alpha1.AgentCard) 
 }
 
 // updateAgentCardStatus persists all status fields atomically with retry.
-func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCard *agentv1alpha1.AgentCard, cardData *agentv1alpha1.AgentCardData, protocol, cardId string, targetRef *agentv1alpha1.TargetRef, verificationResult *signature.VerificationResult, binding *bindingResult, identityMatch *bool) error {
+func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCard *agentv1alpha1.AgentCard, cardData *agentv1alpha1.AgentCardData, protocol, cardId string, targetRef *agentv1alpha1.TargetRef, verificationResult *signature.VerificationResult, binding *bindingResult, identityMatch *bool, sigstoreResult *signature.VerificationResult) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &agentv1alpha1.AgentCard{}
 		if err := r.Get(ctx, types.NamespacedName{
@@ -616,6 +644,47 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 			})
 		}
 
+		if r.SigstoreVerifier == nil {
+			latest.Status.SigstoreBundleVerified = nil
+			latest.Status.SigstoreIdentity = ""
+			latest.Status.RekorLogIndex = ""
+			filtered := make([]metav1.Condition, 0, len(latest.Status.Conditions))
+			for _, c := range latest.Status.Conditions {
+				if c.Type != "SigstoreVerified" {
+					filtered = append(filtered, c)
+				}
+			}
+			latest.Status.Conditions = filtered
+		} else if sigstoreResult != nil {
+			latest.Status.SigstoreBundleVerified = &sigstoreResult.Verified
+			if sigstoreResult.Verified {
+				latest.Status.SigstoreIdentity = sigstoreResult.SigstoreCertificateIdentity
+				latest.Status.RekorLogIndex = sigstoreResult.RekorLogIndex
+			} else {
+				latest.Status.SigstoreIdentity = ""
+				latest.Status.RekorLogIndex = ""
+			}
+			sc := metav1.Condition{Type: "SigstoreVerified"}
+			if sigstoreResult.Verified {
+				sc.Status = metav1.ConditionTrue
+				sc.Reason = ReasonSigstoreVerified
+				sc.Message = sigstoreResult.Details
+			} else {
+				sc.Status = metav1.ConditionFalse
+				if strings.Contains(sigstoreResult.Details, "not present") {
+					sc.Reason = ReasonSigstoreBundleNotFound
+					sc.Message = sigstoreResult.Details
+				} else if r.SigstoreAuditMode {
+					sc.Reason = ReasonSigstoreVerificationFailedAudit
+					sc.Message = sigstoreResult.Details + " (audit mode: allowed)"
+				} else {
+					sc.Reason = ReasonSigstoreVerificationFailed
+					sc.Message = sigstoreResult.Details
+				}
+			}
+			meta.SetStatusCondition(&latest.Status.Conditions, sc)
+		}
+
 		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
 			Type:    "Ready",
 			Status:  metav1.ConditionTrue,
@@ -682,6 +751,62 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 
 		return r.Status().Update(ctx, latest)
 	})
+}
+
+func (r *AgentCardReconciler) effectiveSigstoreIdentity(ac *agentv1alpha1.AgentCard) (identity, issuer string) {
+	identity, issuer = r.SigstoreCertIdentity, r.SigstoreOIDCIssuer
+	if s := ac.Spec.SigstoreVerification; s != nil {
+		if s.CertificateIdentity != "" {
+			identity = s.CertificateIdentity
+		}
+		if s.CertificateOIDCIssuer != "" {
+			issuer = s.CertificateOIDCIssuer
+		}
+	}
+	return identity, issuer
+}
+
+func (r *AgentCardReconciler) verifySigstoreBundle(ctx context.Context, ac *agentv1alpha1.AgentCard, fr *agentcard.FetchResult) (*signature.VerificationResult, error) {
+	if r.SigstoreVerifier == nil {
+		return nil, nil
+	}
+	raw := fr.RawCardJSON
+	if len(raw) == 0 && fr.CardData != nil {
+		var mErr error
+		raw, mErr = json.Marshal(fr.CardData)
+		if mErr != nil {
+			return nil, fmt.Errorf("marshal card for sigstore: %w", mErr)
+		}
+	}
+	start := time.Now()
+	defer func() {
+		signature.SigstoreVerificationDuration.WithLabelValues().Observe(time.Since(start).Seconds())
+	}()
+
+	if len(fr.BundleJSON) == 0 {
+		res := &signature.VerificationResult{Verified: false, Details: "sigstore bundle not present in card source"}
+		signature.RecordVerification(r.SigstoreVerifier.Name(), false, r.SigstoreAuditMode)
+		signature.RecordSigstoreVerification(false, "bundle_absent")
+		return res, nil
+	}
+
+	id, iss := r.effectiveSigstoreIdentity(ac)
+	res, err := r.SigstoreVerifier.VerifyBundle(ctx, raw, fr.BundleJSON, id, iss)
+	if err != nil {
+		signature.RecordError(r.SigstoreVerifier.Name(), "verification_error")
+		signature.RecordSigstoreVerification(false, "infrastructure")
+		return nil, err
+	}
+	if res == nil {
+		res = &signature.VerificationResult{Verified: false, Details: "nil sigstore verification result"}
+	}
+	signature.RecordVerification(r.SigstoreVerifier.Name(), res.Verified, r.SigstoreAuditMode)
+	reason := "verified"
+	if !res.Verified {
+		reason = "crypto"
+	}
+	signature.RecordSigstoreVerification(res.Verified, reason)
+	return res, nil
 }
 
 // verifySignature delegates to the Provider and records metrics.

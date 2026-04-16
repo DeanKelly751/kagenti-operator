@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
+	"github.com/kagenti/operator/internal/agentcard"
 	"github.com/kagenti/operator/internal/signature"
 )
 
@@ -1097,8 +1098,10 @@ type mockFetcherFunc struct {
 
 func (m *mockFetcherFunc) Fetch(
 	_ context.Context, _, _, _, _ string,
-) (*agentv1alpha1.AgentCardData, error) {
-	return m.fn(), nil
+) (*agentcard.FetchResult, error) {
+	cd := m.fn()
+	raw, _ := json.Marshal(cd)
+	return &agentcard.FetchResult{CardData: cd, RawCardJSON: raw}, nil
 }
 
 // mockSignatureProvider wraps VerifyJWS with a fixed public key for tests.

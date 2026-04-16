@@ -44,11 +44,15 @@ type mockFetcher struct {
 
 func (m *mockFetcher) Fetch(
 	ctx context.Context, protocol, url, _, _ string,
-) (*agentv1alpha1.AgentCardData, error) {
+) (*agentcard.FetchResult, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
-	return m.cardData, nil
+	raw, _ := json.Marshal(m.cardData)
+	return &agentcard.FetchResult{
+		CardData:    m.cardData,
+		RawCardJSON: raw,
+	}, nil
 }
 
 // capturingProtocolFetcher records the protocol passed to Fetch (for multi-protocol label tests).
@@ -60,18 +64,20 @@ type capturingProtocolFetcher struct {
 
 func (c *capturingProtocolFetcher) Fetch(
 	ctx context.Context, protocol, _, _, _ string,
-) (*agentv1alpha1.AgentCardData, error) {
+) (*agentcard.FetchResult, error) {
 	c.mu.Lock()
 	c.protocol = protocol
 	c.mu.Unlock()
-	if c.cardData != nil {
-		return c.cardData, nil
+	cd := c.cardData
+	if cd == nil {
+		cd = &agentv1alpha1.AgentCardData{
+			Name:    "capture",
+			Version: "1.0.0",
+			URL:     "http://0.0.0.0:8000",
+		}
 	}
-	return &agentv1alpha1.AgentCardData{
-		Name:    "capture",
-		Version: "1.0.0",
-		URL:     "http://0.0.0.0:8000",
-	}, nil
+	raw, _ := json.Marshal(cd)
+	return &agentcard.FetchResult{CardData: cd, RawCardJSON: raw}, nil
 }
 
 func (c *capturingProtocolFetcher) lastProtocol() string {
