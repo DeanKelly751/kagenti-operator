@@ -11,7 +11,8 @@ func CompiledDefaults() *PlatformConfig {
 		// Compiled defaults are overridden at runtime by the platform-config
 		// ConfigMap (kagenti-platform-config). These serve as fallbacks only.
 		Images: ImageConfig{
-			EnvoyProxy:         "ghcr.io/kagenti/kagenti-extensions/authbridge-unified:latest",
+			EnvoyProxy:         "ghcr.io/kagenti/kagenti-extensions/authbridge-envoy:latest",
+			AuthBridgeLight:    "ghcr.io/kagenti/kagenti-extensions/authbridge-light:latest",
 			ProxyInit:          "ghcr.io/kagenti/kagenti-extensions/proxy-init:latest",
 			SpiffeHelper:       "ghcr.io/kagenti/kagenti-extensions/spiffe-helper:latest",
 			ClientRegistration: "ghcr.io/kagenti/kagenti-extensions/client-registration:latest",

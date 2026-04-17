@@ -10,3 +10,17 @@ const (
 	// default is operator-managed Keycloak credentials (no sidecar).
 	LabelClientRegistrationInject = "kagenti.io/client-registration-inject"
 )
+
+// AuthBridge deployment mode annotation.
+// Controls which image variant and injection pattern is used.
+const (
+	AnnotationAuthBridgeMode = "kagenti.io/authbridge-mode"
+
+	// Mode values
+	ModeEnvoySidecar = "envoy-sidecar" // default: iptables + Envoy + ext_proc
+	ModeProxySidecar = "proxy-sidecar" // HTTP_PROXY env + lightweight authbridge
+	ModeWaypoint     = "waypoint"      // standalone deployment (not injected)
+
+	// Container name for proxy-sidecar mode
+	AuthBridgeProxyContainerName = "authbridge-proxy"
+)

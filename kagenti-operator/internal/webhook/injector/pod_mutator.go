@@ -248,6 +248,70 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 			"namespace", namespace, "crName", crName)
 	}
 
+	// ========================================
+	// Mode-aware injection
+	// ========================================
+	//
+	// The authbridge-mode annotation selects the deployment pattern:
+	//   envoy-sidecar (default) — iptables + Envoy + ext_proc (authbridge-envoy image)
+	//   proxy-sidecar           — HTTP_PROXY env + lightweight authbridge (authbridge-light image)
+	//   waypoint                — standalone deployment, not injected as sidecar
+	authBridgeMode := annotations[AnnotationAuthBridgeMode]
+	if authBridgeMode == "" {
+		authBridgeMode = ModeEnvoySidecar
+	}
+
+	if authBridgeMode == ModeWaypoint {
+		mutatorLog.Info("waypoint mode — skipping sidecar injection (waypoint is a standalone deployment)",
+			"namespace", namespace, "crName", crName)
+		return false, nil
+	}
+
+	if authBridgeMode == ModeProxySidecar {
+		// Proxy-sidecar mode: inject lightweight authbridge container + HTTP_PROXY env vars.
+		// No iptables, no proxy-init, no Envoy.
+		if !containerExists(podSpec.Containers, AuthBridgeProxyContainerName) {
+			podSpec.Containers = append(podSpec.Containers, builder.BuildProxySidecarContainer(spireEnabled))
+		}
+
+		// Inject HTTP_PROXY env vars into all existing app containers
+		for i := range podSpec.Containers {
+			c := &podSpec.Containers[i]
+			if c.Name == AuthBridgeProxyContainerName {
+				continue
+			}
+			injectHTTPProxyEnv(c, 8081)
+		}
+
+		// spiffe-helper and client-registration are still injected
+		if decision.SpiffeHelper.Inject && !containerExists(podSpec.Containers, SpiffeHelperContainerName) {
+			podSpec.Containers = append(podSpec.Containers, builder.BuildSpiffeHelperContainer())
+		}
+		if decision.ClientRegistration.Inject && !containerExists(podSpec.Containers, ClientRegistrationContainerName) {
+			podSpec.Containers = append(podSpec.Containers, builder.BuildClientRegistrationContainerWithSpireOption(crName, namespace, spireEnabled))
+		}
+
+		// Inject volumes (shared-data, authbridge-unified-config, spire volumes if enabled)
+		for i := range requiredVolumes {
+			if !volumeExists(podSpec.Volumes, requiredVolumes[i].Name) {
+				podSpec.Volumes = append(podSpec.Volumes, requiredVolumes[i])
+			}
+		}
+
+		mutatorLog.Info("proxy-sidecar mode injection complete",
+			"namespace", namespace, "crName", crName,
+			"image", builder.cfg.Images.AuthBridgeLight)
+
+		if spireEnabled {
+			ensureFSGroup(podSpec)
+		}
+		return true, nil
+	}
+
+	// ========================================
+	// Envoy-sidecar mode (default)
+	// ========================================
+
 	// Conditionally inject sidecars based on precedence decisions.
 	// Two modes controlled by the combinedSidecar feature gate:
 	//   true  → combined mode: single "authbridge" container replaces envoy-proxy +
@@ -417,4 +481,31 @@ func ensureFSGroup(podSpec *corev1.PodSpec) {
 		podSpec.SecurityContext.FSGroup = &fsGroupValue
 		mutatorLog.Info("Set fsGroup for shared volume access", "fsGroup", fsGroupValue)
 	}
+}
+
+// injectHTTPProxyEnv adds HTTP_PROXY, HTTPS_PROXY, and NO_PROXY env vars to a container.
+// Used in proxy-sidecar mode so the app routes outbound traffic through authbridge's
+// forward proxy without iptables interception.
+func injectHTTPProxyEnv(c *corev1.Container, forwardProxyPort int32) {
+	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", forwardProxyPort)
+	envs := []corev1.EnvVar{
+		{Name: "HTTP_PROXY", Value: proxyURL},
+		{Name: "HTTPS_PROXY", Value: proxyURL},
+		{Name: "NO_PROXY", Value: "127.0.0.1,localhost"},
+	}
+	for _, env := range envs {
+		if !envExists(c.Env, env.Name) {
+			c.Env = append(c.Env, env)
+		}
+	}
+}
+
+// envExists checks if an env var with the given name already exists.
+func envExists(envs []corev1.EnvVar, name string) bool {
+	for _, e := range envs {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
 }

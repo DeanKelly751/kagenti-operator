@@ -19,6 +19,7 @@ type PlatformConfig struct {
 
 type ImageConfig struct {
 	EnvoyProxy         string            `json:"envoyProxy" yaml:"envoyProxy"`
+	AuthBridgeLight    string            `json:"authbridgeLight" yaml:"authbridgeLight"`
 	ProxyInit          string            `json:"proxyInit" yaml:"proxyInit"`
 	SpiffeHelper       string            `json:"spiffeHelper" yaml:"spiffeHelper"`
 	ClientRegistration string            `json:"clientRegistration" yaml:"clientRegistration"`

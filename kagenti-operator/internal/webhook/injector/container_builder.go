@@ -441,6 +441,55 @@ func (b *ContainerBuilder) BuildEnvoyProxyContainerWithSpireOption(spireEnabled 
 	}
 }
 
+// BuildProxySidecarContainer creates a lightweight authbridge container for proxy-sidecar mode.
+// Uses authbridge-light image (no Envoy). The app uses HTTP_PROXY env vars to route
+// outbound traffic through the forward proxy. Inbound traffic goes through the reverse proxy.
+func (b *ContainerBuilder) BuildProxySidecarContainer(spireEnabled bool) corev1.Container {
+	volumeMounts := []corev1.VolumeMount{
+		{
+			Name:      "shared-data",
+			MountPath: "/shared",
+		},
+		{
+			Name:      "authbridge-unified-config",
+			MountPath: "/etc/authbridge",
+			ReadOnly:  true,
+		},
+	}
+	if spireEnabled {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "svid-output",
+			MountPath: "/opt",
+		})
+	}
+
+	return corev1.Container{
+		Name:            AuthBridgeProxyContainerName,
+		Image:           b.cfg.Images.AuthBridgeLight,
+		ImagePullPolicy: b.cfg.Images.PullPolicy,
+		Args:            []string{"--mode", "proxy-sidecar", "--config", "/etc/authbridge/config.yaml"},
+		Ports: []corev1.ContainerPort{
+			{
+				Name:          "reverse-proxy",
+				ContainerPort: 8080,
+				Protocol:      corev1.ProtocolTCP,
+			},
+			{
+				Name:          "forward-proxy",
+				ContainerPort: 8081,
+				Protocol:      corev1.ProtocolTCP,
+			},
+		},
+		Resources: b.cfg.Resources.EnvoyProxy,
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:                ptr.To(int64(1001)),
+			RunAsNonRoot:             ptr.To(true),
+			AllowPrivilegeEscalation: ptr.To(false),
+		},
+		VolumeMounts: volumeMounts,
+	}
+}
+
 // buildEnvoyProxyEnvResolved returns literal env vars from resolved config.
 func (b *ContainerBuilder) buildEnvoyProxyEnvResolved() []corev1.EnvVar {
 	return []corev1.EnvVar{
