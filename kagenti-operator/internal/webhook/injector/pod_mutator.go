@@ -270,17 +270,95 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 	if authBridgeMode == ModeProxySidecar {
 		// Proxy-sidecar mode: inject lightweight authbridge container + HTTP_PROXY env vars.
 		// No iptables, no proxy-init, no Envoy.
+		//
+		// Port-stealing: the reverse proxy takes over the agent's original port so
+		// the Service doesn't need patching. The agent is moved to a free port.
+		//   Service → :8000 → reverse proxy (validates JWT) → :8002 → agent
+		//   Agent outbound → HTTP_PROXY=127.0.0.1:8081 → forward proxy
+
+		// Collect all ports in use across all containers in the pod.
+		usedPorts := map[int32]bool{}
+		for _, c := range podSpec.Containers {
+			for _, p := range c.Ports {
+				usedPorts[p.ContainerPort] = true
+			}
+		}
+
+		// Find the first app container's port and steal it for the reverse proxy.
+		var originalAgentPort int32
+		var agentContainer *corev1.Container
+		for i := range podSpec.Containers {
+			c := &podSpec.Containers[i]
+			if c.Name == AuthBridgeProxyContainerName ||
+				c.Name == SpiffeHelperContainerName ||
+				c.Name == ClientRegistrationContainerName {
+				continue
+			}
+			if len(c.Ports) > 0 {
+				originalAgentPort = c.Ports[0].ContainerPort
+				agentContainer = c
+				break
+			}
+		}
+
+		if originalAgentPort == 0 {
+			originalAgentPort = 8000
+			mutatorLog.Info("no container port found, using default", "port", originalAgentPort)
+		}
+
+		// Find free ports for the agent and forward proxy.
+		// findFreePort returns the first port >= start that isn't in usedPorts,
+		// and marks it as used. Respects the valid port range (1-65535).
+		findFreePort := func(start int32) int32 {
+			p := start
+			for usedPorts[p] && p < 65535 {
+				p++
+			}
+			usedPorts[p] = true
+			return p
+		}
+
+		// Reserve the original agent port for the reverse proxy
+		usedPorts[originalAgentPort] = true
+
+		newAgentPort := findFreePort(originalAgentPort + 1)
+		forwardProxyPort := findFreePort(8081)
+
+		// Move the agent to the free port.
+		// Most agent frameworks (Python/uvicorn, Node/express, FastAPI) read the
+		// PORT env var to determine the bind address. Go agents that hardcode their
+		// listen port won't be affected by this env var — they must use PORT or
+		// be configured via their own config mechanism.
+		if agentContainer != nil {
+			agentContainer.Ports[0].ContainerPort = newAgentPort
+			setOrAddEnv(agentContainer, "PORT", fmt.Sprintf("%d", newAgentPort))
+			mutatorLog.Info("proxy-sidecar port stealing",
+				"container", agentContainer.Name,
+				"originalPort", originalAgentPort,
+				"movedTo", newAgentPort,
+				"forwardProxyPort", forwardProxyPort)
+		}
+
+		// Inject authbridge-proxy container listening on the original agent port
 		if !containerExists(podSpec.Containers, AuthBridgeProxyContainerName) {
-			podSpec.Containers = append(podSpec.Containers, builder.BuildProxySidecarContainer(spireEnabled))
+			podSpec.Containers = append(podSpec.Containers,
+				builder.BuildProxySidecarContainerWithPorts(
+					spireEnabled,
+					originalAgentPort, // reverse proxy listens here
+					newAgentPort,      // forwards to agent here
+					forwardProxyPort,  // forward proxy listens here
+				))
 		}
 
 		// Inject HTTP_PROXY env vars into all existing app containers
 		for i := range podSpec.Containers {
 			c := &podSpec.Containers[i]
-			if c.Name == AuthBridgeProxyContainerName {
+			if c.Name == AuthBridgeProxyContainerName ||
+				c.Name == SpiffeHelperContainerName ||
+				c.Name == ClientRegistrationContainerName {
 				continue
 			}
-			injectHTTPProxyEnv(c, 8081)
+			injectHTTPProxyEnv(c, forwardProxyPort)
 		}
 
 		// spiffe-helper and client-registration are still injected
@@ -300,7 +378,10 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 
 		mutatorLog.Info("proxy-sidecar mode injection complete",
 			"namespace", namespace, "crName", crName,
-			"image", builder.cfg.Images.AuthBridgeLight)
+			"image", builder.cfg.Images.AuthBridgeLight,
+			"reverseProxyPort", originalAgentPort,
+			"agentPort", newAgentPort,
+			"forwardProxyPort", forwardProxyPort)
 
 		if spireEnabled {
 			ensureFSGroup(podSpec)
@@ -498,6 +579,18 @@ func injectHTTPProxyEnv(c *corev1.Container, forwardProxyPort int32) {
 			c.Env = append(c.Env, env)
 		}
 	}
+}
+
+// setOrAddEnv sets an env var value, or adds it if it doesn't exist.
+func setOrAddEnv(c *corev1.Container, name, value string) {
+	for i := range c.Env {
+		if c.Env[i].Name == name {
+			c.Env[i].Value = value
+			c.Env[i].ValueFrom = nil // clear any ValueFrom
+			return
+		}
+	}
+	c.Env = append(c.Env, corev1.EnvVar{Name: name, Value: value})
 }
 
 // envExists checks if an env var with the given name already exists.

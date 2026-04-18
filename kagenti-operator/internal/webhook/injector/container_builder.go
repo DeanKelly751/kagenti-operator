@@ -445,6 +445,14 @@ func (b *ContainerBuilder) BuildEnvoyProxyContainerWithSpireOption(spireEnabled 
 // Uses authbridge-light image (no Envoy). The app uses HTTP_PROXY env vars to route
 // outbound traffic through the forward proxy. Inbound traffic goes through the reverse proxy.
 func (b *ContainerBuilder) BuildProxySidecarContainer(spireEnabled bool) corev1.Container {
+	return b.BuildProxySidecarContainerWithPorts(spireEnabled, 8080, 8000, 8081)
+}
+
+// BuildProxySidecarContainerWithPorts creates a proxy-sidecar container with dynamic ports.
+// reverseProxyPort: where the reverse proxy listens (takes over the agent's original port)
+// agentBackendPort: where the agent actually listens (moved to a free port)
+// forwardProxyPort: where the forward proxy listens (HTTP_PROXY target)
+func (b *ContainerBuilder) BuildProxySidecarContainerWithPorts(spireEnabled bool, reverseProxyPort, agentBackendPort, forwardProxyPort int32) corev1.Container {
 	volumeMounts := []corev1.VolumeMount{
 		{
 			Name:      "shared-data",
@@ -467,16 +475,24 @@ func (b *ContainerBuilder) BuildProxySidecarContainer(spireEnabled bool) corev1.
 		Name:            AuthBridgeProxyContainerName,
 		Image:           b.cfg.Images.AuthBridgeLight,
 		ImagePullPolicy: b.cfg.Images.PullPolicy,
-		Args:            []string{"--mode", "proxy-sidecar", "--config", "/etc/authbridge/config.yaml"},
+		Args: []string{
+			"--mode", "proxy-sidecar",
+			"--config", "/etc/authbridge/config.yaml",
+		},
+		Env: []corev1.EnvVar{
+			{Name: "REVERSE_PROXY_ADDR", Value: fmt.Sprintf(":%d", reverseProxyPort)},
+			{Name: "REVERSE_PROXY_BACKEND", Value: fmt.Sprintf("http://127.0.0.1:%d", agentBackendPort)},
+			{Name: "FORWARD_PROXY_ADDR", Value: fmt.Sprintf(":%d", forwardProxyPort)},
+		},
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "reverse-proxy",
-				ContainerPort: 8080,
+				ContainerPort: reverseProxyPort,
 				Protocol:      corev1.ProtocolTCP,
 			},
 			{
 				Name:          "forward-proxy",
-				ContainerPort: 8081,
+				ContainerPort: forwardProxyPort,
 				Protocol:      corev1.ProtocolTCP,
 			},
 		},

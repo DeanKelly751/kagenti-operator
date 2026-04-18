@@ -782,3 +782,185 @@ func TestInjectHTTPProxyEnv_DoesNotDuplicate(t *testing.T) {
 		t.Error("NO_PROXY should be added")
 	}
 }
+
+func TestInjectAuthBridge_ProxySidecarMode_PortCollision(t *testing.T) {
+	m := newTestMutator()
+	ctx := context.Background()
+
+	// Agent uses ports 8000 and 8001 — agent should move to 8002, not 8001
+	podSpec := &corev1.PodSpec{
+		ServiceAccountName: "my-agent",
+		Containers: []corev1.Container{
+			{
+				Name:  "agent",
+				Image: "my-agent:latest",
+				Ports: []corev1.ContainerPort{
+					{Name: "http", ContainerPort: 8000},
+					{Name: "grpc", ContainerPort: 8001},
+				},
+			},
+		},
+	}
+	labels := map[string]string{
+		KagentiTypeLabel: KagentiTypeAgent,
+	}
+	annotations := map[string]string{
+		AnnotationAuthBridgeMode: ModeProxySidecar,
+	}
+
+	mutated, err := m.InjectAuthBridge(ctx, podSpec, "team1", "my-agent", labels, annotations)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mutated {
+		t.Fatal("expected mutation")
+	}
+
+	// Agent's first port should be moved past 8001 to 8002
+	for _, c := range podSpec.Containers {
+		if c.Name == "agent" {
+			if c.Ports[0].ContainerPort == 8001 {
+				t.Error("agent port should not be 8001 (collision with gRPC port)")
+			}
+			if c.Ports[0].ContainerPort != 8002 {
+				t.Errorf("agent port = %d, want 8002 (first free port after 8000)", c.Ports[0].ContainerPort)
+			}
+			// Second port (gRPC) should be unchanged
+			if c.Ports[1].ContainerPort != 8001 {
+				t.Errorf("gRPC port should remain 8001, got %d", c.Ports[1].ContainerPort)
+			}
+		}
+	}
+
+	// Reverse proxy should be on 8000 (original agent port)
+	for _, c := range podSpec.Containers {
+		if c.Name == AuthBridgeProxyContainerName {
+			for _, p := range c.Ports {
+				if p.Name == "reverse-proxy" && p.ContainerPort != 8000 {
+					t.Errorf("reverse-proxy port = %d, want 8000", p.ContainerPort)
+				}
+			}
+		}
+	}
+}
+
+func TestInjectAuthBridge_ProxySidecarMode_ForwardProxyCollision(t *testing.T) {
+	m := newTestMutator()
+	ctx := context.Background()
+
+	// Agent uses port 8081 — forward proxy should use 8082 instead of default 8081
+	podSpec := &corev1.PodSpec{
+		ServiceAccountName: "my-agent",
+		Containers: []corev1.Container{
+			{
+				Name:  "agent",
+				Image: "my-agent:latest",
+				Ports: []corev1.ContainerPort{
+					{Name: "http", ContainerPort: 8000},
+					{Name: "metrics", ContainerPort: 8081},
+				},
+			},
+		},
+	}
+	labels := map[string]string{
+		KagentiTypeLabel: KagentiTypeAgent,
+	}
+	annotations := map[string]string{
+		AnnotationAuthBridgeMode: ModeProxySidecar,
+	}
+
+	mutated, err := m.InjectAuthBridge(ctx, podSpec, "team1", "my-agent", labels, annotations)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mutated {
+		t.Fatal("expected mutation")
+	}
+
+	// Forward proxy should NOT be on 8081 (collision with metrics)
+	for _, c := range podSpec.Containers {
+		if c.Name == AuthBridgeProxyContainerName {
+			for _, p := range c.Ports {
+				if p.Name == "forward-proxy" {
+					if p.ContainerPort == 8081 {
+						t.Error("forward-proxy should not be 8081 (collision with agent metrics)")
+					}
+					if p.ContainerPort != 8082 {
+						t.Errorf("forward-proxy port = %d, want 8082", p.ContainerPort)
+					}
+				}
+			}
+		}
+	}
+
+	// HTTP_PROXY should use the actual forward proxy port, not hardcoded 8081
+	for _, c := range podSpec.Containers {
+		if c.Name == "agent" {
+			for _, env := range c.Env {
+				if env.Name == "HTTP_PROXY" {
+					if env.Value == "http://127.0.0.1:8081" {
+						t.Error("HTTP_PROXY should not use 8081 (collides with agent metrics)")
+					}
+					if env.Value != "http://127.0.0.1:8082" {
+						t.Errorf("HTTP_PROXY = %q, want http://127.0.0.1:8082", env.Value)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestSetOrAddEnv_OverwritesExisting(t *testing.T) {
+	c := &corev1.Container{
+		Name: "agent",
+		Env: []corev1.EnvVar{
+			{Name: "PORT", Value: "8000"},
+			{Name: "HOST", Value: "0.0.0.0"},
+		},
+	}
+
+	setOrAddEnv(c, "PORT", "8002")
+
+	count := 0
+	for _, env := range c.Env {
+		if env.Name == "PORT" {
+			count++
+			if env.Value != "8002" {
+				t.Errorf("PORT = %q, want 8002", env.Value)
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 PORT env var, got %d", count)
+	}
+	// HOST should be unchanged
+	for _, env := range c.Env {
+		if env.Name == "HOST" && env.Value != "0.0.0.0" {
+			t.Errorf("HOST should be unchanged, got %q", env.Value)
+		}
+	}
+}
+
+func TestSetOrAddEnv_AddsNew(t *testing.T) {
+	c := &corev1.Container{
+		Name: "agent",
+		Env: []corev1.EnvVar{
+			{Name: "HOST", Value: "0.0.0.0"},
+		},
+	}
+
+	setOrAddEnv(c, "PORT", "8002")
+
+	found := false
+	for _, env := range c.Env {
+		if env.Name == "PORT" && env.Value == "8002" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("PORT env var should be added")
+	}
+	if len(c.Env) != 2 {
+		t.Errorf("expected 2 env vars, got %d", len(c.Env))
+	}
+}
