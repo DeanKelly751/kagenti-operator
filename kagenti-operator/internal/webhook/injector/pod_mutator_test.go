@@ -626,3 +626,159 @@ func TestInjectAuthBridge_NilAnnotations(t *testing.T) {
 	}
 	t.Fatal("proxy-init container not found in initContainers")
 }
+
+// ========================================
+// Mode-aware injection tests
+// ========================================
+
+func TestInjectAuthBridge_WaypointMode_SkipsInjection(t *testing.T) {
+	m := newTestMutator()
+	ctx := context.Background()
+
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{
+			{Name: "agent", Image: "my-agent:latest"},
+		},
+	}
+	labels := map[string]string{
+		KagentiTypeLabel: KagentiTypeAgent,
+	}
+	annotations := map[string]string{
+		AnnotationAuthBridgeMode: ModeWaypoint,
+	}
+
+	mutated, err := m.InjectAuthBridge(ctx, podSpec, "team1", "my-agent", labels, annotations)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mutated {
+		t.Error("waypoint mode should not mutate the pod (returns false)")
+	}
+	if len(podSpec.Containers) != 1 {
+		t.Errorf("expected 1 container (agent only), got %d", len(podSpec.Containers))
+	}
+}
+
+func TestInjectAuthBridge_ProxySidecarMode_InjectsCorrectly(t *testing.T) {
+	m := newTestMutator()
+	ctx := context.Background()
+
+	podSpec := &corev1.PodSpec{
+		ServiceAccountName: "my-agent",
+		Containers: []corev1.Container{
+			{Name: "agent", Image: "my-agent:latest"},
+		},
+	}
+	labels := map[string]string{
+		KagentiTypeLabel: KagentiTypeAgent,
+	}
+	annotations := map[string]string{
+		AnnotationAuthBridgeMode: ModeProxySidecar,
+	}
+
+	mutated, err := m.InjectAuthBridge(ctx, podSpec, "team1", "my-agent", labels, annotations)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mutated {
+		t.Error("proxy-sidecar mode should mutate the pod")
+	}
+
+	// Should have authbridge-proxy container
+	proxyFound := false
+	for _, c := range podSpec.Containers {
+		if c.Name == AuthBridgeProxyContainerName {
+			proxyFound = true
+			if c.Image != config.CompiledDefaults().Images.AuthBridgeLight {
+				t.Errorf("proxy container image = %q, want authbridge-light", c.Image)
+			}
+		}
+	}
+	if !proxyFound {
+		t.Error("authbridge-proxy container not found")
+	}
+
+	// Should NOT have proxy-init (no iptables in proxy-sidecar mode)
+	for _, c := range podSpec.InitContainers {
+		if c.Name == ProxyInitContainerName {
+			t.Error("proxy-init should not be injected in proxy-sidecar mode")
+		}
+	}
+
+	// Should NOT have envoy-proxy container
+	for _, c := range podSpec.Containers {
+		if c.Name == EnvoyProxyContainerName {
+			t.Error("envoy-proxy should not be injected in proxy-sidecar mode")
+		}
+	}
+
+	// Agent container should have HTTP_PROXY env vars
+	for _, c := range podSpec.Containers {
+		if c.Name == "agent" {
+			httpProxy := ""
+			httpsProxy := ""
+			noProxy := ""
+			for _, env := range c.Env {
+				switch env.Name {
+				case "HTTP_PROXY":
+					httpProxy = env.Value
+				case "HTTPS_PROXY":
+					httpsProxy = env.Value
+				case "NO_PROXY":
+					noProxy = env.Value
+				}
+			}
+			if httpProxy != "http://127.0.0.1:8081" {
+				t.Errorf("HTTP_PROXY = %q, want http://127.0.0.1:8081", httpProxy)
+			}
+			if httpsProxy != "http://127.0.0.1:8081" {
+				t.Errorf("HTTPS_PROXY = %q, want http://127.0.0.1:8081", httpsProxy)
+			}
+			if noProxy != "127.0.0.1,localhost" {
+				t.Errorf("NO_PROXY = %q, want 127.0.0.1,localhost", noProxy)
+			}
+		}
+	}
+}
+
+func TestInjectHTTPProxyEnv_DoesNotDuplicate(t *testing.T) {
+	c := &corev1.Container{
+		Name: "agent",
+		Env: []corev1.EnvVar{
+			{Name: "HTTP_PROXY", Value: "http://existing-proxy:3128"},
+		},
+	}
+
+	injectHTTPProxyEnv(c, 8081)
+
+	count := 0
+	for _, env := range c.Env {
+		if env.Name == "HTTP_PROXY" {
+			count++
+			if env.Value != "http://existing-proxy:3128" {
+				t.Errorf("HTTP_PROXY should keep existing value, got %q", env.Value)
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 HTTP_PROXY env var, got %d", count)
+	}
+
+	// HTTPS_PROXY and NO_PROXY should be added since they didn't exist
+	httpsFound := false
+	noProxyFound := false
+	for _, env := range c.Env {
+		if env.Name == "HTTPS_PROXY" {
+			httpsFound = true
+		}
+		if env.Name == "NO_PROXY" {
+			noProxyFound = true
+		}
+	}
+	if !httpsFound {
+		t.Error("HTTPS_PROXY should be added")
+	}
+	if !noProxyFound {
+		t.Error("NO_PROXY should be added")
+	}
+}

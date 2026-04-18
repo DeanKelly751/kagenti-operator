@@ -702,3 +702,56 @@ func TestBuildEnvoyProxyContainer_HasExpectedAudienceFromConfigMap(t *testing.T)
 		t.Error("envoy-proxy container missing EXPECTED_AUDIENCE env var from ConfigMap")
 	}
 }
+
+func TestBuildProxySidecarContainer_SpireDisabled(t *testing.T) {
+	builder := NewContainerBuilder(config.CompiledDefaults())
+	container := builder.BuildProxySidecarContainer(false)
+
+	if container.Name != AuthBridgeProxyContainerName {
+		t.Errorf("container name = %q, want %q", container.Name, AuthBridgeProxyContainerName)
+	}
+	if container.Image != config.CompiledDefaults().Images.AuthBridgeLight {
+		t.Errorf("image = %q, want %q", container.Image, config.CompiledDefaults().Images.AuthBridgeLight)
+	}
+
+	// Should have --mode proxy-sidecar --config args
+	if len(container.Args) < 4 || container.Args[0] != "--mode" || container.Args[1] != "proxy-sidecar" {
+		t.Errorf("args = %v, want [--mode proxy-sidecar --config ...]", container.Args)
+	}
+
+	// Should have reverse-proxy and forward-proxy ports
+	portNames := map[string]bool{}
+	for _, p := range container.Ports {
+		portNames[p.Name] = true
+	}
+	if !portNames["reverse-proxy"] {
+		t.Error("missing reverse-proxy port")
+	}
+	if !portNames["forward-proxy"] {
+		t.Error("missing forward-proxy port")
+	}
+
+	// Should NOT have svid-output volume mount (SPIRE disabled)
+	for _, vm := range container.VolumeMounts {
+		if vm.Name == "svid-output" {
+			t.Error("svid-output volume mount should not be present when SPIRE is disabled")
+		}
+	}
+}
+
+func TestBuildProxySidecarContainer_SpireEnabled(t *testing.T) {
+	builder := NewContainerBuilder(config.CompiledDefaults())
+	container := builder.BuildProxySidecarContainer(true)
+
+	// Should have svid-output volume mount
+	found := false
+	for _, vm := range container.VolumeMounts {
+		if vm.Name == "svid-output" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("svid-output volume mount should be present when SPIRE is enabled")
+	}
+}
