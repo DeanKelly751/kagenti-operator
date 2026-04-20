@@ -667,9 +667,15 @@ func (m *PodMutator) ensurePerAgentConfigMap(
 		}
 		// Does not exist — create
 		if createErr := m.Client.Create(ctx, cm); createErr != nil {
-			return "", fmt.Errorf("failed to create ConfigMap %s/%s: %w", namespace, cmName, createErr)
+			if apierrors.IsAlreadyExists(createErr) {
+				// Race: another pod's admission created it between our Get and Create.
+				mutatorLog.Info("Per-agent ConfigMap created by concurrent admission", "namespace", namespace, "name", cmName)
+			} else {
+				return "", fmt.Errorf("failed to create ConfigMap %s/%s: %w", namespace, cmName, createErr)
+			}
+		} else {
+			mutatorLog.Info("Created per-agent ConfigMap", "namespace", namespace, "name", cmName, "mode", mode)
 		}
-		mutatorLog.Info("Created per-agent ConfigMap", "namespace", namespace, "name", cmName, "mode", mode)
 	} else {
 		// Exists — update if managed by us
 		if existing.Labels[managedByLabel] != managedByValue {
