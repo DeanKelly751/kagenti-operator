@@ -25,6 +25,6 @@ const (
 	AuthBridgeProxyContainerName = "authbridge-proxy"
 
 	// Identity type constants
-	IdentityTypeSpiffe       = "spiffe"
+	IdentityTypeSpiffe         = "spiffe"
 	ClientAuthTypeFederatedJWT = "federated-jwt"
 )
