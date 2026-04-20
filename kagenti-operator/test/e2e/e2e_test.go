@@ -589,9 +589,11 @@ var _ = Describe("AuthBridge Injection E2E", Ordered, func() {
 			} else {
 				_, _ = fmt.Fprintf(GinkgoWriter, "=== per-agent ConfigMap not found: %v ===\n", diagErr)
 			}
+			statusJSONPath := "{range .status.containerStatuses[*]}" +
+				"{.name}: ready={.ready} restarts={.restartCount} state={.state}{\"\\n\"}{end}"
 			diagCmd = exec.Command("kubectl", "get", "pod", podName,
 				"-n", authBridgeTestNamespace,
-				"-o", "jsonpath={range .status.containerStatuses[*]}{.name}: ready={.ready} restarts={.restartCount} state={.state}{\"\\n\"}{end}")
+				"-o", "jsonpath="+statusJSONPath)
 			if statuses, diagErr := utils.Run(diagCmd); diagErr == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "=== container statuses ===\n%s\n", statuses)
 			}
