@@ -563,11 +563,7 @@ var _ = Describe("AuthBridge Injection E2E", Ordered, func() {
 				g.Expect(output).To(Equal("true"), "envoy-proxy container not ready")
 			}, 3*time.Minute, 2*time.Second).Should(Succeed())
 
-			// Verify envoy admin is responding. The request originates from the echo
-			// container (non-proxy UID) so proxy-init iptables redirect it through
-			// envoy's outbound listener, which forwards to the original destination
-			// 127.0.0.1:9901 (envoy admin). The response is genuinely from envoy admin.
-			By("hitting envoy admin interface from the echo container")
+			By("getting pod name")
 			var podName string
 			cmd := exec.Command("kubectl", "get", "pods",
 				"-l", "app.kubernetes.io/name=authbridge-agent",
@@ -577,6 +573,34 @@ var _ = Describe("AuthBridge Injection E2E", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 			podName = strings.TrimSpace(podName)
 
+			By("collecting diagnostic logs before envoy admin test")
+			diagCmd := exec.Command("kubectl", "logs", podName,
+				"-n", authBridgeTestNamespace,
+				"-c", "envoy-proxy", "--tail=30")
+			if envoyLogs, diagErr := utils.Run(diagCmd); diagErr == nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "=== envoy-proxy logs (last 30) ===\n%s\n", envoyLogs)
+			}
+			diagCmd = exec.Command("kubectl", "get", "configmap",
+				"authbridge-config-authbridge-agent",
+				"-n", authBridgeTestNamespace,
+				"-o", "jsonpath={.data.config\\.yaml}")
+			if cmData, diagErr := utils.Run(diagCmd); diagErr == nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "=== per-agent ConfigMap ===\n%s\n", cmData)
+			} else {
+				_, _ = fmt.Fprintf(GinkgoWriter, "=== per-agent ConfigMap not found: %v ===\n", diagErr)
+			}
+			diagCmd = exec.Command("kubectl", "get", "pod", podName,
+				"-n", authBridgeTestNamespace,
+				"-o", "jsonpath={range .status.containerStatuses[*]}{.name}: ready={.ready} restarts={.restartCount} state={.state}{\"\\n\"}{end}")
+			if statuses, diagErr := utils.Run(diagCmd); diagErr == nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "=== container statuses ===\n%s\n", statuses)
+			}
+
+			// Verify envoy admin is responding. The request originates from the echo
+			// container (non-proxy UID) so proxy-init iptables redirect it through
+			// envoy's outbound listener, which forwards to the original destination
+			// 127.0.0.1:9901 (envoy admin). The response is genuinely from envoy admin.
+			By("hitting envoy admin interface from the echo container")
 			cmd = exec.Command("kubectl", "exec", podName,
 				"-n", authBridgeTestNamespace,
 				"-c", "echo",
