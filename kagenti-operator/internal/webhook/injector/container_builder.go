@@ -463,6 +463,11 @@ func (b *ContainerBuilder) BuildProxySidecarContainerWithPorts(spireEnabled bool
 			MountPath: "/etc/authbridge",
 			ReadOnly:  true,
 		},
+		{
+			Name:      AuthproxyRoutesConfigMapName,
+			MountPath: "/etc/authproxy",
+			ReadOnly:  true,
+		},
 	}
 	if spireEnabled {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
