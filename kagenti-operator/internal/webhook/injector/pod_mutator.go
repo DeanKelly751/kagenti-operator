@@ -407,7 +407,9 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 			podSpec.Containers = append(podSpec.Containers, builder.BuildClientRegistrationContainerWithSpireOption(crName, namespace, spireEnabled))
 		}
 
-		// Inject volumes — use per-agent ConfigMap name for authbridge config
+		// Inject volumes — use per-agent ConfigMap name for authbridge config.
+		// requiredVolumes is always set above (resolved or legacy path) before
+		// the mode switch, so it is never nil here.
 		proxyVolumes := overrideAuthBridgeConfigMapInVolumes(requiredVolumes, perAgentCMName)
 		for i := range proxyVolumes {
 			if !volumeExists(podSpec.Volumes, proxyVolumes[i].Name) {
@@ -692,7 +694,9 @@ func (m *PodMutator) buildOwnerReference(ctx context.Context, namespace, crName 
 			WithAPIVersion("apps/v1").
 			WithKind("Deployment").
 			WithName(deploy.Name).
-			WithUID(deploy.UID)
+			WithUID(deploy.UID).
+			WithController(true).
+			WithBlockOwnerDeletion(true)
 	}
 
 	// Try StatefulSet
@@ -702,7 +706,9 @@ func (m *PodMutator) buildOwnerReference(ctx context.Context, namespace, crName 
 			WithAPIVersion("apps/v1").
 			WithKind("StatefulSet").
 			WithName(sts.Name).
-			WithUID(sts.UID)
+			WithUID(sts.UID).
+			WithController(true).
+			WithBlockOwnerDeletion(true)
 	}
 
 	mutatorLog.V(1).Info("Could not find owner workload for per-agent ConfigMap, skipping OwnerReference",

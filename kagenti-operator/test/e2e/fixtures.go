@@ -18,6 +18,8 @@ package e2e
 
 const testNamespace = "e2e-agentcard-test"
 const authBridgeTestNamespace = "e2e-authbridge-test"
+const authBridgeAgentName = "authbridge-agent"
+const authBridgeAgentCMName = "authbridge-config-" + authBridgeAgentName
 
 // echoAgentFixture returns YAML for echo-agent Deployment + Service (used by S1, S3).
 func echoAgentFixture() string {

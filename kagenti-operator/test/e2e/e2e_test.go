@@ -581,7 +581,7 @@ var _ = Describe("AuthBridge Injection E2E", Ordered, func() {
 				_, _ = fmt.Fprintf(GinkgoWriter, "=== envoy-proxy logs (last 30) ===\n%s\n", envoyLogs)
 			}
 			diagCmd = exec.Command("kubectl", "get", "configmap",
-				"authbridge-config-authbridge-agent",
+				authBridgeAgentCMName,
 				"-n", authBridgeTestNamespace,
 				"-o", "jsonpath={.data.config\\.yaml}")
 			if cmData, diagErr := utils.Run(diagCmd); diagErr == nil {
