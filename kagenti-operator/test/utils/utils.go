@@ -311,6 +311,16 @@ func UninstallSpire() {
 		warnError(err)
 	}
 
+	By("deleting SPIRE CRDs left behind by Helm")
+	cmd = exec.Command("kubectl", "delete", "crd",
+		"clusterspiffeids.spire.spiffe.io",
+		"clusterfederatedtrustdomains.spire.spiffe.io",
+		"clusterstaticentries.spire.spiffe.io",
+		"--ignore-not-found")
+	if _, err := Run(cmd); err != nil {
+		warnError(err)
+	}
+
 	By("deleting spire-system namespace")
 	cmd = exec.Command("kubectl", "delete", "ns", "spire-system", "--ignore-not-found")
 	if _, err := Run(cmd); err != nil {

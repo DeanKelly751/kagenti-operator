@@ -1439,3 +1439,457 @@ rules:
 		})
 	})
 })
+
+var _ = Describe("Combined AgentRuntime + AgentCard + Auth Bridge E2E", Ordered, func() {
+	const controllerNamespace = "kagenti-operator-system"
+	const controllerDeployment = "kagenti-operator-controller-manager"
+
+	var origArgs []string
+	var initialConfigHash string
+
+	BeforeAll(func() {
+		By("ensuring mlflow-operator ClusterRole exists for ServiceAccount informer")
+		clusterRoleCmd := exec.Command("kubectl", "apply", "-f", "-")
+		clusterRoleCmd.Stdin = strings.NewReader(`apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mlflow-operator-mlflow-integration
+rules:
+- apiGroups: [""]
+  resources: ["serviceaccounts"]
+  verbs: ["list", "watch"]
+`)
+		_, _ = utils.Run(clusterRoleCmd)
+
+		Expect(utils.DeployController(controllerNamespace, projectImage)).To(Succeed(), "Failed to deploy controller")
+
+		By("waiting for controller-manager to be ready")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+				"-n", controllerNamespace,
+				"-o", "go-template={{ range .items }}{{ if not .metadata.deletionTimestamp }}{{ .status.phase }}{{ end }}{{ end }}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).To(ContainSubstring("Running"))
+		}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+		By("waiting for webhook endpoint to be ready")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "endpoints",
+				"kagenti-operator-webhook-service", "-n", controllerNamespace,
+				"-o", "jsonpath={.subsets[0].addresses[0].ip}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).NotTo(BeEmpty(), "webhook endpoint not yet populated")
+		}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+		By("patching controller with --spire-trust-domain=example.org")
+		var err error
+		origArgs, err = utils.PatchControllerArgs(controllerNamespace, controllerDeployment, []string{
+			"--spire-trust-domain=example.org",
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		By("creating combined test namespace")
+		cmd := exec.Command("kubectl", "create", "ns", combinedTestNamespace)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", combinedTestNamespace,
+			"kagenti-enabled=true",
+			"pod-security.kubernetes.io/enforce=privileged",
+			"pod-security.kubernetes.io/warn=baseline")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("creating ClusterSPIFFEID for combined test namespace")
+		_, err = utils.KubectlApplyStdin(combinedClusterSPIFFEIDFixture(), "")
+		Expect(err).NotTo(HaveOccurred())
+
+		By("applying auth bridge ConfigMaps")
+		_, err = utils.KubectlApplyStdin(combinedConfigMapFixture(), combinedTestNamespace)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("ensuring kagenti-system namespace exists")
+		cmd = exec.Command("kubectl", "create", "ns", "kagenti-system")
+		_, _ = utils.Run(cmd)
+
+		By("creating cluster defaults ConfigMap")
+		_, err = utils.KubectlApplyStdin(runtimeClusterDefaultsConfigMapFixture(), "kagenti-system")
+		Expect(err).NotTo(HaveOccurred())
+
+		By("deploying combined agent")
+		_, err = utils.KubectlApplyStdin(combinedAgentFixture(), combinedTestNamespace)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("waiting for deployment to be ready")
+		Expect(utils.WaitForDeploymentReady("combined-agent", combinedTestNamespace, 5*time.Minute)).To(Succeed())
+
+		By("creating AgentRuntime CR (with retry for webhook readiness)")
+		Eventually(func() error {
+			_, err := utils.KubectlApplyStdin(combinedAgentRuntimeFixture(), combinedTestNamespace)
+			return err
+		}, 1*time.Minute, 5*time.Second).Should(Succeed())
+	})
+
+	AfterAll(func() {
+		By("restoring original controller args")
+		if origArgs != nil {
+			err := utils.RestoreControllerArgs(controllerNamespace, controllerDeployment, origArgs)
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		By("deleting combined test namespace")
+		cmd := exec.Command("kubectl", "delete", "ns", combinedTestNamespace, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+
+		By("cleaning up ClusterSPIFFEID")
+		cmd = exec.Command("kubectl", "delete", "clusterspiffeid", "e2e-combined-test", "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+
+		By("cleaning up cluster defaults ConfigMap")
+		cmd = exec.Command("kubectl", "delete", "configmap", "kagenti-platform-config",
+			"-n", "kagenti-system", "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+
+		By("cleaning up mlflow-operator ClusterRole")
+		cmd = exec.Command("kubectl", "delete", "clusterrole",
+			"mlflow-operator-mlflow-integration", "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+
+		utils.UndeployController()
+	})
+
+	AfterEach(func() {
+		if CurrentSpecReport().Failed() {
+			cmd := exec.Command("kubectl", "logs", "-l", "control-plane=controller-manager",
+				"-n", controllerNamespace, "--tail=100")
+			logs, err := utils.Run(cmd)
+			if err == nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "Controller logs:\n%s\n", logs)
+			}
+
+			cmd = exec.Command("kubectl", "get", "events", "-n", combinedTestNamespace, "--sort-by=.lastTimestamp")
+			events, err := utils.Run(cmd)
+			if err == nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "Events:\n%s\n", events)
+			}
+
+			cmd = exec.Command("kubectl", "describe", "pods", "-n", combinedTestNamespace)
+			desc, err := utils.Run(cmd)
+			if err == nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "Pod descriptions:\n%s\n", desc)
+			}
+
+			cmd = exec.Command("kubectl", "get", "agentcards", "-n", combinedTestNamespace, "-o", "yaml")
+			cards, err := utils.Run(cmd)
+			if err == nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "AgentCards:\n%s\n", cards)
+			}
+
+			cmd = exec.Command("kubectl", "get", "agentruntimes", "-n", combinedTestNamespace, "-o", "yaml")
+			runtimes, err := utils.Run(cmd)
+			if err == nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "AgentRuntimes:\n%s\n", runtimes)
+			}
+
+			cmd = exec.Command("kubectl", "get", "deployments", "-n", combinedTestNamespace, "-o", "yaml")
+			deploys, err := utils.Run(cmd)
+			if err == nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "Deployments:\n%s\n", deploys)
+			}
+		}
+	})
+
+	SetDefaultEventuallyTimeout(2 * time.Minute)
+	SetDefaultEventuallyPollingInterval(time.Second)
+
+	It("should apply labels to workload when AgentRuntime is created", func() {
+		By("waiting for AgentRuntime phase=Active")
+		Eventually(func(g Gomega) {
+			phase, err := utils.KubectlGetJsonpath("agentruntime", "combined-agent",
+				combinedTestNamespace, "{.status.phase}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(phase).To(Equal("Active"))
+		}).Should(Succeed())
+
+		By("verifying Ready condition is True")
+		Eventually(func(g Gomega) {
+			readyStatus, err := utils.KubectlGetJsonpath("agentruntime", "combined-agent",
+				combinedTestNamespace,
+				"{.status.conditions[?(@.type=='Ready')].status}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(readyStatus).To(Equal("True"))
+		}).Should(Succeed())
+
+		By("verifying kagenti.io/type=agent on deployment metadata")
+		Eventually(func(g Gomega) {
+			typeLabel, err := utils.KubectlGetJsonpath("deployment", "combined-agent",
+				combinedTestNamespace, "{.metadata.labels['kagenti\\.io/type']}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(typeLabel).To(Equal("agent"))
+		}).Should(Succeed())
+
+		By("verifying app.kubernetes.io/managed-by on deployment metadata")
+		Eventually(func(g Gomega) {
+			managedBy, err := utils.KubectlGetJsonpath("deployment", "combined-agent",
+				combinedTestNamespace, "{.metadata.labels['app\\.kubernetes\\.io/managed-by']}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(managedBy).To(Equal("kagenti-operator"))
+		}).Should(Succeed())
+
+		By("verifying kagenti.io/type=agent on pod template")
+		Eventually(func(g Gomega) {
+			podTypeLabel, err := utils.KubectlGetJsonpath("deployment", "combined-agent",
+				combinedTestNamespace,
+				"{.spec.template.metadata.labels['kagenti\\.io/type']}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(podTypeLabel).To(Equal("agent"))
+		}).Should(Succeed())
+
+		By("verifying protocol.kagenti.io/a2a label preserved")
+		Eventually(func(g Gomega) {
+			labelsJSON, err := utils.KubectlGetJsonpath("deployment", "combined-agent",
+				combinedTestNamespace, "{.metadata.labels}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(labelsJSON).To(ContainSubstring("protocol.kagenti.io/a2a"))
+		}).Should(Succeed())
+
+		By("verifying config-hash annotation is 64-char hex")
+		Eventually(func(g Gomega) {
+			hash, err := utils.KubectlGetJsonpath("deployment", "combined-agent",
+				combinedTestNamespace,
+				"{.spec.template.metadata.annotations['kagenti\\.io/config-hash']}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(hash).To(HaveLen(64))
+			initialConfigHash = hash
+		}).Should(Succeed())
+	})
+
+	It("should auto-create AgentCard with Synced=True", func() {
+		cardName := "combined-agent-deployment-card"
+
+		By("waiting for AgentCard to exist with managed-by label")
+		Eventually(func(g Gomega) {
+			managedBy, err := utils.KubectlGetJsonpath("agentcard", cardName,
+				combinedTestNamespace,
+				"{.metadata.labels['app\\.kubernetes\\.io/managed-by']}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(managedBy).To(Equal("kagenti-operator"))
+		}).Should(Succeed())
+
+		By("verifying targetRef")
+		Eventually(func(g Gomega) {
+			apiVersion, err := utils.KubectlGetJsonpath("agentcard", cardName, combinedTestNamespace,
+				"{.spec.targetRef.apiVersion}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(apiVersion).To(Equal("apps/v1"))
+
+			kind, err := utils.KubectlGetJsonpath("agentcard", cardName, combinedTestNamespace,
+				"{.spec.targetRef.kind}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(kind).To(Equal("Deployment"))
+
+			name, err := utils.KubectlGetJsonpath("agentcard", cardName, combinedTestNamespace,
+				"{.spec.targetRef.name}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(name).To(Equal("combined-agent"))
+		}).Should(Succeed())
+
+		By("verifying protocol=a2a and Synced=True")
+		Eventually(func(g Gomega) {
+			protocol, err := utils.KubectlGetJsonpath("agentcard", cardName, combinedTestNamespace,
+				"{.status.protocol}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(protocol).To(Equal("a2a"))
+
+			syncedStatus, err := utils.KubectlGetJsonpath("agentcard", cardName, combinedTestNamespace,
+				"{.status.conditions[?(@.type=='Synced')].status}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(syncedStatus).To(Equal("True"))
+		}).Should(Succeed())
+
+		By("verifying identityBinding is non-empty")
+		Eventually(func(g Gomega) {
+			ib, err := utils.KubectlGetJsonpath("agentcard", cardName, combinedTestNamespace,
+				"{.spec.identityBinding}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(ib).NotTo(BeEmpty())
+		}).Should(Succeed())
+	})
+
+	It("should inject Auth Bridge sidecars into workload pods", func() {
+		By("verifying injected sidecar containers")
+		Eventually(func(g Gomega) {
+			containers, err := utils.KubectlGetJsonpath("pod", "",
+				combinedTestNamespace,
+				"{.items[?(@.metadata.labels.app\\.kubernetes\\.io/name=='combined-agent')].spec.containers[*].name}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(containers).To(ContainSubstring("envoy-proxy"))
+			g.Expect(containers).To(ContainSubstring("spiffe-helper"))
+		}).Should(Succeed())
+
+		By("verifying injected init containers")
+		Eventually(func(g Gomega) {
+			initContainers, err := utils.KubectlGetJsonpath("pod", "",
+				combinedTestNamespace,
+				"{.items[?(@.metadata.labels.app\\.kubernetes\\.io/name=='combined-agent')].spec.initContainers[*].name}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(initContainers).To(ContainSubstring("proxy-init"))
+		}).Should(Succeed())
+
+		By("verifying injected volumes")
+		Eventually(func(g Gomega) {
+			volumes, err := utils.KubectlGetJsonpath("pod", "",
+				combinedTestNamespace,
+				"{.items[?(@.metadata.labels.app\\.kubernetes\\.io/name=='combined-agent')].spec.volumes[*].name}")
+			g.Expect(err).NotTo(HaveOccurred())
+			expectedVolumes := []string{
+				"shared-data", "spire-agent-socket", "spiffe-helper-config",
+				"svid-output", "envoy-config", "authproxy-routes",
+				"authbridge-runtime-config",
+			}
+			for _, vol := range expectedVolumes {
+				g.Expect(volumes).To(ContainSubstring(vol), "expected volume %s", vol)
+			}
+		}).Should(Succeed())
+	})
+
+	It("should reflect identity binding on AgentCard", func() {
+		cardName := "combined-agent-deployment-card"
+
+		By("verifying identityBinding is non-nil")
+		Eventually(func(g Gomega) {
+			ib, err := utils.KubectlGetJsonpath("agentcard", cardName, combinedTestNamespace,
+				"{.spec.identityBinding}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(ib).NotTo(BeEmpty())
+		}).Should(Succeed())
+
+		By("verifying card name is Combined Agent")
+		Eventually(func(g Gomega) {
+			cardNameField, err := utils.KubectlGetJsonpath("agentcard", cardName, combinedTestNamespace,
+				"{.status.card.name}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(cardNameField).To(Equal("Combined Agent"))
+		}, 3*time.Minute).Should(Succeed())
+
+		By("verifying card URL contains combined-agent")
+		Eventually(func(g Gomega) {
+			cardURL, err := utils.KubectlGetJsonpath("agentcard", cardName, combinedTestNamespace,
+				"{.status.card.url}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(cardURL).To(ContainSubstring("combined-agent"))
+		}).Should(Succeed())
+	})
+
+	It("should clean up on AgentRuntime deletion and maintain injection", func() {
+		By("deleting the AgentRuntime CR")
+		cmd := exec.Command("kubectl", "delete", "agentruntime", "combined-agent",
+			"-n", combinedTestNamespace)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("verifying AgentRuntime CR is gone")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "agentruntime", "combined-agent",
+				"-n", combinedTestNamespace)
+			_, err := cmd.CombinedOutput()
+			g.Expect(err).To(HaveOccurred(), "AgentRuntime should be deleted")
+		}).Should(Succeed())
+
+		By("verifying deployment still exists")
+		cmd = exec.Command("kubectl", "get", "deployment", "combined-agent",
+			"-n", combinedTestNamespace)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("verifying kagenti.io/type=agent label preserved")
+		Eventually(func(g Gomega) {
+			typeLabel, err := utils.KubectlGetJsonpath("deployment", "combined-agent",
+				combinedTestNamespace, "{.metadata.labels['kagenti\\.io/type']}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(typeLabel).To(Equal("agent"))
+		}).Should(Succeed())
+
+		By("verifying managed-by label removed")
+		Eventually(func(g Gomega) {
+			managedBy, err := utils.KubectlGetJsonpath("deployment", "combined-agent",
+				combinedTestNamespace, "{.metadata.labels['app\\.kubernetes\\.io/managed-by']}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(managedBy).To(BeEmpty())
+		}).Should(Succeed())
+
+		By("verifying config-hash changed from initial")
+		Eventually(func(g Gomega) {
+			hash, err := utils.KubectlGetJsonpath("deployment", "combined-agent",
+				combinedTestNamespace,
+				"{.spec.template.metadata.annotations['kagenti\\.io/config-hash']}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(hash).To(HaveLen(64))
+			g.Expect(hash).NotTo(Equal(initialConfigHash))
+		}).Should(Succeed())
+
+		By("verifying AgentCard still exists")
+		cardName := "combined-agent-deployment-card"
+		Eventually(func(g Gomega) {
+			name, err := utils.KubectlGetJsonpath("agentcard", cardName,
+				combinedTestNamespace, "{.metadata.name}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(name).To(Equal(cardName))
+		}).Should(Succeed())
+
+		By("getting current pod name")
+		var oldPodName string
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pods",
+				"-l", "app.kubernetes.io/name=combined-agent",
+				"-n", combinedTestNamespace,
+				"-o", "jsonpath={.items[0].metadata.name}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).NotTo(BeEmpty())
+			oldPodName = output
+		}).Should(Succeed())
+
+		By("deleting pod to verify re-injection")
+		cmd = exec.Command("kubectl", "delete", "pod", oldPodName, "-n", combinedTestNamespace)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("waiting for replacement pod with sidecars")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pods",
+				"-l", "app.kubernetes.io/name=combined-agent",
+				"-n", combinedTestNamespace,
+				"-o", "jsonpath={.items[0].metadata.name}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).NotTo(BeEmpty())
+			g.Expect(output).NotTo(Equal(oldPodName), "new pod should have a different name")
+
+			phase, err := utils.KubectlGetJsonpath("pod", output, combinedTestNamespace, "{.status.phase}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(phase).To(Equal("Running"))
+		}, 3*time.Minute, 2*time.Second).Should(Succeed())
+
+		By("verifying replacement pod has sidecars")
+		Eventually(func(g Gomega) {
+			containers, err := utils.KubectlGetJsonpath("pod", "",
+				combinedTestNamespace,
+				"{.items[?(@.metadata.labels.app\\.kubernetes\\.io/name=='combined-agent')].spec.containers[*].name}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(containers).To(ContainSubstring("envoy-proxy"))
+			g.Expect(containers).To(ContainSubstring("spiffe-helper"))
+		}).Should(Succeed())
+
+		By("verifying replacement pod has proxy-init")
+		Eventually(func(g Gomega) {
+			initContainers, err := utils.KubectlGetJsonpath("pod", "",
+				combinedTestNamespace,
+				"{.items[?(@.metadata.labels.app\\.kubernetes\\.io/name=='combined-agent')].spec.initContainers[*].name}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(initContainers).To(ContainSubstring("proxy-init"))
+		}).Should(Succeed())
+	})
+})
