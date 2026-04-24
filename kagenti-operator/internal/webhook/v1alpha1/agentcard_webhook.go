@@ -19,6 +19,8 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -85,6 +87,21 @@ func (v *AgentCardValidator) validateAgentCard(agentcard *agentv1alpha1.AgentCar
 	// spec.targetRef is required
 	if agentcard.Spec.TargetRef == nil {
 		return nil, fmt.Errorf("spec.targetRef is required: specify the workload backing this agent")
+	}
+
+	if o := agentcard.Spec.OASF; o != nil {
+		if u := strings.TrimSpace(o.SchemaBaseURL); u != "" {
+			parsed, err := url.Parse(u)
+			if err != nil {
+				return nil, fmt.Errorf("spec.oasf.schemaBaseURL: invalid URL: %w", err)
+			}
+			if parsed.Scheme != "http" && parsed.Scheme != "https" {
+				return nil, fmt.Errorf("spec.oasf.schemaBaseURL: scheme must be http or https")
+			}
+			if parsed.Host == "" {
+				return nil, fmt.Errorf("spec.oasf.schemaBaseURL: host is required")
+			}
+		}
 	}
 
 	return warnings, nil

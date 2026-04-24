@@ -36,6 +36,11 @@ type AgentCardSpec struct {
 	// IdentityBinding specifies SPIFFE identity binding configuration
 	// +optional
 	IdentityBinding *IdentityBinding `json:"identityBinding,omitempty"`
+
+	// OASF optionally validates the synced agent card against the AGNTCY OASF
+	// schema service after each successful fetch.
+	// +optional
+	OASF *OASFConfig `json:"oasf,omitempty"`
 }
 
 // IdentityBinding configures workload identity binding for an AgentCard.

@@ -47,6 +47,7 @@ import (
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 	"github.com/kagenti/operator/internal/agentcard"
+	"github.com/kagenti/operator/internal/oasf"
 	"github.com/kagenti/operator/internal/signature"
 )
 
@@ -95,6 +96,13 @@ const (
 	ReasonSignatureValid        = "SignatureValid"
 	ReasonSignatureInvalid      = "SignatureInvalid"
 	ReasonSignatureInvalidAudit = "SignatureInvalidAudit"
+
+	CondOASFValid     = "OASFValid"
+	ReasonOASFValid   = "OASFCheckPassed"
+	ReasonOASFInvalid = "OASFInvalid"
+	ReasonOASFNoURL   = "OASFNoBaseURL"
+	ReasonOASFDisabled = "OASFDisabled"
+	ReasonOASFError   = "OASFError"
 )
 
 var (
@@ -131,6 +139,12 @@ type AgentCardReconciler struct {
 	// SVIDExpiryGracePeriod controls how far before the leaf cert expires the operator
 	// triggers a proactive workload restart. Defaults to DefaultSVIDExpiryGracePeriod.
 	SVIDExpiryGracePeriod time.Duration
+
+	// Oasf, when non-nil, validates the synced card against the AGNTCY OASF schema HTTP
+	// service when spec.oasf is enabled. Use oasf.NewCache().
+	Oasf *oasf.Cache
+	// OasfBaseURL is the default --oasf-schema-base-url; per-card spec.oasf.schemaBaseURL overrides.
+	OasfBaseURL string
 }
 
 // +kubebuilder:rbac:groups=agent.kagenti.dev,resources=agentcards,verbs=get;list;watch;create;update;patch;delete
@@ -623,6 +637,8 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 			Message: "Agent index is ready for queries",
 		})
 
+		r.applyOASFPostSync(ctx, latest, cardData)
+
 		if binding != nil {
 			existingBound := meta.FindStatusCondition(latest.Status.Conditions, "Bound")
 
@@ -681,6 +697,117 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 		latest.Status.SignatureIdentityMatch = identityMatch
 
 		return r.Status().Update(ctx, latest)
+	})
+}
+
+func (r *AgentCardReconciler) applyOASFPostSync(ctx context.Context, latest *agentv1alpha1.AgentCard, card *agentv1alpha1.AgentCardData) {
+	if r.Oasf == nil {
+		return
+	}
+	if card == nil {
+		return
+	}
+	sp := latest.Spec.OASF
+	if sp == nil || !sp.Enabled {
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:    CondOASFValid,
+			Status:  metav1.ConditionUnknown,
+			Reason:  ReasonOASFDisabled,
+			Message: "OASF validation not enabled (set spec.oasf.enabled and a schema base URL)",
+		})
+		return
+	}
+	base := strings.TrimSpace(sp.SchemaBaseURL)
+	if base == "" {
+		base = strings.TrimSpace(r.OasfBaseURL)
+	}
+	enforce := sp.OASFEnforceOrDefault()
+	if base == "" {
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:    CondOASFValid,
+			Status:  metav1.ConditionFalse,
+			Reason:  ReasonOASFNoURL,
+			Message: "spec.oasf.enabled but neither spec.oasf.schemaBaseURL nor operator --oasf-schema-base-url is set",
+		})
+		if enforce {
+			r.downgradeSyncedReadyForOASFFailureIfSyncedTrue(latest, ReasonOASFNoURL,
+				"OASF: no schema base URL (set spec.oasf.schemaBaseURL or operator default)")
+		}
+		return
+	}
+	st, err := oasf.AgentCardDataToStruct(card)
+	if err != nil {
+		msg := err.Error()
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:    CondOASFValid,
+			Status:  metav1.ConditionFalse,
+			Reason:  ReasonOASFError,
+			Message: msg,
+		})
+		if enforce {
+			r.downgradeSyncedReadyForOASFFailureIfSyncedTrue(latest, ReasonOASFError, msg)
+		}
+		return
+	}
+	ok, omsg, vErr := r.Oasf.ValidateRecord(ctx, base, st)
+	if vErr != nil {
+		msg := vErr.Error()
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:    CondOASFValid,
+			Status:  metav1.ConditionFalse,
+			Reason:  ReasonOASFError,
+			Message: msg,
+		})
+		if enforce {
+			r.downgradeSyncedReadyForOASFFailureIfSyncedTrue(latest, ReasonOASFError, msg)
+		}
+		return
+	}
+	if !ok {
+		detail := omsg
+		if detail == "" {
+			detail = "OASF schema validation failed"
+		}
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:    CondOASFValid,
+			Status:  metav1.ConditionFalse,
+			Reason:  ReasonOASFInvalid,
+			Message: detail,
+		})
+		if enforce {
+			r.downgradeSyncedReadyForOASFFailureIfSyncedTrue(latest, ReasonOASFInvalid, detail)
+		}
+		return
+	}
+	m := "agent card is valid for the configured OASF schema service"
+	if omsg != "" {
+		m = m + "; " + omsg
+	}
+	meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+		Type:    CondOASFValid,
+		Status:  metav1.ConditionTrue,
+		Reason:  ReasonOASFValid,
+		Message: m,
+	})
+}
+
+func (r *AgentCardReconciler) downgradeSyncedReadyForOASFFailureIfSyncedTrue(
+	latest *agentv1alpha1.AgentCard, reason, message string,
+) {
+	if prev := meta.FindStatusCondition(latest.Status.Conditions, "Synced"); prev == nil || prev.Status != metav1.ConditionTrue {
+		return
+	}
+	meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+		Type:    "Synced",
+		Status:  metav1.ConditionFalse,
+		Reason:  reason,
+		Message: "OASF: " + message,
+	})
+	meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+		Type:    "Ready",
+		Status:  metav1.ConditionFalse,
+		Reason:  reason,
+		Message: "Agent index not ready: " + message,
 	})
 }
 

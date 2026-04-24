@@ -94,6 +94,30 @@ spec:
                     pattern: ^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$
                     type: string
                 type: object
+              oasf:
+                description: |-
+                  OASF optionally validates the synced agent card against the AGNTCY OASF
+                  schema service after each successful fetch.
+                properties:
+                  enabled:
+                    description: |-
+                      Enabled must be true for OASF validation to run. You must set either
+                      schemaBaseURL here or configure the operator with a default
+                      --oasf-schema-base-url.
+                    type: boolean
+                  enforce:
+                    default: true
+                    description: |-
+                      Enforce when true (the default) causes an invalid OASF check to also set
+                      the Synced condition to False, similar to a failed A2A signature check.
+                      When false, only the OASFValid status condition reflects the error.
+                    type: boolean
+                  schemaBaseURL:
+                    description: |-
+                      SchemaBaseURL is the OASF API base for validation (per card). When empty,
+                      the operator's default from --oasf-schema-base-url is used.
+                    type: string
+                type: object
               syncPeriod:
                 default: 30s
                 description: SyncPeriod is how often to re-fetch the agent card (e.g.,

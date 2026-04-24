@@ -43,7 +43,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
+	"github.com/kagenti/operator/internal/agntcy"
 	"github.com/kagenti/operator/internal/agentcard"
+	"github.com/kagenti/operator/internal/oasf"
 	"github.com/kagenti/operator/internal/controller"
 	"github.com/kagenti/operator/internal/keycloak"
 	"github.com/kagenti/operator/internal/mlflow"
@@ -88,6 +90,12 @@ func main() {
 	var enforceNetworkPolicies bool
 	var enableOperatorClientRegistration bool
 	var enableMLflow bool
+	var oasfSchemaBaseURL string
+
+	var enableAgntcyPoc bool
+	var agntcyDirAddress string
+	var agntcyDirAuthMode string
+	var agntcyIdentityProbeURL string
 
 	var spireTrustDomain string
 	var spireTrustBundleConfigMapName string
@@ -129,6 +137,18 @@ func main() {
 			"kagenti.io/client-registration-inject=true (legacy sidecar)")
 	flag.BoolVar(&enableMLflow, "enable-mlflow", false,
 		"Enable MLflow experiment tracking integration")
+	flag.StringVar(&oasfSchemaBaseURL, "oasf-schema-base-url", "",
+		"Default base URL for AGNTCY OASF schema HTTP validation (agent card sync); "+
+			"per-AgentCard spec.oasf.schemaBaseURL overrides. Empty = no default.")
+
+	flag.BoolVar(&enableAgntcyPoc, "enable-agntcy-poc", false,
+		"Enable AGNTCY proof-of-concept controller (opt-in per AgentCard label kagenti.io/agntcy-poc)")
+	flag.StringVar(&agntcyDirAddress, "agntcy-dir-address", "",
+		"gRPC address (host:port) of the agntcy Directory API for PoC publish (empty = skip)")
+	flag.StringVar(&agntcyDirAuthMode, "agntcy-dir-auth-mode", "insecure",
+		"agntcy/dir client auth mode (e.g. insecure for local dirctl, x509/jwt for production)")
+	flag.StringVar(&agntcyIdentityProbeURL, "agntcy-identity-probe-url", "",
+		"Optional HTTP(S) URL for a GET health check (PoC wire test; not VC issuance; empty = skip)")
 
 	flag.StringVar(&spireTrustDomain, "spire-trust-domain", "",
 		"SPIRE trust domain for identity binding (e.g. 'example.org')")
@@ -328,6 +348,8 @@ func main() {
 		SignatureAuditMode:    signatureAuditMode,
 		SpireTrustDomain:      spireTrustDomain,
 		SVIDExpiryGracePeriod: svidExpiryGracePeriod,
+		Oasf:                  oasf.NewCache(),
+		OasfBaseURL:           oasfSchemaBaseURL,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentCard")
 		os.Exit(1)
@@ -377,6 +399,22 @@ func main() {
 			os.Exit(1)
 		}
 		setupLog.Info("MLflow experiment tracking controller enabled")
+	}
+
+	if enableAgntcyPoc {
+		if err = (&controller.AgntcyPocReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+			Poc: agntcy.PocOptions{
+				DirAddress:       agntcyDirAddress,
+				DirAuthMode:      agntcyDirAuthMode,
+				IdentityProbeURL: agntcyIdentityProbeURL,
+			},
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "AgntcyPoc")
+			os.Exit(1)
+		}
+		setupLog.Info("AGNTCY PoC controller enabled; set label kagenti.io/agntcy-poc on AgentCard to opt in")
 	}
 
 	if enableOperatorClientRegistration {
