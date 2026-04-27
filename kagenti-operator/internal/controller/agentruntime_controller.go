@@ -57,8 +57,9 @@ const (
 // AgentRuntimeReconciler reconciles AgentRuntime objects.
 type AgentRuntimeReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Scheme    *runtime.Scheme
+	Recorder  record.EventRecorder
+	APIReader client.Reader // uncached reader for cross-namespace ConfigMap reads
 }
 
 // +kubebuilder:rbac:groups=agent.kagenti.dev,resources=agentruntimes,verbs=get;list;watch;create;update;patch;delete
@@ -66,7 +67,7 @@ type AgentRuntimeReconciler struct {
 // +kubebuilder:rbac:groups=agent.kagenti.dev,resources=agentruntimes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
@@ -111,6 +112,16 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	r.setCondition(rt, ConditionTypeTargetResolved, metav1.ConditionTrue, "TargetFound",
 		fmt.Sprintf("%s %s resolved", rt.Spec.TargetRef.Kind, rt.Spec.TargetRef.Name))
+
+	// 4.5. Ensure required authbridge ConfigMaps exist in the namespace.
+	// Copies templates from kagenti-system if missing, matching the backend's
+	// _ensure_authbridge_configmaps() semantics (create-if-not-exists).
+	if err := r.ensureNamespaceConfigMaps(ctx, rt.Namespace); err != nil {
+		logger.Error(err, "Failed to ensure namespace ConfigMaps")
+		if r.Recorder != nil {
+			r.Recorder.Event(rt, corev1.EventTypeWarning, "ConfigMapEnsureError", err.Error())
+		}
+	}
 
 	// 5. Compute config hash from merged configuration (cluster → namespace → CR)
 	configResult, err := ComputeConfigHash(ctx, r.Client, rt.Namespace, &rt.Spec)
@@ -388,6 +399,73 @@ func (r *AgentRuntimeReconciler) setCondition(rt *agentv1alpha1.AgentRuntime, co
 		Reason:             reason,
 		Message:            message,
 	})
+}
+
+// templateConfigMapNames lists the well-known ConfigMaps that authbridge sidecars
+// require. The Helm chart and backend API create these in agent namespaces; the
+// operator copies templates from kagenti-system for namespaces created by other
+// means (GitOps, manual kubectl).
+var templateConfigMapNames = []string{
+	"authbridge-config",
+	"authbridge-runtime-config",
+	"envoy-config",
+	"spiffe-helper-config",
+}
+
+// ensureNamespaceConfigMaps copies template ConfigMaps from kagenti-system to the
+// target namespace if they don't already exist. This mirrors the backend's
+// ensure_configmap() semantics: create-if-not-exists, preserving user customizations.
+func (r *AgentRuntimeReconciler) ensureNamespaceConfigMaps(ctx context.Context, namespace string) error {
+	logger := log.FromContext(ctx)
+	reader := r.uncachedReader()
+
+	for _, name := range templateConfigMapNames {
+		existing := &corev1.ConfigMap{}
+		err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, existing)
+		if err == nil {
+			continue
+		}
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to check ConfigMap %s/%s: %w", namespace, name, err)
+		}
+
+		template := &corev1.ConfigMap{}
+		templateKey := client.ObjectKey{Namespace: ClusterDefaultsNamespace, Name: name}
+		if err := reader.Get(ctx, templateKey, template); err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.V(1).Info("Template ConfigMap not found in kagenti-system, skipping",
+					"name", name)
+				continue
+			}
+			return fmt.Errorf("failed to read template ConfigMap %s/%s: %w", ClusterDefaultsNamespace, name, err)
+		}
+
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: namespace,
+				Labels: map[string]string{
+					LabelManagedBy: LabelManagedByValue,
+				},
+			},
+			Data: template.Data,
+		}
+		if err := r.Create(ctx, cm); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				continue
+			}
+			return fmt.Errorf("failed to create ConfigMap %s/%s: %w", namespace, name, err)
+		}
+		logger.Info("Created ConfigMap from template", "namespace", namespace, "name", name)
+	}
+	return nil
+}
+
+func (r *AgentRuntimeReconciler) uncachedReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // mapWorkloadToAgentRuntime maps workload events to AgentRuntime reconcile requests.
