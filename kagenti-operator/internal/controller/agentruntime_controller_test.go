@@ -86,8 +86,9 @@ var _ = Describe("AgentRuntime Controller", func() {
 
 	newReconciler := func() *AgentRuntimeReconciler {
 		return &AgentRuntimeReconciler{
-			Client: k8sClient,
-			Scheme: scheme.Scheme,
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    scheme.Scheme,
 		}
 	}
 
@@ -505,6 +506,135 @@ var _ = Describe("AgentRuntime Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(ctrl.Result{}))
+		})
+	})
+
+	Context("When ensuring namespace ConfigMaps", func() {
+		const cmTestNS = "cm-test-ns"
+
+		BeforeEach(func() {
+			// Create the kagenti-system namespace for templates
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ClusterDefaultsNamespace}}
+			_ = k8sClient.Create(ctx, ns)
+
+			// Create the test namespace
+			testNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: cmTestNS}}
+			_ = k8sClient.Create(ctx, testNS)
+		})
+
+		AfterEach(func() {
+			for _, name := range templateConfigMapNames {
+				cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ClusterDefaultsNamespace}}
+				_ = k8sClient.Delete(ctx, cm)
+				cm = &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: cmTestNS}}
+				_ = k8sClient.Delete(ctx, cm)
+			}
+		})
+
+		It("should create missing ConfigMaps from templates", func() {
+			// Create template ConfigMaps in kagenti-system
+			for _, name := range templateConfigMapNames {
+				cm := &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      name,
+						Namespace: ClusterDefaultsNamespace,
+					},
+					Data: map[string]string{"config.yaml": "template-content-" + name},
+				}
+				Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			}
+
+			r := newReconciler()
+			Expect(r.ensureNamespaceConfigMaps(ctx, cmTestNS)).To(Succeed())
+
+			for _, name := range templateConfigMapNames {
+				created := &corev1.ConfigMap{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: cmTestNS}, created)).To(Succeed())
+				Expect(created.Data["config.yaml"]).To(Equal("template-content-" + name))
+				Expect(created.Labels[LabelManagedBy]).To(Equal(LabelManagedByValue))
+			}
+		})
+
+		It("should skip ConfigMaps that already exist", func() {
+			// Create template in kagenti-system
+			template := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "authbridge-config",
+					Namespace: ClusterDefaultsNamespace,
+				},
+				Data: map[string]string{"KEYCLOAK_URL": "http://template-url"},
+			}
+			Expect(k8sClient.Create(ctx, template)).To(Succeed())
+
+			// Pre-create in target namespace with custom content
+			existing := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "authbridge-config",
+					Namespace: cmTestNS,
+				},
+				Data: map[string]string{"KEYCLOAK_URL": "http://custom-url"},
+			}
+			Expect(k8sClient.Create(ctx, existing)).To(Succeed())
+
+			r := newReconciler()
+			Expect(r.ensureNamespaceConfigMaps(ctx, cmTestNS)).To(Succeed())
+
+			// Verify custom content was preserved
+			result := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "authbridge-config", Namespace: cmTestNS}, result)).To(Succeed())
+			Expect(result.Data["KEYCLOAK_URL"]).To(Equal("http://custom-url"))
+		})
+
+		It("should skip gracefully when templates are missing", func() {
+			r := newReconciler()
+			Expect(r.ensureNamespaceConfigMaps(ctx, cmTestNS)).To(Succeed())
+
+			// Verify no ConfigMaps were created
+			for _, name := range templateConfigMapNames {
+				cm := &corev1.ConfigMap{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: cmTestNS}, cm)
+				Expect(err).To(HaveOccurred())
+			}
+		})
+
+		It("should only create missing ConfigMaps when some already exist", func() {
+			// Create all templates in kagenti-system
+			for _, name := range templateConfigMapNames {
+				cm := &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      name,
+						Namespace: ClusterDefaultsNamespace,
+					},
+					Data: map[string]string{"config.yaml": "template-" + name},
+				}
+				Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			}
+
+			// Pre-create only authbridge-config in target namespace
+			existing := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "authbridge-config",
+					Namespace: cmTestNS,
+				},
+				Data: map[string]string{"KEYCLOAK_URL": "http://existing"},
+			}
+			Expect(k8sClient.Create(ctx, existing)).To(Succeed())
+
+			r := newReconciler()
+			Expect(r.ensureNamespaceConfigMaps(ctx, cmTestNS)).To(Succeed())
+
+			// authbridge-config should keep its original content
+			abCfg := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "authbridge-config", Namespace: cmTestNS}, abCfg)).To(Succeed())
+			Expect(abCfg.Data["KEYCLOAK_URL"]).To(Equal("http://existing"))
+
+			// The other 3 should be created from templates
+			for _, name := range []string{"authbridge-runtime-config", "envoy-config", "spiffe-helper-config"} {
+				cm := &corev1.ConfigMap{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: cmTestNS}, cm)).To(Succeed())
+				Expect(cm.Data["config.yaml"]).To(Equal("template-" + name))
+				Expect(cm.Labels[LabelManagedBy]).To(Equal(LabelManagedByValue))
+			}
 		})
 	})
 })
