@@ -69,21 +69,14 @@ func init() {
 }
 
 // getOperatorNamespace returns the namespace the operator is running in.
-// It reads from the service account namespace file, falling back to a default.
+// Reads from POD_NAMESPACE environment variable (set via downward API in deployment),
+// falling back to kagenti-system if not set.
 func getOperatorNamespace() string {
-	// Read namespace from service account mount
-	nsBytes, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-	if err != nil {
-		setupLog.Info("Could not read operator namespace from service account, using default",
-			"error", err, "default", "kagenti-system")
-		return "kagenti-system"
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
 	}
-	ns := strings.TrimSpace(string(nsBytes))
-	if ns == "" {
-		setupLog.Info("Operator namespace is empty, using default", "default", "kagenti-system")
-		return "kagenti-system"
-	}
-	return ns
+	setupLog.Info("POD_NAMESPACE not set, using default", "default", "kagenti-system")
+	return "kagenti-system"
 }
 
 // nolint:gocyclo
