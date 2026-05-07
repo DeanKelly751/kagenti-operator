@@ -25,8 +25,8 @@ jobs:
 
       - name: Install sigstore-a2a
         run: |
-          # Pin compatible versions to avoid Pydantic conflicts
-          pip install "pydantic>=2.0,<2.13" "sigstore-a2a>=0.3.0"
+          # Install with specific compatible versions
+          pip install "pydantic==2.9.2" "sigstore-a2a==0.3.1"
 
       - name: Sign agent card
         run: |
