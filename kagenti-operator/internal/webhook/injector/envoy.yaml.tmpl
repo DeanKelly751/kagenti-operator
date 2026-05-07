@@ -42,6 +42,7 @@ static_resources:
                 envoy_grpc:
                   cluster_name: ext_proc_cluster
                 timeout: 30s
+              allow_mode_override: true
               processing_mode:
                 request_header_mode: SEND
                 response_header_mode: SKIP
@@ -91,6 +92,7 @@ static_resources:
                 envoy_grpc:
                   cluster_name: ext_proc_cluster
                 timeout: 30s
+              allow_mode_override: true
               processing_mode:
                 request_header_mode: SEND
                 response_header_mode: SKIP

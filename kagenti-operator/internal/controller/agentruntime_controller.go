@@ -27,9 +27,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -48,11 +51,28 @@ const (
 	// AnnotationConfigHash is the annotation applied to PodTemplateSpec to trigger rolling updates.
 	AnnotationConfigHash = "kagenti.io/config-hash"
 
+	// AnnotationRestartPending marks a Sandbox that was scaled to 0 and needs
+	// to be scaled back to 1 on the next reconcile cycle. Two-phase restart
+	// avoids a race with the Sandbox controller's pod-name annotation.
+	AnnotationRestartPending = "kagenti.io/restart-pending"
+
 	// Condition types for AgentRuntime status.
 	ConditionTypeReady          = "Ready"
 	ConditionTypeTargetResolved = "TargetResolved"
 	ConditionTypeConfigResolved = "ConfigResolved"
+
+	// KindSandbox is the workload kind for agent-sandbox CRs.
+	KindSandbox = "Sandbox"
+
+	// AnnotationRestartPendingValue is the value set on AnnotationRestartPending.
+	AnnotationRestartPendingValue = "true"
 )
+
+var sandboxGVK = schema.GroupVersionKind{
+	Group:   "agents.x-k8s.io",
+	Version: "v1alpha1",
+	Kind:    KindSandbox,
+}
 
 // AgentRuntimeReconciler reconciles AgentRuntime objects.
 type AgentRuntimeReconciler struct {
@@ -67,6 +87,8 @@ type AgentRuntimeReconciler struct {
 // +kubebuilder:rbac:groups=agent.kagenti.dev,resources=agentruntimes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
@@ -112,6 +134,13 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	r.setCondition(rt, ConditionTypeTargetResolved, metav1.ConditionTrue, "TargetFound",
 		fmt.Sprintf("%s %s resolved", rt.Spec.TargetRef.Kind, rt.Spec.TargetRef.Name))
+
+	// 4.1. Complete two-phase Sandbox restart if pending.
+	if rt.Spec.TargetRef.Kind == KindSandbox {
+		if result, done, err := r.completeSandboxRestart(ctx, rt); done {
+			return result, err
+		}
+	}
 
 	// 4.5. Ensure required authbridge ConfigMaps exist in the namespace.
 	// Copies templates from kagenti-system if missing, matching the backend's
@@ -221,7 +250,9 @@ func (r *AgentRuntimeReconciler) applyWorkloadConfig(ctx context.Context, rt *ag
 
 	key := types.NamespacedName{Name: ref.Name, Namespace: rt.Namespace}
 
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	var configHashChanged bool
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := r.Get(ctx, key, acc.obj); err != nil {
 			return err
 		}
@@ -239,6 +270,10 @@ func (r *AgentRuntimeReconciler) applyWorkloadConfig(ctx context.Context, rt *ag
 		if alreadyConfigured {
 			return nil
 		}
+
+		// Track whether config-hash actually changed (for Sandbox rollout)
+		previousHash := currentPodAnnotations[AnnotationConfigHash]
+		configHashChanged = previousHash != "" && previousHash != configHash
 
 		// Apply labels to workload metadata
 		workloadLabels := acc.obj.GetLabels()
@@ -273,6 +308,99 @@ func (r *AgentRuntimeReconciler) applyWorkloadConfig(ctx context.Context, rt *ag
 
 		return r.Update(ctx, acc.obj)
 	})
+	if err != nil {
+		return err
+	}
+
+	// Sandbox pods don't restart on podTemplate changes (upstream limitation).
+	// Phase 1: scale to 0 and mark restart-pending. Phase 2 runs on the next
+	// reconcile (triggered by the Sandbox watch) to clear stale annotations
+	// and scale back to 1. Two-phase avoids a race with the Sandbox controller.
+	if ref.Kind == KindSandbox && configHashChanged {
+		if err := r.beginSandboxRestart(ctx, key); err != nil {
+			return fmt.Errorf("sandbox restart (phase 1) failed: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// beginSandboxRestart is phase 1 of a two-phase Sandbox restart.
+// It scales the Sandbox to 0 replicas and sets the restart-pending annotation.
+// Phase 2 (completeSandboxRestart) runs on the next reconcile to clear the
+// stale pod-name annotation and scale back to 1.
+func (r *AgentRuntimeReconciler) beginSandboxRestart(ctx context.Context, key types.NamespacedName) error {
+	logger := log.FromContext(ctx)
+	logger.Info("Sandbox restart phase 1: scaling to 0", "sandbox", key.Name)
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(sandboxGVK)
+		if err := r.Get(ctx, key, obj); err != nil {
+			return err
+		}
+		if err := unstructured.SetNestedField(obj.Object, int64(0), "spec", "replicas"); err != nil {
+			return err
+		}
+		annotations := obj.GetAnnotations()
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+		annotations[AnnotationRestartPending] = AnnotationRestartPendingValue
+		obj.SetAnnotations(annotations)
+		return r.Update(ctx, obj)
+	})
+}
+
+// completeSandboxRestart is phase 2 of a two-phase Sandbox restart.
+// It checks for the restart-pending annotation on a Sandbox with replicas=0,
+// clears the stale pod-name annotation, removes restart-pending, and scales
+// back to 1. Returns (result, true, err) if it handled the restart, or
+// (_, false, nil) if no restart was pending.
+func (r *AgentRuntimeReconciler) completeSandboxRestart(ctx context.Context, rt *agentv1alpha1.AgentRuntime) (ctrl.Result, bool, error) {
+	logger := log.FromContext(ctx)
+	ref := rt.Spec.TargetRef
+	key := types.NamespacedName{Name: ref.Name, Namespace: rt.Namespace}
+
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(sandboxGVK)
+	if err := r.Get(ctx, key, obj); err != nil {
+		return ctrl.Result{}, false, nil
+	}
+
+	annotations := obj.GetAnnotations()
+	if annotations[AnnotationRestartPending] != AnnotationRestartPendingValue {
+		return ctrl.Result{}, false, nil
+	}
+
+	logger.Info("Sandbox restart phase 2: clearing pod-name and scaling to 1", "sandbox", key.Name)
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(sandboxGVK)
+		if err := r.Get(ctx, key, obj); err != nil {
+			return err
+		}
+		annotations := obj.GetAnnotations()
+		delete(annotations, "agents.x-k8s.io/pod-name")
+		delete(annotations, AnnotationRestartPending)
+		obj.SetAnnotations(annotations)
+		if err := unstructured.SetNestedField(obj.Object, int64(1), "spec", "replicas"); err != nil {
+			return err
+		}
+		return r.Update(ctx, obj)
+	})
+	if err != nil {
+		logger.Error(err, "Sandbox restart phase 2 failed, will retry")
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, true, err
+	}
+
+	if r.Recorder != nil {
+		r.Recorder.Event(rt, corev1.EventTypeNormal, "SandboxRestarted",
+			fmt.Sprintf("Sandbox %s restarted via scale 0→1", ref.Name))
+	}
+
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, true, nil
 }
 
 // countConfiguredPods counts pods that have the kagenti.io/type label matching the runtime type.
@@ -297,7 +425,8 @@ func (r *AgentRuntimeReconciler) countConfiguredPods(ctx context.Context, rt *ag
 
 // isPodOwnedByWorkload checks if a pod is transitively owned by the named workload.
 // For Deployments: Pod → ReplicaSet (<deployment>-<pod-template-hash>) → Deployment.
-// We match the deployment name as the prefix before the last "-".
+// For StatefulSets: Pod is directly owned by the StatefulSet.
+// For Sandboxes: Pod is directly owned by the Sandbox CR.
 func isPodOwnedByWorkload(pod *corev1.Pod, workloadName string) bool {
 	for _, ref := range pod.OwnerReferences {
 		if ref.Kind == "ReplicaSet" {
@@ -308,6 +437,9 @@ func isPodOwnedByWorkload(pod *corev1.Pod, workloadName string) bool {
 			}
 		}
 		if ref.Kind == "StatefulSet" && ref.Name == workloadName {
+			return true
+		}
+		if ref.Kind == KindSandbox && ref.Name == workloadName {
 			return true
 		}
 	}
@@ -555,9 +687,27 @@ func (r *AgentRuntimeReconciler) mapConfigMapToAgentRuntimes(ctx context.Context
 	return r.mapNamespaceConfigMapToAgentRuntimes(ctx, obj)
 }
 
+// SandboxCRDExists checks whether the agent-sandbox CRD is installed on the cluster.
+func SandboxCRDExists(cfg *rest.Config) bool {
+	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		return false
+	}
+	resources, err := dc.ServerResourcesForGroupVersion("agents.x-k8s.io/v1alpha1")
+	if err != nil {
+		return false
+	}
+	for _, r := range resources.APIResources {
+		if r.Kind == KindSandbox {
+			return true
+		}
+	}
+	return false
+}
+
 // SetupWithManager registers the AgentRuntime controller with the manager.
 func (r *AgentRuntimeReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&agentv1alpha1.AgentRuntime{}).
 		Watches(
 			&appsv1.Deployment{},
@@ -570,7 +720,18 @@ func (r *AgentRuntimeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.mapConfigMapToAgentRuntimes),
-		).
+		)
+
+	if SandboxCRDExists(mgr.GetConfig()) {
+		sandboxObj := &unstructured.Unstructured{}
+		sandboxObj.SetGroupVersionKind(sandboxGVK)
+		builder = builder.Watches(
+			sandboxObj,
+			handler.EnqueueRequestsFromMapFunc(r.mapWorkloadToAgentRuntime("agents.x-k8s.io/v1alpha1", KindSandbox)),
+		)
+	}
+
+	return builder.
 		Named("agentruntime").
 		Complete(r)
 }
@@ -617,6 +778,30 @@ func newRuntimePodTemplateAccessor(kind string) (*runtimePodTemplateAccessor, bo
 			},
 			setPodAnnotations: func(o client.Object, a map[string]string) {
 				o.(*appsv1.StatefulSet).Spec.Template.Annotations = a
+			},
+		}, true
+	case KindSandbox:
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(sandboxGVK)
+		return &runtimePodTemplateAccessor{
+			obj: u,
+			getPodLabels: func(o client.Object) map[string]string {
+				u := o.(*unstructured.Unstructured)
+				labels, _, _ := unstructured.NestedStringMap(u.Object, "spec", "podTemplate", "metadata", "labels")
+				return labels
+			},
+			setPodLabels: func(o client.Object, l map[string]string) {
+				u := o.(*unstructured.Unstructured)
+				_ = unstructured.SetNestedStringMap(u.Object, l, "spec", "podTemplate", "metadata", "labels")
+			},
+			getPodAnnotations: func(o client.Object) map[string]string {
+				u := o.(*unstructured.Unstructured)
+				annotations, _, _ := unstructured.NestedStringMap(u.Object, "spec", "podTemplate", "metadata", "annotations")
+				return annotations
+			},
+			setPodAnnotations: func(o client.Object, a map[string]string) {
+				u := o.(*unstructured.Unstructured)
+				_ = unstructured.SetNestedStringMap(u.Object, a, "spec", "podTemplate", "metadata", "annotations")
 			},
 		}, true
 	default:
