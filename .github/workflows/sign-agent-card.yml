@@ -47,6 +47,7 @@ jobs:
           uv run sigstore-a2a sign \
             --output signed-agent-card.json \
             --repository "${{ github.repository }}" \
+            --provenance \
             --identity_token "$(cat oidc-token.txt)" \
             kagenti-operator/examples/ci-agent-card.json
 
