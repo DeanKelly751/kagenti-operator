@@ -1,0 +1,46 @@
+# Sample workflow: sign and verify an A2A agent card with sigstore-a2a in CI.
+# Requires: repository with Python, pip install sigstore-a2a (or uv), and example agent card.
+name: Sign and verify agent card (sigstore-a2a)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  sign-agent-card:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install sigstore-a2a
+        run: pip install sigstore-a2a
+
+      - name: Sign agent card
+        run: |
+          sigstore-a2a sign kagenti-operator/examples/ci-agent-card.json \
+            --repository "${{ github.repository }}" \
+            --output signed-agent-card.json
+
+      - name: Verify signature locally
+        run: |
+          sigstore-a2a verify signed-agent-card.json \
+            --repository "${{ github.repository }}" \
+            --workflow "${{ github.workflow }}"
+
+      - name: Upload signed agent card
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-agent-card
+          path: signed-agent-card.json
+          retention-days: 14

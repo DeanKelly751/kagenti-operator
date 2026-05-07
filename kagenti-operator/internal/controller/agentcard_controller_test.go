@@ -44,11 +44,11 @@ type mockFetcher struct {
 
 func (m *mockFetcher) Fetch(
 	ctx context.Context, protocol, url, _, _ string,
-) (*agentv1alpha1.AgentCardData, error) {
+) (*agentcard.FetchResult, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
-	return m.cardData, nil
+	return &agentcard.FetchResult{Card: m.cardData}, nil
 }
 
 // capturingProtocolFetcher records the protocol passed to Fetch (for multi-protocol label tests).
@@ -60,18 +60,18 @@ type capturingProtocolFetcher struct {
 
 func (c *capturingProtocolFetcher) Fetch(
 	ctx context.Context, protocol, _, _, _ string,
-) (*agentv1alpha1.AgentCardData, error) {
+) (*agentcard.FetchResult, error) {
 	c.mu.Lock()
 	c.protocol = protocol
 	c.mu.Unlock()
 	if c.cardData != nil {
-		return c.cardData, nil
+		return &agentcard.FetchResult{Card: c.cardData}, nil
 	}
-	return &agentv1alpha1.AgentCardData{
+	return &agentcard.FetchResult{Card: &agentv1alpha1.AgentCardData{
 		Name:    "capture",
 		Version: "1.0.0",
 		URL:     "http://0.0.0.0:8000",
-	}, nil
+	}}, nil
 }
 
 func (c *capturingProtocolFetcher) lastProtocol() string {
@@ -1276,7 +1276,7 @@ var _ = Describe("AgentCard Controller — ConfigMap-backed fetch", func() {
 				Name:      deploymentName + agentcard.SignedCardConfigMapSuffix,
 				Namespace: namespace,
 			},
-			Data: map[string]string{agentcard.SignedCardConfigMapKey: string(raw)},
+			Data: map[string]string{agentcard.SignedCardLegacyConfigMapKey: string(raw)},
 		}
 		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
 

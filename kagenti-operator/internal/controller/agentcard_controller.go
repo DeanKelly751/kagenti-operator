@@ -95,6 +95,11 @@ const (
 	ReasonSignatureValid        = "SignatureValid"
 	ReasonSignatureInvalid      = "SignatureInvalid"
 	ReasonSignatureInvalidAudit = "SignatureInvalidAudit"
+
+	ReasonSigstoreVerified      = "SigstoreVerified"
+	ReasonSigstoreInvalid       = "SigstoreVerificationFailed"
+	ReasonSigstoreInvalidAudit  = "SigstoreVerificationFailedAudit"
+	ReasonSigstoreBundleMissing = "SigstoreBundleNotFound"
 )
 
 var (
@@ -124,6 +129,10 @@ type AgentCardReconciler struct {
 	SignatureProvider  signature.Provider
 	RequireSignature   bool
 	SignatureAuditMode bool
+
+	BundleVerifier             signature.BundleVerifier
+	EnableSigstoreVerification bool
+	SigstoreAuditMode          bool
 
 	// SpireTrustDomain can be overridden per-AgentCard via spec.identityBinding.trustDomain.
 	SpireTrustDomain string
@@ -225,13 +234,32 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	servicePort := r.getServicePort(service)
 	serviceURL := agentcard.GetServiceURL(workload.ServiceName, agentCard.Namespace, servicePort)
 
-	cardData, err := r.AgentFetcher.Fetch(ctx, protocol, serviceURL, workload.ServiceName, agentCard.Namespace)
+	fetchResult, err := r.AgentFetcher.Fetch(ctx, protocol, serviceURL, workload.ServiceName, agentCard.Namespace)
 	if err != nil {
 		agentCardLogger.Error(err, "Failed to fetch agent card", "workload", workload.Name, "url", serviceURL)
 		if condErr := r.updateCondition(ctx, agentCard, "Synced", metav1.ConditionFalse, "FetchFailed", err.Error()); condErr != nil {
 			return ctrl.Result{}, condErr
 		}
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
+	}
+	cardData := fetchResult.Card
+
+	var sigstoreResult *signature.BundleVerificationResult
+	if r.EnableSigstoreVerification && r.BundleVerifier != nil {
+		if len(fetchResult.RawSignedAgentCardJSON) > 0 {
+			var sErr error
+			sigstoreResult, sErr = r.BundleVerifier.VerifySignedAgentCard(ctx, fetchResult.RawSignedAgentCardJSON, agentCard.Spec.SigstoreVerification)
+			if sErr != nil {
+				agentCardLogger.Error(sErr, "Sigstore bundle verification error", "workload", workload.Name)
+				signature.RecordError("sigstore", "verification_error")
+			}
+		} else {
+			sigstoreResult = &signature.BundleVerificationResult{
+				Absent:   true,
+				Verified: false,
+				Details:  "only plain agent card available (no SignedAgentCard attestations); supply-chain bundle not present",
+			}
+		}
 	}
 
 	var verificationResult *signature.VerificationResult
@@ -305,7 +333,7 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if r.RequireSignature {
 		vr = verificationResult
 	}
-	if err := r.updateAgentCardStatus(ctx, agentCard, cardData, protocol, cardId, resolvedTargetRef, vr, binding, identityMatch); err != nil {
+	if err := r.updateAgentCardStatus(ctx, agentCard, cardData, protocol, cardId, resolvedTargetRef, vr, binding, identityMatch, sigstoreResult); err != nil {
 		agentCardLogger.Error(err, "Failed to update AgentCard status")
 		return ctrl.Result{}, err
 	}
@@ -328,6 +356,13 @@ func (r *AgentCardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				"details", verificationResult.Details)
 			return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 		}
+	}
+
+	if r.EnableSigstoreVerification && sigstoreResult != nil && !sigstoreResult.Absent && !sigstoreResult.Verified && !r.SigstoreAuditMode {
+		agentCardLogger.Info("Sigstore bundle verification failed, rejecting agent card",
+			"workload", workload.Name,
+			"details", sigstoreResult.Details)
+		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 	}
 
 	syncPeriod := r.getSyncPeriod(agentCard)
@@ -546,7 +581,7 @@ func (r *AgentCardReconciler) getSyncPeriod(agentCard *agentv1alpha1.AgentCard) 
 }
 
 // updateAgentCardStatus persists all status fields atomically with retry.
-func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCard *agentv1alpha1.AgentCard, cardData *agentv1alpha1.AgentCardData, protocol, cardId string, targetRef *agentv1alpha1.TargetRef, verificationResult *signature.VerificationResult, binding *bindingResult, identityMatch *bool) error {
+func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCard *agentv1alpha1.AgentCard, cardData *agentv1alpha1.AgentCardData, protocol, cardId string, targetRef *agentv1alpha1.TargetRef, verificationResult *signature.VerificationResult, binding *bindingResult, identityMatch *bool, sigstoreResult *signature.BundleVerificationResult) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &agentv1alpha1.AgentCard{}
 		if err := r.Get(ctx, types.NamespacedName{
@@ -596,6 +631,52 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 			meta.SetStatusCondition(&latest.Status.Conditions, sigCondition)
 		}
 
+		if r.EnableSigstoreVerification && sigstoreResult != nil {
+			if sigstoreResult.Absent {
+				absent := false
+				latest.Status.SigstoreBundleVerified = &absent
+				latest.Status.SigstoreIdentity = ""
+				latest.Status.RekorLogIndex = ""
+				latest.Status.SLSARepository = ""
+				latest.Status.SLSACommitSHA = ""
+				meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+					Type:    "SigstoreVerified",
+					Status:  metav1.ConditionFalse,
+					Reason:  ReasonSigstoreBundleMissing,
+					Message: sigstoreResult.Details,
+				})
+			} else {
+				latest.Status.SigstoreBundleVerified = &sigstoreResult.Verified
+				if sigstoreResult.Verified {
+					latest.Status.SigstoreIdentity = sigstoreResult.Identity
+					latest.Status.RekorLogIndex = sigstoreResult.RekorLogIndex
+					latest.Status.SLSARepository = sigstoreResult.SLSARepository
+					latest.Status.SLSACommitSHA = sigstoreResult.SLSACommitSHA
+				} else {
+					latest.Status.SigstoreIdentity = ""
+					latest.Status.RekorLogIndex = ""
+					latest.Status.SLSARepository = ""
+					latest.Status.SLSACommitSHA = ""
+				}
+				sigStoreCond := metav1.Condition{Type: "SigstoreVerified"}
+				if sigstoreResult.Verified {
+					sigStoreCond.Status = metav1.ConditionTrue
+					sigStoreCond.Reason = ReasonSigstoreVerified
+					sigStoreCond.Message = sigstoreResult.Details
+				} else {
+					sigStoreCond.Status = metav1.ConditionFalse
+					if r.SigstoreAuditMode {
+						sigStoreCond.Reason = ReasonSigstoreInvalidAudit
+						sigStoreCond.Message = sigstoreResult.Details + " (audit mode: allowed)"
+					} else {
+						sigStoreCond.Reason = ReasonSigstoreInvalid
+						sigStoreCond.Message = sigstoreResult.Details
+					}
+				}
+				meta.SetStatusCondition(&latest.Status.Conditions, sigStoreCond)
+			}
+		}
+
 		if verificationResult != nil && !verificationResult.Verified && !r.SignatureAuditMode {
 			meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
 				Type:    "Synced",
@@ -604,23 +685,47 @@ func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCa
 				Message: verificationResult.Details,
 			})
 		} else {
-			message := fmt.Sprintf("Successfully fetched agent card for %s", cardData.Name)
-			if verificationResult != nil && !verificationResult.Verified && r.SignatureAuditMode {
-				message = fmt.Sprintf("Fetched agent card for %s (signature verification failed but audit mode enabled)", cardData.Name)
+			if sigstoreResult != nil && !sigstoreResult.Absent && !sigstoreResult.Verified && !r.SigstoreAuditMode {
+				meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+					Type:    "Synced",
+					Status:  metav1.ConditionFalse,
+					Reason:  ReasonSigstoreInvalid,
+					Message: sigstoreResult.Details,
+				})
+			} else {
+				message := fmt.Sprintf("Successfully fetched agent card for %s", cardData.Name)
+				if verificationResult != nil && !verificationResult.Verified && r.SignatureAuditMode {
+					message = fmt.Sprintf("Fetched agent card for %s (signature verification failed but audit mode enabled)", cardData.Name)
+				}
+				if sigstoreResult != nil && !sigstoreResult.Absent && !sigstoreResult.Verified && r.SigstoreAuditMode {
+					message = fmt.Sprintf("%s (Sigstore bundle failed audit mode)", message)
+				}
+				meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+					Type:    "Synced",
+					Status:  metav1.ConditionTrue,
+					Reason:  "SyncSucceeded",
+					Message: message,
+				})
 			}
-			meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
-				Type:    "Synced",
-				Status:  metav1.ConditionTrue,
-				Reason:  "SyncSucceeded",
-				Message: message,
-			})
 		}
 
+		ready := true
+		readyReason := "ReadyToServe"
+		readyMsg := "Agent index is ready for queries"
+		if sigstoreResult != nil && !sigstoreResult.Absent && !sigstoreResult.Verified && !r.SigstoreAuditMode {
+			ready = false
+			readyReason = ReasonSigstoreInvalid
+			readyMsg = sigstoreResult.Details
+		}
+		readyStatus := metav1.ConditionTrue
+		if !ready {
+			readyStatus = metav1.ConditionFalse
+		}
 		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
 			Type:    "Ready",
-			Status:  metav1.ConditionTrue,
-			Reason:  "ReadyToServe",
-			Message: "Agent index is ready for queries",
+			Status:  readyStatus,
+			Reason:  readyReason,
+			Message: readyMsg,
 		})
 
 		if binding != nil {
