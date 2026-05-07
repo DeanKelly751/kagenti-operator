@@ -88,15 +88,24 @@ certmanager:
 networkPolicy:
   enable: false
 
+# Enforce NetworkPolicies based on AgentCard verification status.
+# Works with both verifiedFetch (mTLS) and signatureVerification (init-signer).
+enforceNetworkPolicies: false
+
 # [MLFLOW]: MLflow experiment tracking integration
 mlflow:
   enable: false
 
-# [OPERATOR SIGNING]: Operator signs agent cards with its own SPIFFE identity
-# Replaces the init-container self-signing model (Phase 2A of Sigstore RFC)
-operatorSigning:
+# [VERIFIED FETCH]: mTLS-authenticated fetch of agent cards via SPIFFE identity (Phase 1)
+# When enabled, the operator uses go-spiffe mTLS to fetch agent cards and records
+# the agent's attested SPIFFE ID in CRD status.
+verifiedFetch:
   enabled: false
   spiffeEndpointSocket: "unix:///spiffe-workload-api/spire-agent.sock"
+  # Agents must expose a Service port named "agent-tls" (default 8443).
+  # The operator discovers the TLS endpoint by port name, not number.
+  # SPIRE trust domain for identity binding (required when enabled)
+  spireTrustDomain: ""
 
 # [SIGNATURE VERIFICATION]: A2A agent card signature verification via SPIRE x5c
 signatureVerification:

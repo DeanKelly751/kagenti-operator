@@ -34,17 +34,20 @@ spec:
             {{- if .Values.mlflow.enable }}
             - "--enable-mlflow=true"
             {{- end }}
-            {{- if .Values.operatorSigning.enabled }}
-            - "--enable-operator-signing=true"
-            - "--spiffe-endpoint-socket={{ .Values.operatorSigning.spiffeEndpointSocket }}"
+            {{- if .Values.verifiedFetch.enabled }}
+            - "--enable-verified-fetch=true"
+            - "--verified-fetch-spiffe-socket={{ .Values.verifiedFetch.spiffeEndpointSocket }}"
+            {{- if and .Values.verifiedFetch.spireTrustDomain (not .Values.signatureVerification.enabled) }}
+            - "--spire-trust-domain={{ .Values.verifiedFetch.spireTrustDomain }}"
+            {{- end }}
+            {{- end }}
+            {{- if or .Values.enforceNetworkPolicies .Values.signatureVerification.enforceNetworkPolicies }}
+            - "--enforce-network-policies=true"
             {{- end }}
             {{- if .Values.signatureVerification.enabled }}
             - "--require-a2a-signature=true"
             {{- if .Values.signatureVerification.auditMode }}
             - "--signature-audit-mode=true"
-            {{- end }}
-            {{- if .Values.signatureVerification.enforceNetworkPolicies }}
-            - "--enforce-network-policies=true"
             {{- end }}
             {{- if .Values.signatureVerification.spireTrustDomain }}
             - "--spire-trust-domain={{ .Values.signatureVerification.spireTrustDomain }}"
@@ -69,13 +72,15 @@ spec:
             - {{ .Values.controllerManager.container.cmd }}
           image: {{ .Values.controllerManager.container.image.repository }}:{{ .Values.controllerManager.container.image.tag }}
           imagePullPolicy: {{ .Values.controllerManager.container.image.pullPolicy | default "IfNotPresent" }}
-          {{- if .Values.controllerManager.container.env }}
           env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- range $key, $value := .Values.controllerManager.container.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
-          {{- end }}
           livenessProbe:
             {{- toYaml .Values.controllerManager.container.livenessProbe | nindent 12 }}
           readinessProbe:
@@ -109,7 +114,7 @@ spec:
               mountPath: /tmp/k8s-metrics-server/metrics-certs
               readOnly: true
             {{- end }}
-            {{- if .Values.operatorSigning.enabled }}
+            {{- if .Values.verifiedFetch.enabled }}
             - name: spiffe-workload-api
               mountPath: /spiffe-workload-api
               readOnly: true
@@ -137,7 +142,7 @@ spec:
           secret:
             secretName: kagenti-operator-metrics-server-cert
         {{- end }}
-        {{- if .Values.operatorSigning.enabled }}
+        {{- if .Values.verifiedFetch.enabled }}
         - name: spiffe-workload-api
           csi:
             driver: "csi.spiffe.io"

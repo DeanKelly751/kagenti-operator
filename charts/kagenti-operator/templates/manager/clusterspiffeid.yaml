@@ -1,4 +1,4 @@
-{{- if .Values.operatorSigning.enabled }}
+{{- if .Values.verifiedFetch.enabled }}
 apiVersion: spire.spiffe.io/v1alpha1
 kind: ClusterSPIFFEID
 metadata:
