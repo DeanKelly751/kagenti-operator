@@ -37,7 +37,7 @@ jobs:
           key: ${{ runner.os }}-uv-sigstore-a2a
 
       - name: Install sigstore-a2a
-        run: uv pip install --system --prerelease=allow sigstore-a2a
+        run: uv pip install --system --prerelease=allow "git+https://github.com/sigstore/sigstore-a2a.git@main"
 
       - name: Get OIDC token
         uses: sigstore-conformance/extremely-dangerous-public-oidc-beacon@main
