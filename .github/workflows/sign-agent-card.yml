@@ -1,5 +1,5 @@
-# Sample workflow: sign and verify an A2A agent card with sigstore-a2a in CI.
-# Requires: repository with Python, pip install sigstore-a2a (or uv), and example agent card.
+# Sign A2A agent card with sigstore-a2a using the official pattern from sigstore-a2a repo
+# Based on: https://github.com/sigstore/sigstore-a2a/blob/main/.github/workflows/ci.yml
 name: Sign and verify agent card (sigstore-a2a)
 
 on:
@@ -17,28 +17,47 @@ jobs:
   sign-agent-card:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.13"
+
+      - name: Install UV
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Cache UV dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-sigstore-a2a
 
       - name: Install sigstore-a2a
-        run: |
-          # Install with compatible versions (only 0.1.0 available on PyPI)
-          pip install "pydantic==2.9.2" "sigstore-a2a==0.1.0"
+        run: uv pip install --system sigstore-a2a
+
+      - name: Get OIDC token
+        uses: sigstore-conformance/extremely-dangerous-public-oidc-beacon@main
 
       - name: Sign agent card
         run: |
-          sigstore-a2a sign kagenti-operator/examples/ci-agent-card.json \
+          uv run sigstore-a2a sign \
+            --output signed-agent-card.json \
             --repository "${{ github.repository }}" \
-            --output signed-agent-card.json
+            --provenance \
+            --identity_token "$(cat oidc-token.txt)" \
+            kagenti-operator/examples/ci-agent-card.json
 
-      - name: Verify signature locally
+      - name: Verify signature
         run: |
-          sigstore-a2a verify signed-agent-card.json \
-            --repository "${{ github.repository }}" \
-            --workflow "${{ github.workflow }}"
+          uv run sigstore-a2a --verbose verify \
+            --identity_provider "https://token.actions.githubusercontent.com" \
+            --repository "sigstore-conformance/extremely-dangerous-public-oidc-beacon" \
+            --workflow "Extremely dangerous OIDC beacon" \
+            signed-agent-card.json
 
       - name: Upload signed agent card
         uses: actions/upload-artifact@v4
