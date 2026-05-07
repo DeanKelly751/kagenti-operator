@@ -1,7 +1,10 @@
 {
   "name": "CI Example Agent",
   "version": "0.0.1",
+  "description": "Example agent card for CI signing and verification testing",
   "url": "http://example.local:8000",
+  "defaultInputModes": ["text"],
+  "defaultOutputModes": ["text"],
   "capabilities": {
     "streaming": true
   },
@@ -9,7 +12,8 @@
     {
       "id": "echo",
       "name": "Echo",
-      "description": "Sample skill for CI signing"
+      "description": "Sample skill for CI signing",
+      "tags": ["example", "test"]
     }
   ]
 }
