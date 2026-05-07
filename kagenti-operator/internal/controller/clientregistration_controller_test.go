@@ -425,10 +425,17 @@ func TestClientRegistration_EndToEnd_CredentialsAuthenticate(t *testing.T) {
 		clusterFeatureGatesConfigMap(true),
 		dep,
 		authbridgeConfigMapForTest(clientRegistrationTestNamespace, idp.URL()),
-		keycloakAdminSecretForTest(clientRegistrationTestNamespace),
+		// keycloak-admin-secret lives in the operator namespace (not the
+		// agent namespace) after PR #321's security hardening. The
+		// reconciler reads it from there via OperatorNamespace.
+		keycloakAdminSecretForTest(clientRegistrationTestOperatorNS),
 	).Build()
 
-	r := &ClientRegistrationReconciler{Client: c, Scheme: scheme}
+	r := &ClientRegistrationReconciler{
+		Client:            c,
+		Scheme:            scheme,
+		OperatorNamespace: clientRegistrationTestOperatorNS,
+	}
 	res, err := r.Reconcile(ctx, req)
 	if err != nil || res != (ctrl.Result{}) {
 		t.Fatalf("Reconcile: result=%v err=%v", res, err)
