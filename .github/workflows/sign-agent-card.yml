@@ -1,0 +1,69 @@
+# Sign A2A agent card with sigstore-a2a using the official pattern from sigstore-a2a repo
+# Based on: https://github.com/sigstore/sigstore-a2a/blob/main/.github/workflows/ci.yml
+name: Sign and verify agent card (sigstore-a2a)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  sign-agent-card:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install UV
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Cache UV dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-sigstore-a2a
+
+      - name: Install sigstore-a2a with pinned a2a-sdk
+        run: |
+          uv pip install --system --prerelease=allow "a2a-sdk==0.2.16"
+          uv pip install --system --prerelease=allow "git+https://github.com/sigstore/sigstore-a2a.git@main"
+
+      - name: Get OIDC token
+        uses: sigstore-conformance/extremely-dangerous-public-oidc-beacon@main
+
+      - name: Sign agent card
+        run: |
+          sigstore-a2a sign \
+            --output signed-agent-card.json \
+            --repository "${{ github.repository }}" \
+            --provenance \
+            --identity_token "$(cat oidc-token.txt)" \
+            kagenti-operator/examples/ci-agent-card.json
+
+      - name: Verify signature
+        run: |
+          sigstore-a2a --verbose verify \
+            --identity_provider "https://token.actions.githubusercontent.com" \
+            --repository "sigstore-conformance/extremely-dangerous-public-oidc-beacon" \
+            --workflow "Extremely dangerous OIDC beacon" \
+            signed-agent-card.json
+
+      - name: Upload signed agent card
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-agent-card
+          path: signed-agent-card.json
+          retention-days: 14
