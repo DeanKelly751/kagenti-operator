@@ -612,6 +612,8 @@ func (r *AgentCardReconciler) getSyncPeriod(agentCard *agentv1alpha1.AgentCard) 
 }
 
 // updateAgentCardStatus persists all status fields atomically with retry.
+//
+//nolint:gocyclo // TODO: refactor to reduce complexity
 func (r *AgentCardReconciler) updateAgentCardStatus(ctx context.Context, agentCard *agentv1alpha1.AgentCard, cardData *agentv1alpha1.AgentCardData, protocol, cardId string, targetRef *agentv1alpha1.TargetRef, verificationResult *signature.VerificationResult, binding *bindingResult, identityMatch *bool, sigstoreResult *signature.BundleVerificationResult) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &agentv1alpha1.AgentCard{}
