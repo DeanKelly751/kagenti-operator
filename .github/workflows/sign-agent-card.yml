@@ -41,12 +41,20 @@ jobs:
           uv pip install --system --prerelease=allow "a2a-sdk==0.2.16"
           uv pip install --system --prerelease=allow "git+https://github.com/sigstore/sigstore-a2a.git@main"
 
+      - name: Get GitHub OIDC token
+        run: |
+          # Fetch OIDC token directly from GitHub Actions
+          OIDC_TOKEN=$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sigstore" | jq -r '.value')
+          echo "$OIDC_TOKEN" > oidc-token.txt
+
       - name: Sign agent card
         run: |
           sigstore-a2a sign \
             --output signed-agent-card.json \
             --repository "${{ github.repository }}" \
             --provenance \
+            --identity_token "$(cat oidc-token.txt)" \
             kagenti-operator/examples/ci-agent-card.json
 
       - name: Verify signature
