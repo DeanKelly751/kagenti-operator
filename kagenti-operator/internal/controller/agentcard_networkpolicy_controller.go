@@ -25,6 +25,7 @@ import (
 	netv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -55,6 +56,7 @@ type AgentCardNetworkPolicyReconciler struct {
 
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch
 
 func (r *AgentCardNetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	networkPolicyLogger.V(1).Info("Reconciling AgentCard NetworkPolicy", "namespacedName", req.NamespacedName)
@@ -372,6 +374,16 @@ func (r *AgentCardNetworkPolicyReconciler) SetupWithManager(mgr ctrl.Manager) er
 			handler.EnqueueRequestsFromMapFunc(r.mapWorkloadToAgentCard("apps/v1", "StatefulSet")),
 			builder.WithPredicates(agentLabelPredicate()),
 		)
+
+	if SandboxCRDExists(mgr.GetConfig()) {
+		sandboxObj := &unstructured.Unstructured{}
+		sandboxObj.SetGroupVersionKind(sandboxGVK)
+		controllerBuilder = controllerBuilder.Watches(
+			sandboxObj,
+			handler.EnqueueRequestsFromMapFunc(r.mapWorkloadToAgentCard("agents.x-k8s.io/v1alpha1", "Sandbox")),
+			builder.WithPredicates(agentLabelPredicate()),
+		)
+	}
 
 	return controllerBuilder.
 		Named("AgentCardNetworkPolicy").

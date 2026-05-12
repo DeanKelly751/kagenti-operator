@@ -1088,23 +1088,40 @@ func TestEnsurePerAgentConfigMap_EmptyBaseYAML_FallbackFromNsConfig(t *testing.T
 		t.Errorf("mode = %v, want %s", cfg["mode"], ModeProxySidecar)
 	}
 
-	inbound, _ := cfg["inbound"].(map[string]interface{})
-	if inbound == nil || inbound["issuer"] != "http://keycloak:8080/realms/kagenti" {
-		t.Errorf("inbound.issuer = %v, want http://keycloak:8080/realms/kagenti", inbound)
+	// Synthesized pipeline: jwt-validation inbound, token-exchange
+	// outbound. Plugin-level defaults (audience_file, bypass_paths,
+	// identity file paths) are not emitted by the webhook — the
+	// authbridge binary applies them from its own convention layer
+	// when it reads this config. See
+	// authbridge/authlib/plugins/CONVENTIONS.md.
+	jwtCfg := pluginConfigAt(t, cfg, "inbound", "jwt-validation")
+	if got, want := jwtCfg["issuer"], "http://keycloak:8080/realms/kagenti"; got != want {
+		t.Errorf("jwt-validation.config.issuer = %v, want %v", got, want)
+	}
+	// keycloak_url + keycloak_realm are passed to jwt-validation so the
+	// plugin derives jwks_url from the internal URL. Required for
+	// split-horizon deployments where `issuer` (public) isn't reachable
+	// from inside the pod. See kagenti-extensions#383.
+	if got, want := jwtCfg["keycloak_url"], "http://keycloak:8080"; got != want {
+		t.Errorf("jwt-validation.config.keycloak_url = %v, want %v", got, want)
+	}
+	if got, want := jwtCfg["keycloak_realm"], "kagenti"; got != want {
+		t.Errorf("jwt-validation.config.keycloak_realm = %v, want %v", got, want)
 	}
 
-	outbound, _ := cfg["outbound"].(map[string]interface{})
-	if outbound == nil || outbound["keycloak_url"] != "http://keycloak:8080" {
-		t.Errorf("outbound.keycloak_url = %v, want http://keycloak:8080", outbound)
+	tokCfg := pluginConfigAt(t, cfg, "outbound", "token-exchange")
+	if got, want := tokCfg["keycloak_url"], "http://keycloak:8080"; got != want {
+		t.Errorf("token-exchange.config.keycloak_url = %v, want %v", got, want)
 	}
-
-	identity, _ := cfg["identity"].(map[string]interface{})
+	if got, want := tokCfg["keycloak_realm"], "kagenti"; got != want {
+		t.Errorf("token-exchange.config.keycloak_realm = %v, want %v", got, want)
+	}
+	if got, want := tokCfg["default_policy"], "passthrough"; got != want {
+		t.Errorf("token-exchange.config.default_policy = %v, want %v", got, want)
+	}
+	identity, _ := tokCfg["identity"].(map[string]interface{})
 	if identity == nil || identity["type"] != "client-secret" {
-		t.Errorf("identity.type = %v, want client-secret", identity)
-	}
-
-	if cfg["bypass"] == nil {
-		t.Error("expected default bypass paths")
+		t.Errorf("token-exchange.config.identity.type = %v, want client-secret", identity)
 	}
 
 	// managedBy label
@@ -1113,25 +1130,63 @@ func TestEnsurePerAgentConfigMap_EmptyBaseYAML_FallbackFromNsConfig(t *testing.T
 	}
 }
 
+// pluginConfigAt navigates pipeline.<direction>.plugins[<name>].config
+// and returns the config map. Fails the test if the path is missing
+// or the shape is unexpected. Keeps assertions in tests compact.
+func pluginConfigAt(t *testing.T, cfg map[string]interface{}, direction, pluginName string) map[string]interface{} {
+	t.Helper()
+	pipeline, ok := cfg["pipeline"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected pipeline section, got %v", cfg["pipeline"])
+	}
+	dir, ok := pipeline[direction].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected pipeline.%s section", direction)
+	}
+	plugins, ok := dir["plugins"].([]interface{})
+	if !ok || len(plugins) == 0 {
+		t.Fatalf("expected pipeline.%s.plugins list, got %v", direction, dir["plugins"])
+	}
+	for _, raw := range plugins {
+		entry, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if entry["name"] == pluginName {
+			cfg, _ := entry["config"].(map[string]interface{})
+			return cfg
+		}
+	}
+	t.Fatalf("plugin %q not found under pipeline.%s.plugins", pluginName, direction)
+	return nil
+}
+
 func TestEnsurePerAgentConfigMap_BaseYAML_PreservesExistingFields(t *testing.T) {
 	m := newTestMutator()
 	ctx := context.Background()
 
+	// baseYAML uses the per-plugin schema the Kagenti Helm chart
+	// emits post-migration. When pipeline: is already present, the
+	// webhook must not touch plugin config — only mode + listener
+	// overrides layer on top.
 	baseYAML := `
 mode: envoy-sidecar
-inbound:
-  issuer: "http://custom-issuer"
-outbound:
-  keycloak_url: "http://custom-keycloak:8080"
-  keycloak_realm: "custom-realm"
-identity:
-  type: spiffe
-  jwt_svid_path: "/opt/jwt_svid.token"
-  client_id_file: "/shared/client-id.txt"
-  client_secret_file: "/shared/client-secret.txt"
-bypass:
-  inbound_paths:
-    - "/custom-path"
+pipeline:
+  inbound:
+    plugins:
+      - name: jwt-validation
+        config:
+          issuer: "http://custom-issuer"
+          bypass_paths:
+            - "/custom-path"
+  outbound:
+    plugins:
+      - name: token-exchange
+        config:
+          keycloak_url: "http://custom-keycloak:8080"
+          keycloak_realm: "custom-realm"
+          identity:
+            type: spiffe
 `
 
 	cmName, err := m.ensurePerAgentConfigMap(ctx, "team1", "my-agent",
@@ -1148,21 +1203,20 @@ bypass:
 		t.Errorf("mode = %v, want %s", cfg["mode"], ModeEnvoySidecar)
 	}
 
-	// Existing fields preserved (not overwritten by fallback)
-	inbound, _ := cfg["inbound"].(map[string]interface{})
-	if inbound["issuer"] != "http://custom-issuer" {
-		t.Errorf("inbound.issuer = %v, should be preserved from base YAML", inbound["issuer"])
+	// Existing plugin config preserved (not overwritten by fallback)
+	jwtCfg := pluginConfigAt(t, cfg, "inbound", "jwt-validation")
+	if jwtCfg["issuer"] != "http://custom-issuer" {
+		t.Errorf("jwt-validation.config.issuer = %v, should be preserved from base YAML", jwtCfg["issuer"])
 	}
-
-	identity, _ := cfg["identity"].(map[string]interface{})
-	if identity["type"] != IdentityTypeSpiffe {
-		t.Errorf("identity.type = %v, should be preserved from base YAML", identity["type"])
-	}
-
-	bypass, _ := cfg["bypass"].(map[string]interface{})
-	paths, _ := bypass["inbound_paths"].([]interface{})
+	paths, _ := jwtCfg["bypass_paths"].([]interface{})
 	if len(paths) != 1 || paths[0] != "/custom-path" {
-		t.Errorf("bypass paths = %v, should be preserved from base YAML", paths)
+		t.Errorf("bypass_paths = %v, should be preserved from base YAML", paths)
+	}
+
+	tokCfg := pluginConfigAt(t, cfg, "outbound", "token-exchange")
+	identity, _ := tokCfg["identity"].(map[string]interface{})
+	if identity["type"] != IdentityTypeSpiffe {
+		t.Errorf("token-exchange.config.identity.type = %v, should be preserved from base YAML", identity["type"])
 	}
 }
 
@@ -1172,15 +1226,20 @@ func TestEnsurePerAgentConfigMap_ListenerOverrides_Merged(t *testing.T) {
 
 	baseYAML := `
 mode: envoy-sidecar
-inbound:
-  issuer: "http://issuer"
-outbound:
-  keycloak_url: "http://keycloak:8080"
-  keycloak_realm: "kagenti"
-identity:
-  type: client-secret
-  client_id_file: "/shared/client-id.txt"
-  client_secret_file: "/shared/client-secret.txt"
+pipeline:
+  inbound:
+    plugins:
+      - name: jwt-validation
+        config:
+          issuer: "http://issuer"
+  outbound:
+    plugins:
+      - name: token-exchange
+        config:
+          keycloak_url: "http://keycloak:8080"
+          keycloak_realm: "kagenti"
+          identity:
+            type: client-secret
 `
 
 	overrides := map[string]string{
@@ -1361,17 +1420,18 @@ func TestEnsurePerAgentConfigMap_FederatedJWT_MapsToSpiffe(t *testing.T) {
 	cm := fetchConfigMap(t, m, "team1", cmName)
 	cfg := parseConfigYAML(t, cm)
 
-	identity, _ := cfg["identity"].(map[string]interface{})
+	tokCfg := pluginConfigAt(t, cfg, "outbound", "token-exchange")
+	identity, _ := tokCfg["identity"].(map[string]interface{})
 	if identity == nil {
-		t.Fatal("expected identity section")
+		t.Fatal("expected identity block under token-exchange config")
 	}
 	if identity["type"] != IdentityTypeSpiffe {
 		t.Errorf("identity.type = %v, want spiffe (federated-jwt should map to spiffe)", identity["type"])
 	}
-	if identity["jwt_svid_path"] != "/opt/jwt_svid.token" {
-		t.Errorf("identity.jwt_svid_path = %v, want /opt/jwt_svid.token", identity["jwt_svid_path"])
-	}
-	if identity["client_id_file"] != "/shared/client-id.txt" {
-		t.Errorf("identity.client_id_file = %v, want /shared/client-id.txt", identity["client_id_file"])
-	}
+	// Note: the webhook no longer emits default credential file
+	// paths (client_id_file, client_secret_file, jwt_svid_path).
+	// The authbridge plugin applies those defaults itself from its
+	// own convention layer — keeping the webhook schema-agnostic
+	// about file paths. See
+	// authbridge/authlib/plugins/CONVENTIONS.md.
 }
