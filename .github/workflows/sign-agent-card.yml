@@ -41,8 +41,12 @@ jobs:
           uv pip install --system --prerelease=allow "a2a-sdk==0.2.16"
           uv pip install --system --prerelease=allow "git+https://github.com/sigstore/sigstore-a2a.git@main"
 
-      - name: Get OIDC token
-        uses: sigstore-conformance/extremely-dangerous-public-oidc-beacon@main
+      - name: Get GitHub OIDC token
+        run: |
+          # Fetch OIDC token directly from GitHub Actions
+          OIDC_TOKEN=$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sigstore" | jq -r '.value')
+          echo "$OIDC_TOKEN" > oidc-token.txt
 
       - name: Sign agent card
         run: |
@@ -55,10 +59,10 @@ jobs:
 
       - name: Verify signature
         run: |
-          sigstore-a2a --verbose verify \
+          sigstore-a2a verify \
             --identity_provider "https://token.actions.githubusercontent.com" \
-            --repository "sigstore-conformance/extremely-dangerous-public-oidc-beacon" \
-            --workflow "Extremely dangerous OIDC beacon" \
+            --repository "${{ github.repository }}" \
+            --workflow "${{ github.workflow }}" \
             signed-agent-card.json
 
       - name: Upload signed agent card
