@@ -357,13 +357,16 @@ func main() {
 	if enableSigstoreVerification {
 		if sigstoreCertificateIdentity == "" || sigstoreCertificateOIDCIssuer == "" {
 			setupLog.Error(errors.New("missing required flags"),
-				"--sigstore-certificate-identity and --sigstore-certificate-oidc-issuer are required when --enable-sigstore-verification=true")
+				"--sigstore-certificate-identity and --sigstore-certificate-oidc-issuer "+
+					"are required when --enable-sigstore-verification=true")
 			os.Exit(1)
 		}
 		var trustedRootJSON []byte
 		if sigstoreTrustedRootConfigMap != "" {
 			if sigstoreTrustedRootConfigMapNamespace == "" {
-				setupLog.Error(errors.New("missing namespace"), "--sigstore-trusted-root-configmap-namespace is required when using --sigstore-trusted-root-configmap")
+				setupLog.Error(errors.New("missing namespace"),
+					"--sigstore-trusted-root-configmap-namespace is required "+
+						"when using --sigstore-trusted-root-configmap")
 				os.Exit(1)
 			}
 			bootstrapClient, cliErr := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme})
