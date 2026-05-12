@@ -110,9 +110,11 @@ var _ = Describe("mapWorkloadToAgentCards", func() {
 			sbx.SetNamespace(namespace)
 			sbx.SetLabels(map[string]string{LabelAgentType: LabelValueAgent})
 
-			mapFn := mapWorkloadToAgentCards(k8sClient, "agents.x-k8s.io/v1alpha1", "Sandbox", logger)
+			mapFn := mapWorkloadToAgentCards(indexedClient, "agents.x-k8s.io/v1alpha1", "Sandbox", logger)
+			Eventually(func() int {
+				return len(mapFn(ctx, sbx))
+			}).Should(Equal(1))
 			requests := mapFn(ctx, sbx)
-			Expect(requests).To(HaveLen(1))
 			Expect(requests[0].Name).To(Equal("sandbox-card"))
 		})
 	})
