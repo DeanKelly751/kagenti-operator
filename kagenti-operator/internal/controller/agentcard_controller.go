@@ -781,7 +781,9 @@ func (r *AgentCardReconciler) getSyncPeriod(agentCard *agentv1alpha1.AgentCard) 
 //   - Synced: whether the agent card was successfully fetched.
 //   - Ready: composite signal — True when Synced is True AND (Verified is True or absent).
 //   - Bound: whether identity binding constraints are satisfied.
-func (r *AgentCardReconciler) updateAgentCardStatus( //nolint:gocyclo
+//
+//nolint:gocyclo // TODO: refactor to reduce complexity
+func (r *AgentCardReconciler) updateAgentCardStatus(
 	ctx context.Context, agentCard *agentv1alpha1.AgentCard,
 	cardData *agentv1alpha1.AgentCardData, protocol, cardID string,
 	targetRef *agentv1alpha1.TargetRef, verificationResult *signature.VerificationResult,
