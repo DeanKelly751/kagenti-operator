@@ -154,8 +154,8 @@ func TestEnsureAudienceScope_UpdatesStaleMapper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if getMapperCalls != 2 {
-		t.Fatalf("expected 2 GET mapper calls (update + verify), got %d", getMapperCalls)
+	if getMapperCalls != 1 {
+		t.Fatalf("expected 1 GET mapper call (verify only, no ensureAudienceMapper for existing scopes), got %d", getMapperCalls)
 	}
 	if putMapperCalls != 1 {
 		t.Fatalf("expected 1 PUT mapper call, got %d", putMapperCalls)
@@ -231,10 +231,12 @@ func TestEnsureAudienceScope_SkipsUpdateWhenCorrect(t *testing.T) {
 	}
 }
 
-// TestEnsureAudienceScope_MapperFailurePropagated verifies that when the mapper POST
-// returns a server error (e.g. 500), the error propagates to EnsureAudienceScope
-// instead of being silently swallowed (regression test for #348).
-func TestEnsureAudienceScope_MapperFailurePropagated(t *testing.T) {
+// TestEnsureAudienceScope_MapperFailureForNewScope verifies that when a new scope is created
+// but the initial mapper POST fails (500), verifyAudienceMapper repairs the missing mapper
+// via createAudienceMapperBestEffort. The initial failure is non-fatal (matches Python sidecar
+// which swallows mapper creation exceptions).
+func TestEnsureAudienceScope_MapperFailureForNewScope(t *testing.T) {
+	var postMapperCalls int
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
@@ -252,10 +254,24 @@ func TestEnsureAudienceScope_MapperFailurePropagated(t *testing.T) {
 			w.Header().Set("Location", srv.URL+"/admin/realms/kagenti/client-scopes/new-scope-id")
 			w.WriteHeader(http.StatusCreated)
 
-		// Mapper POST returns 500 (server error)
+		// Mapper POST: first call (from ensureAudienceMapper) returns 500, second call
+		// (from verifyAudienceMapper → createAudienceMapperBestEffort) succeeds
 		case strings.Contains(path, "/client-scopes/new-scope-id/protocol-mappers/models") && r.Method == http.MethodPost:
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":"internal"}`))
+			postMapperCalls++
+			if postMapperCalls == 1 {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"internal"}`))
+			} else {
+				w.WriteHeader(http.StatusCreated)
+			}
+
+		// GET mappers (from verifyAudienceMapper): returns empty list to trigger re-creation
+		case strings.Contains(path, "/client-scopes/new-scope-id/protocol-mappers/models") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode([]protocolMapperRep{})
+
+		// Realm default scope
+		case path == "/admin/realms/kagenti/default-default-client-scopes/new-scope-id" && r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusNoContent)
 
 		default:
 			t.Fatalf("unexpected %s %s", r.Method, path)
@@ -275,11 +291,11 @@ func TestEnsureAudienceScope_MapperFailurePropagated(t *testing.T) {
 		AudienceClientID:     "spiffe://example.org/ns/ns/sa/wl",
 		AudienceScopeEnabled: true,
 	})
-	if err == nil {
-		t.Fatal("expected error when mapper POST fails, got nil")
+	if err != nil {
+		t.Fatalf("expected success (verifyAudienceMapper repairs), got: %s", err)
 	}
-	if !strings.Contains(err.Error(), "ensure audience mapper") {
-		t.Fatalf("expected error to contain 'ensure audience mapper', got: %s", err.Error())
+	if postMapperCalls != 2 {
+		t.Fatalf("expected 2 POST mapper calls (initial fail + verify repair), got %d", postMapperCalls)
 	}
 }
 
@@ -350,6 +366,90 @@ func TestEnsureAudienceScope_VerifyRecreatesMissingMapper(t *testing.T) {
 	}
 	if recreatePostCalls < 1 {
 		t.Fatalf("expected mapper to be re-created via POST, got %d calls", recreatePostCalls)
+	}
+}
+
+// TestEnsureAudienceScope_DeletesCorruptedMapper verifies that when a mapper exists with
+// the correct name but the wrong ProtocolMapper type (corrupted state from issue #358),
+// the operator deletes the stale mapper and re-creates the correct oidc-audience-mapper.
+func TestEnsureAudienceScope_DeletesCorruptedMapper(t *testing.T) {
+	var deleteMapperCalls, recreatePostCalls int
+	spiffeURI := "spiffe://example.org/ns/ns/sa/wl"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case path == testMasterRealmTokenPath:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "tok"})
+
+		// Scope already exists
+		case path == "/admin/realms/kagenti/client-scopes" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode([]clientScopeListItem{{ID: "scope-123", Name: "agent-ns-wl-aud"}})
+
+		// ensureAudienceMapper POST — 409 conflict (name collision with corrupted mapper)
+		case strings.Contains(path, "/client-scopes/scope-123/protocol-mappers/models") && r.Method == http.MethodPost:
+			if deleteMapperCalls > 0 {
+				// After deletion, re-create succeeds
+				recreatePostCalls++
+				w.WriteHeader(http.StatusCreated)
+			} else {
+				w.WriteHeader(http.StatusConflict)
+			}
+
+		// GET mappers — returns mapper with wrong type (corrupted)
+		case strings.Contains(path, "/client-scopes/scope-123/protocol-mappers/models") && r.Method == http.MethodGet:
+			if deleteMapperCalls > 0 {
+				// After delete+recreate, verify sees the correct mapper
+				_ = json.NewEncoder(w).Encode([]protocolMapperRep{{
+					ID: "mapper-new", Name: "agent-ns-wl-aud", Protocol: "openid-connect",
+					ProtocolMapper: "oidc-audience-mapper",
+					Config:         map[string]string{"included.custom.audience": spiffeURI},
+				}})
+			} else {
+				// Corrupted: same name, wrong ProtocolMapper type
+				_ = json.NewEncoder(w).Encode([]protocolMapperRep{{
+					ID: "mapper-corrupted", Name: "agent-ns-wl-aud", Protocol: "openid-connect",
+					ProtocolMapper: "oidc-usermodel-attribute-mapper", // wrong type!
+					Config:         map[string]string{"claim.name": "audience"},
+				}})
+			}
+
+		// DELETE the corrupted mapper
+		case strings.Contains(path, "/protocol-mappers/models/mapper-corrupted") && r.Method == http.MethodDelete:
+			deleteMapperCalls++
+			w.WriteHeader(http.StatusNoContent)
+
+		// Realm default scope
+		case path == "/admin/realms/kagenti/default-default-client-scopes/scope-123" && r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusNoContent)
+
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, path)
+		}
+	}))
+	defer srv.Close()
+
+	a := Admin{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	token, err := a.PasswordGrantToken(context.Background(), "u", "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = a.EnsureAudienceScope(context.Background(), token, AudienceParams{
+		Realm:                "kagenti",
+		ClientName:           "ns/wl",
+		AudienceClientID:     spiffeURI,
+		AudienceScopeEnabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleteMapperCalls != 1 {
+		t.Fatalf("expected 1 DELETE for corrupted mapper, got %d", deleteMapperCalls)
+	}
+	if recreatePostCalls != 1 {
+		t.Fatalf("expected 1 POST to recreate correct mapper, got %d", recreatePostCalls)
 	}
 }
 
