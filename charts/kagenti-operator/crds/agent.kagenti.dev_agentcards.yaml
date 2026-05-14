@@ -112,10 +112,6 @@ spec:
                     description: CertificateOIDCIssuer is the expected OIDC issuer
                       URL (e.g. https://token.actions.githubusercontent.com).
                     type: string
-                  rekorURL:
-                    description: RekorURL is reserved for custom transparency log
-                      base URL; the operator primarily uses the trusted root material.
-                    type: string
                 type: object
               syncPeriod:
                 default: 30s
