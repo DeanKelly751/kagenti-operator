@@ -39,7 +39,7 @@ type clientScopeCreateRep struct {
 }
 
 type protocolMapperRep struct {
-	ID              string            `json:"id"`
+	ID              string            `json:"id,omitempty"`
 	Name            string            `json:"name"`
 	Protocol        string            `json:"protocol"`
 	ProtocolMapper  string            `json:"protocolMapper"`
