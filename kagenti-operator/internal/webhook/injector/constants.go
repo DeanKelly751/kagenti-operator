@@ -37,3 +37,15 @@ const (
 	IdentityTypeSpiffe         = "spiffe"
 	ClientAuthTypeFederatedJWT = "federated-jwt"
 )
+
+// mTLS modes for the proxy-sidecar / lite paths. Selected per workload
+// via AgentRuntime CR `Spec.MTLSMode`, falling back to the namespace
+// `authbridge-runtime-config` ConfigMap's `mtls.mode` field, then
+// MTLSModeDisabled. envoy-sidecar mode is incompatible with mTLS today
+// (Envoy SDS not configured by the kagenti envoy-config) — admission
+// rejects mtlsMode != disabled in that combination.
+const (
+	MTLSModeDisabled   = "disabled"
+	MTLSModePermissive = "permissive"
+	MTLSModeStrict     = "strict"
+)

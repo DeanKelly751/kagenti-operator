@@ -228,6 +228,63 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 		nsConfig = &NamespaceConfig{}
 	}
 
+	// ========================================
+	// Resolve mTLS posture (CR > namespace > "disabled")
+	// ========================================
+	//
+	// Done BEFORE the volume-building / per-workload resolution so that
+	// "mtlsMode != disabled implies SPIRE" can flip spireEnabled and
+	// fall through to the existing SPIRE-aware code paths (volumes,
+	// ServiceAccount, container env). Mode-compat validation
+	// (mtlsMode incompatible with envoy-sidecar) runs in the
+	// AgentRuntime validating webhook upstream of pod admission.
+	mtlsMode := MTLSModeDisabled
+	mtlsSource := "default"
+	if arOverrides != nil && arOverrides.MTLSMode != nil {
+		mtlsMode = *arOverrides.MTLSMode
+		mtlsSource = "agentruntime-cr"
+	}
+	if mtlsMode == MTLSModeDisabled {
+		if m := ExtractMTLSMode(nsConfig.AuthBridgeRuntimeYAML); m != "" {
+			mtlsMode = m
+			mtlsSource = "namespace-configmap"
+		}
+	}
+	switch mtlsMode {
+	case MTLSModeDisabled, MTLSModePermissive, MTLSModeStrict:
+		// recognized, keep as-is
+	default:
+		mutatorLog.Info("WARN: unrecognized mtlsMode; defaulting to disabled",
+			"namespace", namespace, "crName", crName,
+			"unrecognized", mtlsMode, "source", mtlsSource)
+		mtlsMode = MTLSModeDisabled
+		mtlsSource = "default-invalid-fallback"
+	}
+	mutatorLog.Info("resolved mTLS mode",
+		"namespace", namespace, "crName", crName,
+		"mode", mtlsMode, "source", mtlsSource)
+
+	// Auto-enable SPIRE when mtls is on. The bundled spiffe-helper
+	// writes /opt/svid*.pem from SPIRE-issued X.509 SVIDs; without
+	// SPIRE the cert files never appear and authbridge stays in its
+	// startup wait loop. Setting mtlsMode is sufficient declaration of
+	// intent — the operator does not require a separate SPIRE label.
+	if mtlsMode != MTLSModeDisabled && !spireEnabled {
+		mutatorLog.Info("mtlsMode set; auto-enabling SPIRE for this workload",
+			"namespace", namespace, "crName", crName, "mtlsMode", mtlsMode)
+		spireEnabled = true
+		if podSpec.ServiceAccountName == "" || podSpec.ServiceAccountName == "default" {
+			if err := m.ensureServiceAccount(ctx, namespace, crName); err != nil {
+				mutatorLog.Error(err, "Failed to ensure ServiceAccount for auto-enabled SPIRE",
+					"namespace", namespace, "name", crName)
+				return false, fmt.Errorf("failed to ensure service account for mtls auto-spire: %w", err)
+			}
+			podSpec.ServiceAccountName = crName
+			mutatorLog.Info("Set ServiceAccountName for auto-enabled SPIRE identity",
+				"namespace", namespace, "serviceAccount", crName)
+		}
+	}
+
 	if currentGates.PerWorkloadConfigResolution {
 		// Resolved path: build literal env vars from namespace config
 		// arOverrides was already read above as a gate check.
@@ -417,7 +474,8 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 				"reverse_proxy_addr":    fmt.Sprintf(":%d", originalAgentPort),
 				"reverse_proxy_backend": fmt.Sprintf("http://127.0.0.1:%d", newAgentPort),
 				"forward_proxy_addr":    fmt.Sprintf(":%d", forwardProxyPort),
-			})
+			},
+			mtlsMode)
 		if err != nil {
 			return false, fmt.Errorf("proxy-sidecar per-agent ConfigMap: %w", err)
 		}
@@ -488,8 +546,12 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 	// authbridge + bundled spiffe-helper. proxy-init is a separate
 	// init container. spiffe-helper starts conditionally on SPIRE_ENABLED.
 
+	// envoy-sidecar always passes mtlsMode="" — the validating webhook
+	// rejects mtlsMode != disabled with envoy-sidecar at admission, so
+	// we'd never reach this branch with a non-empty mtlsMode in practice;
+	// passing "" here is the explicit-defense complement.
 	perAgentCMName, err := m.ensurePerAgentConfigMap(ctx, namespace, crName,
-		ModeEnvoySidecar, nsConfig.AuthBridgeRuntimeYAML, nsConfig, nil)
+		ModeEnvoySidecar, nsConfig.AuthBridgeRuntimeYAML, nsConfig, nil, "")
 	if err != nil {
 		return false, fmt.Errorf("envoy-sidecar per-agent ConfigMap: %w", err)
 	}
@@ -668,16 +730,23 @@ func synthesizePipeline(nsConfig *NamespaceConfig) map[string]interface{} {
 
 // ensurePerAgentConfigMap creates or updates a per-agent ConfigMap that merges the
 // namespace-level authbridge-runtime-config with per-agent overrides (mode, listener
-// addresses). The authbridge sidecar mounts this instead of the shared ConfigMap.
+// addresses, mtls). The authbridge sidecar mounts this instead of the shared ConfigMap.
 //
 // If baseYAML is empty (namespace has no authbridge-runtime-config), a minimal config
 // is generated from the NamespaceConfig fields.
+//
+// mtlsMode is the resolved mTLS posture (disabled / permissive / strict). Only
+// proxy-sidecar and lite paths reach this function with a non-disabled mtlsMode;
+// the AgentRuntime validating webhook rejects mtlsMode != disabled when
+// authBridgeMode is envoy-sidecar (Envoy SDS isn't wired in the kagenti envoy-config
+// today — tracked as a follow-up).
 func (m *PodMutator) ensurePerAgentConfigMap(
 	ctx context.Context,
 	namespace, crName, mode string,
 	baseYAML string,
 	nsConfig *NamespaceConfig,
 	listenerOverrides map[string]string,
+	mtlsMode string,
 ) (string, error) {
 	cmName := perAgentConfigMapName(crName)
 
@@ -727,6 +796,21 @@ func (m *PodMutator) ensurePerAgentConfigMap(
 		cfg["listener"] = listener
 	}
 
+	// mTLS block. Cert paths are omitted on purpose — they match the
+	// authbridge defaults (/opt/svid.pem, /opt/svid_key.pem,
+	// /opt/svid_bundle.pem) written by the bundled spiffe-helper.
+	// Surfacing them here would couple the operator to authbridge's
+	// internal layout for no benefit.
+	if mtlsMode != "" && mtlsMode != MTLSModeDisabled {
+		cfg["mtls"] = map[string]interface{}{"mode": mtlsMode}
+	} else {
+		// Defensive: scrub any stale mtls block from the base YAML when
+		// mTLS is off. Otherwise toggling mtlsMode back to disabled
+		// without restarting the namespace ConfigMap would leak the
+		// previous setting through to the per-agent CM.
+		delete(cfg, "mtls")
+	}
+
 	// Marshal back to YAML
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -748,7 +832,8 @@ func (m *PodMutator) ensurePerAgentConfigMap(
 	if err := m.Client.Apply(ctx, cmApply, client.FieldOwner("kagenti-webhook"), client.ForceOwnership); err != nil {
 		return "", fmt.Errorf("failed to apply per-agent ConfigMap %s/%s: %w", namespace, cmName, err)
 	}
-	mutatorLog.Info("Applied per-agent ConfigMap", "namespace", namespace, "name", cmName, "mode", mode)
+	mutatorLog.Info("Applied per-agent ConfigMap",
+		"namespace", namespace, "name", cmName, "mode", mode, "mtlsMode", mtlsMode)
 
 	return cmName, nil
 }

@@ -54,6 +54,12 @@ type AgentRuntimeOverrides struct {
 	// authbridge-runtime-config mode (if set) or the cluster fallback
 	// applies.
 	AuthBridgeMode *string
+
+	// mTLS posture — from .spec.mtlsMode
+	// Nil = no per-workload override; the namespace's
+	// authbridge-runtime-config mtls.mode (if set) or "disabled"
+	// applies.
+	MTLSMode *string
 }
 
 // ReadAgentRuntimeOverrides reads the AgentRuntime CR for a given workload
@@ -127,11 +133,18 @@ func extractOverrides(rt *agentv1alpha1.AgentRuntime) *AgentRuntimeOverrides {
 		overrides.AuthBridgeMode = &mode
 	}
 
+	// .spec.mtlsMode
+	if rt.Spec.MTLSMode != "" {
+		mode := rt.Spec.MTLSMode
+		overrides.MTLSMode = &mode
+	}
+
 	arConfigLog.Info("AgentRuntime overrides extracted",
 		"hasSpiffeTrustDomain", overrides.SpiffeTrustDomain != nil,
 		"hasClientRegistration", overrides.ClientRegistrationProvider != nil,
 		"hasTrace", overrides.TraceEndpoint != nil,
-		"hasAuthBridgeMode", overrides.AuthBridgeMode != nil)
+		"hasAuthBridgeMode", overrides.AuthBridgeMode != nil,
+		"hasMTLSMode", overrides.MTLSMode != nil)
 
 	return overrides
 }

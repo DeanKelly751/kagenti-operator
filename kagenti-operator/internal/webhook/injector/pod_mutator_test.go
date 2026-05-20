@@ -1242,7 +1242,7 @@ func TestEnsurePerAgentConfigMap_EmptyBaseYAML_FallbackFromNsConfig(t *testing.T
 	}
 
 	cmName, err := m.ensurePerAgentConfigMap(ctx, "team1", "weather-service",
-		ModeProxySidecar, "", nsConfig, nil)
+		ModeProxySidecar, "", nsConfig, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1359,7 +1359,7 @@ pipeline:
 `
 
 	cmName, err := m.ensurePerAgentConfigMap(ctx, "team1", "my-agent",
-		ModeEnvoySidecar, baseYAML, &NamespaceConfig{}, nil)
+		ModeEnvoySidecar, baseYAML, &NamespaceConfig{}, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1418,7 +1418,7 @@ pipeline:
 	}
 
 	cmName, err := m.ensurePerAgentConfigMap(ctx, "team1", "my-agent",
-		ModeProxySidecar, baseYAML, &NamespaceConfig{}, overrides)
+		ModeProxySidecar, baseYAML, &NamespaceConfig{}, overrides, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1454,7 +1454,7 @@ func TestEnsurePerAgentConfigMap_ExistingCM_OwnedByWebhook_Updated(t *testing.T)
 	ctx := context.Background()
 
 	_, err := m.ensurePerAgentConfigMap(ctx, "team1", "my-agent",
-		ModeEnvoySidecar, "", &NamespaceConfig{ClientAuthType: "client-secret"}, nil)
+		ModeEnvoySidecar, "", &NamespaceConfig{ClientAuthType: "client-secret"}, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1482,7 +1482,7 @@ func TestEnsurePerAgentConfigMap_ExistingCM_OverwrittenBySSA(t *testing.T) {
 	ctx := context.Background()
 
 	cmName, err := m.ensurePerAgentConfigMap(ctx, "team1", "my-agent",
-		ModeEnvoySidecar, "", &NamespaceConfig{ClientAuthType: "client-secret"}, nil)
+		ModeEnvoySidecar, "", &NamespaceConfig{ClientAuthType: "client-secret"}, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1510,7 +1510,7 @@ func TestEnsurePerAgentConfigMap_OwnerReference_SetFromDeployment(t *testing.T) 
 	ctx := context.Background()
 
 	cmName, err := m.ensurePerAgentConfigMap(ctx, "team1", "weather-service",
-		ModeEnvoySidecar, "", &NamespaceConfig{ClientAuthType: "client-secret"}, nil)
+		ModeEnvoySidecar, "", &NamespaceConfig{ClientAuthType: "client-secret"}, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1537,7 +1537,7 @@ func TestEnsurePerAgentConfigMap_OwnerReference_SetFromStatefulSet(t *testing.T)
 	ctx := context.Background()
 
 	cmName, err := m.ensurePerAgentConfigMap(ctx, "team1", "my-stateful-agent",
-		ModeEnvoySidecar, "", &NamespaceConfig{ClientAuthType: "client-secret"}, nil)
+		ModeEnvoySidecar, "", &NamespaceConfig{ClientAuthType: "client-secret"}, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1558,7 +1558,7 @@ func TestEnsurePerAgentConfigMap_OwnerReference_NoWorkload_Skipped(t *testing.T)
 	ctx := context.Background()
 
 	cmName, err := m.ensurePerAgentConfigMap(ctx, "team1", "bare-pod-agent",
-		ModeEnvoySidecar, "", &NamespaceConfig{ClientAuthType: "client-secret"}, nil)
+		ModeEnvoySidecar, "", &NamespaceConfig{ClientAuthType: "client-secret"}, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1581,7 +1581,7 @@ func TestEnsurePerAgentConfigMap_FederatedJWT_MapsToSpiffe(t *testing.T) {
 	}
 
 	cmName, err := m.ensurePerAgentConfigMap(ctx, "team1", "spiffe-agent",
-		ModeEnvoySidecar, "", nsConfig, nil)
+		ModeEnvoySidecar, "", nsConfig, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1603,4 +1603,129 @@ func TestEnsurePerAgentConfigMap_FederatedJWT_MapsToSpiffe(t *testing.T) {
 	// own convention layer — keeping the webhook schema-agnostic
 	// about file paths. See
 	// authbridge/authlib/plugins/CONVENTIONS.md.
+}
+
+// --- mTLS rendering tests ---
+//
+// These cover the per-agent ConfigMap rendering with the new mtlsMode
+// argument. The validating webhook upstream rejects mtlsMode != disabled
+// with envoy-sidecar mode, so the renderer doesn't need to gate by mode
+// — but we still test the negative ("disabled" / "" should not emit a
+// block) and the scrub case (toggling back to disabled wipes a stale
+// block from the base YAML).
+
+// TestEnsurePerAgentConfigMap_MTLSStrict_RendersBlock verifies that
+// mtlsMode=strict produces a top-level mtls: {mode: strict} block.
+// Cert paths are intentionally NOT emitted — they default to the
+// authbridge-side defaults (/opt/svid*.pem) written by spiffe-helper.
+func TestEnsurePerAgentConfigMap_MTLSStrict_RendersBlock(t *testing.T) {
+	m := newTestMutator()
+	ctx := context.Background()
+
+	cmName, err := m.ensurePerAgentConfigMap(ctx, "team1", "mtls-agent",
+		ModeProxySidecar, "", &NamespaceConfig{ClientAuthType: "client-secret"}, nil, MTLSModeStrict)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cm := fetchConfigMap(t, m, "team1", cmName)
+	cfg := parseConfigYAML(t, cm)
+
+	mtls, ok := cfg["mtls"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected mtls block to be a map; got %T (cfg=%+v)", cfg["mtls"], cfg)
+	}
+	if mtls["mode"] != MTLSModeStrict {
+		t.Errorf("mtls.mode = %v, want %s", mtls["mode"], MTLSModeStrict)
+	}
+	// Cert paths are NOT rendered — operator stays decoupled from
+	// authbridge's internal layout.
+	for _, key := range []string{"cert_file", "key_file", "bundle_file"} {
+		if _, present := mtls[key]; present {
+			t.Errorf("mtls.%s should not be emitted (authbridge supplies defaults)", key)
+		}
+	}
+}
+
+// TestEnsurePerAgentConfigMap_MTLSPermissive_RendersBlock mirrors the
+// strict test for permissive mode — same shape, different mode value.
+func TestEnsurePerAgentConfigMap_MTLSPermissive_RendersBlock(t *testing.T) {
+	m := newTestMutator()
+	ctx := context.Background()
+
+	cmName, err := m.ensurePerAgentConfigMap(ctx, "team1", "mtls-agent",
+		ModeProxySidecar, "", &NamespaceConfig{ClientAuthType: "client-secret"}, nil, MTLSModePermissive)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cm := fetchConfigMap(t, m, "team1", cmName)
+	cfg := parseConfigYAML(t, cm)
+
+	mtls, ok := cfg["mtls"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected mtls block to be a map; got %T", cfg["mtls"])
+	}
+	if mtls["mode"] != MTLSModePermissive {
+		t.Errorf("mtls.mode = %v, want %s", mtls["mode"], MTLSModePermissive)
+	}
+}
+
+// TestEnsurePerAgentConfigMap_MTLSDisabled_OmitsBlock verifies that the
+// renderer does NOT emit mtls when mtlsMode is disabled or empty.
+// Empty-string is the envoy-sidecar carve-out path — the call site
+// passes "" explicitly so we test that too.
+func TestEnsurePerAgentConfigMap_MTLSDisabled_OmitsBlock(t *testing.T) {
+	tests := []struct {
+		name     string
+		mtlsMode string
+	}{
+		{"empty string", ""},
+		{"disabled", MTLSModeDisabled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestMutator()
+			ctx := context.Background()
+
+			cmName, err := m.ensurePerAgentConfigMap(ctx, "team1", "no-mtls-"+tt.name,
+				ModeProxySidecar, "", &NamespaceConfig{ClientAuthType: "client-secret"}, nil, tt.mtlsMode)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			cm := fetchConfigMap(t, m, "team1", cmName)
+			cfg := parseConfigYAML(t, cm)
+
+			if _, present := cfg["mtls"]; present {
+				t.Errorf("mtls block should not be emitted when mtlsMode=%q (cfg=%+v)", tt.mtlsMode, cfg)
+			}
+		})
+	}
+}
+
+// TestEnsurePerAgentConfigMap_MTLSScrubsStaleBlock guards against a
+// regression where toggling mtlsMode from strict back to disabled would
+// leak the previous mtls block through to the per-agent CM. The
+// renderer must explicitly delete cfg["mtls"] when mode is off.
+func TestEnsurePerAgentConfigMap_MTLSScrubsStaleBlock(t *testing.T) {
+	m := newTestMutator()
+	ctx := context.Background()
+
+	// Base YAML with a stale mtls: strict — simulates a namespace
+	// ConfigMap that was rendered earlier with mtls on.
+	baseYAML := "mode: proxy-sidecar\nmtls:\n  mode: strict\n"
+
+	cmName, err := m.ensurePerAgentConfigMap(ctx, "team1", "scrub-agent",
+		ModeProxySidecar, baseYAML, &NamespaceConfig{ClientAuthType: "client-secret"}, nil, MTLSModeDisabled)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cm := fetchConfigMap(t, m, "team1", cmName)
+	cfg := parseConfigYAML(t, cm)
+
+	if _, present := cfg["mtls"]; present {
+		t.Errorf("stale mtls block should be scrubbed when mtlsMode=disabled; got cfg=%+v", cfg)
+	}
 }

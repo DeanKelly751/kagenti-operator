@@ -90,6 +90,35 @@ type AgentRuntimeSpec struct {
 	// +optional
 	// +kubebuilder:validation:Enum=proxy-sidecar;envoy-sidecar;lite;waypoint
 	AuthBridgeMode string `json:"authBridgeMode,omitempty"`
+
+	// MTLSMode selects the mTLS posture between authbridge sidecars on
+	// the proxy-sidecar / lite paths. envoy-sidecar handles transport
+	// security through Envoy SDS, which is currently not configured by
+	// the kagenti envoy-config — admission rejects mtlsMode != disabled
+	// when authBridgeMode is envoy-sidecar (tracked as a follow-up).
+	//
+	// Three valid values:
+	//
+	//   disabled    Plaintext between sidecars (default).
+	//   permissive  Inbound: byte-peek listener accepts both TLS and
+	//               plaintext on the same port. Outbound: tries TLS,
+	//               falls back to plaintext on handshake failure (one-line
+	//               WARN log per fallback). Use during rollout.
+	//   strict      Inbound: TLS-only, plaintext callers closed at
+	//               accept. Outbound: TLS-or-fail. Use after rollout
+	//               completes.
+	//
+	// Resolution: AgentRuntime CR > namespace authbridge-runtime-config
+	// mtls.mode > "disabled". Setting mtlsMode != disabled implicitly
+	// requires SPIRE — the operator auto-enables spire for the workload.
+	//
+	// Note: changing mtlsMode triggers a pod rollout because authbridge
+	// cannot hot-reload mTLS config (the byte-peek listener is wired at
+	// process start).
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=disabled;permissive;strict
+	MTLSMode string `json:"mtlsMode,omitempty"`
 }
 
 // IdentitySpec configures workload identity for an AgentRuntime.

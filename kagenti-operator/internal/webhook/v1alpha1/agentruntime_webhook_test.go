@@ -246,3 +246,67 @@ func TestAgentRuntimeValidator_ValidateDelete(t *testing.T) {
 	})
 
 }
+
+// TestAgentRuntimeValidator_MTLSCompatWithMode covers the rejection of
+// mtlsMode != disabled when authBridgeMode is envoy-sidecar. The kagenti
+// envoy-config doesn't currently configure SDS, so an envoy-sidecar
+// workload that sets mtlsMode would silently run plaintext while the
+// user believes they have strict mTLS — the validator catches that at
+// admission time.
+func TestAgentRuntimeValidator_MTLSCompatWithMode(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name    string
+		mode    string
+		mtls    string
+		wantErr bool
+	}{
+		{"proxy-sidecar + strict allowed", "proxy-sidecar", "strict", false},
+		{"proxy-sidecar + permissive allowed", "proxy-sidecar", "permissive", false},
+		{"proxy-sidecar + disabled allowed", "proxy-sidecar", "disabled", false},
+		{"proxy-sidecar + empty allowed", "proxy-sidecar", "", false},
+		{"lite + strict allowed", "lite", "strict", false},
+		{"lite + permissive allowed", "lite", "permissive", false},
+		{"empty mode + strict allowed", "", "strict", false},
+		{"envoy-sidecar + disabled allowed", "envoy-sidecar", "disabled", false},
+		{"envoy-sidecar + empty allowed", "envoy-sidecar", "", false},
+		{"envoy-sidecar + permissive rejected", "envoy-sidecar", "permissive", true},
+		{"envoy-sidecar + strict rejected", "envoy-sidecar", "strict", true},
+	}
+
+	for _, tt := range tests {
+		t.Run("create/"+tt.name, func(t *testing.T) {
+			rt := validAgentRuntime()
+			rt.Spec.AuthBridgeMode = tt.mode
+			rt.Spec.MTLSMode = tt.mtls
+
+			v := &AgentRuntimeValidator{}
+			_, err := v.ValidateCreate(ctx, rt)
+			gotErr := err != nil
+			if gotErr != tt.wantErr {
+				t.Errorf("ValidateCreate(mode=%q, mtls=%q): wantErr=%v, gotErr=%v (err=%v)",
+					tt.mode, tt.mtls, tt.wantErr, gotErr, err)
+			}
+			if tt.wantErr && err != nil &&
+				!strings.Contains(err.Error(), "envoy-sidecar mTLS is tracked as a follow-up") {
+				t.Errorf("error message should point to follow-up; got: %v", err)
+			}
+		})
+
+		t.Run("update/"+tt.name, func(t *testing.T) {
+			old := validAgentRuntime()
+			updated := validAgentRuntime()
+			updated.Spec.AuthBridgeMode = tt.mode
+			updated.Spec.MTLSMode = tt.mtls
+
+			v := &AgentRuntimeValidator{}
+			_, err := v.ValidateUpdate(ctx, old, updated)
+			gotErr := err != nil
+			if gotErr != tt.wantErr {
+				t.Errorf("ValidateUpdate(mode=%q, mtls=%q): wantErr=%v, gotErr=%v (err=%v)",
+					tt.mode, tt.mtls, tt.wantErr, gotErr, err)
+			}
+		})
+	}
+}

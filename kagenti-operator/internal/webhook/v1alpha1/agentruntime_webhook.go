@@ -49,6 +49,9 @@ func (v *AgentRuntimeValidator) ValidateCreate(ctx context.Context, rt *agentv1a
 	if err := v.checkDuplicateTargetRef(ctx, rt); err != nil {
 		return nil, err
 	}
+	if err := checkMTLSCompatibleWithMode(rt); err != nil {
+		return nil, err
+	}
 
 	return nil, nil
 }
@@ -59,6 +62,9 @@ func (v *AgentRuntimeValidator) ValidateUpdate(ctx context.Context, _ *agentv1al
 	if err := v.checkDuplicateTargetRef(ctx, rt); err != nil {
 		return nil, err
 	}
+	if err := checkMTLSCompatibleWithMode(rt); err != nil {
+		return nil, err
+	}
 
 	return nil, nil
 }
@@ -67,6 +73,32 @@ func (v *AgentRuntimeValidator) ValidateDelete(_ context.Context, rt *agentv1alp
 	agentruntimelog.Info("validate delete", "name", rt.Name)
 
 	return nil, nil
+}
+
+// checkMTLSCompatibleWithMode rejects mtlsMode != disabled when authBridgeMode
+// is envoy-sidecar. Envoy SDS isn't currently configured by the kagenti
+// envoy-config — extending it to do real mTLS is a separate piece of work.
+// Until that lands, the only modes that actually carry mTLS are
+// proxy-sidecar and lite (kagenti-extensions PR #424). Rejecting at admission
+// makes the misconfiguration loud instead of producing a workload that
+// silently runs plaintext while the user believes they have strict mTLS.
+//
+// Empty / "disabled" mtlsMode is permitted for any authBridgeMode — that's
+// today's plaintext default. The error message points to the supported
+// modes and flags this as a current limitation, not a permanent one.
+func checkMTLSCompatibleWithMode(rt *agentv1alpha1.AgentRuntime) error {
+	mtls := rt.Spec.MTLSMode
+	if mtls == "" || mtls == "disabled" {
+		return nil
+	}
+	if rt.Spec.AuthBridgeMode == "envoy-sidecar" {
+		return fmt.Errorf(
+			"mtlsMode=%q is not supported with authBridgeMode=envoy-sidecar; "+
+				"set authBridgeMode to proxy-sidecar or lite (envoy-sidecar mTLS is tracked as a follow-up)",
+			mtls,
+		)
+	}
+	return nil
 }
 
 // checkDuplicateTargetRef rejects creation/update if another AgentRuntime already

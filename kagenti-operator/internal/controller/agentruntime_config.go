@@ -58,6 +58,20 @@ type resolvedConfig struct {
 	Trace        *traceConfig      `json:"trace,omitempty"`
 	FeatureGates map[string]string `json:"featureGates,omitempty"`
 	Defaults     map[string]string `json:"defaults,omitempty"`
+
+	// AuthBridgeMode and MTLSMode change the injected sidecar shape /
+	// transport posture, both of which require a pod restart to take
+	// effect. Including them here folds CR-edit changes into the
+	// config-hash so applyWorkloadConfig stamps a new hash on the pod
+	// template and the Deployment rolls.
+	//
+	// Namespace-level changes to the authbridge-runtime-config ConfigMap
+	// are NOT captured here today — that ConfigMap is consumed by the
+	// admission webhook, not the hash path. Operators editing the
+	// namespace ConfigMap should kubectl rollout restart the affected
+	// workload manually.
+	AuthBridgeMode string `json:"authBridgeMode,omitempty"`
+	MTLSMode       string `json:"mtlsMode,omitempty"`
 }
 
 type traceConfig struct {
@@ -142,6 +156,9 @@ func resolveConfig(ctx context.Context, c client.Reader, namespace string, spec 
 			resolved.Trace.Rate = spec.Trace.Sampling.Rate
 		}
 	}
+
+	resolved.AuthBridgeMode = spec.AuthBridgeMode
+	resolved.MTLSMode = spec.MTLSMode
 
 	return resolved, warnings
 }
