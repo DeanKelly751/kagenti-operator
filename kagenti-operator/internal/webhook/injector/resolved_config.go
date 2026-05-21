@@ -39,6 +39,7 @@ type ResolvedConfig struct {
 	TokenURL              string
 	Issuer                string
 	ExpectedAudience      string
+	AllowedAudiences      []string // from AgentRuntime .spec.identity.allowedAudiences or namespace CM
 	TargetAudience        string
 	TargetScopes          string
 	DefaultOutboundPolicy string
@@ -97,6 +98,9 @@ func ResolveConfig(platform *config.PlatformConfig, ns *NamespaceConfig, ar *Age
 
 	// Apply AgentRuntime overrides (highest precedence)
 	if ar != nil {
+		if len(ar.AllowedAudiences) > 0 {
+			resolved.AllowedAudiences = ar.AllowedAudiences
+		}
 		if ar.SpiffeTrustDomain != nil {
 			resolved.SpiffeTrustDomain = *ar.SpiffeTrustDomain
 		}

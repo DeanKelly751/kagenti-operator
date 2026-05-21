@@ -133,6 +133,13 @@ type IdentitySpec struct {
 	// SPIFFE specifies SPIFFE identity configuration overrides
 	// +optional
 	SPIFFE *SPIFFEIdentity `json:"spiffe,omitempty"`
+
+	// AllowedAudiences specifies additional JWT audiences that the AuthProxy
+	// sidecar should accept for inbound requests. This is a transitional
+	// mechanism to support application-to-agent flows until the auth model
+	// is finalized. See https://github.com/kagenti/kagenti-operator/issues/368
+	// +optional
+	AllowedAudiences []string `json:"allowedAudiences,omitempty"`
 }
 
 // SPIFFEIdentity configures SPIFFE workload identity for an AgentRuntime.

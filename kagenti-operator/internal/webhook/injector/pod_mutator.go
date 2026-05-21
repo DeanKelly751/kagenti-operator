@@ -19,6 +19,7 @@ package injector
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/kagenti/operator/internal/webhook/config"
 	appsv1 "k8s.io/api/apps/v1"
@@ -300,6 +301,14 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 		}
 	}
 
+	// ========================================
+	// Resolve AllowedAudiences (from AgentRuntime CR)
+	// ========================================
+	var allowedAudiences []string
+	if arOverrides != nil {
+		allowedAudiences = slices.Clone(arOverrides.AllowedAudiences)
+	}
+
 	if currentGates.PerWorkloadConfigResolution {
 		// Resolved path: build literal env vars from namespace config
 		// arOverrides was already read above as a gate check.
@@ -490,7 +499,7 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 				"reverse_proxy_backend": fmt.Sprintf("http://127.0.0.1:%d", newAgentPort),
 				"forward_proxy_addr":    fmt.Sprintf(":%d", forwardProxyPort),
 			},
-			mtlsMode)
+			mtlsMode, allowedAudiences)
 		if err != nil {
 			return false, fmt.Errorf("proxy-sidecar per-agent ConfigMap: %w", err)
 		}
@@ -566,7 +575,7 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 	// we'd never reach this branch with a non-empty mtlsMode in practice;
 	// passing "" here is the explicit-defense complement.
 	perAgentCMName, err := m.ensurePerAgentConfigMap(ctx, namespace, crName,
-		ModeEnvoySidecar, nsConfig.AuthBridgeRuntimeYAML, nsConfig, nil, "")
+		ModeEnvoySidecar, nsConfig.AuthBridgeRuntimeYAML, nsConfig, nil, "", allowedAudiences)
 	if err != nil {
 		return false, fmt.Errorf("envoy-sidecar per-agent ConfigMap: %w", err)
 	}
@@ -743,6 +752,38 @@ func synthesizePipeline(nsConfig *NamespaceConfig) map[string]interface{} {
 	}
 }
 
+// injectAllowedAudiences walks into cfg["pipeline"]["inbound"]["plugins"] and sets
+// allowed_audiences on the jwt-validation plugin's config block. If the pipeline
+// structure does not contain a jwt-validation plugin, a warning is logged and the
+// setting is silently dropped.
+func injectAllowedAudiences(cfg map[string]interface{}, audiences []string) {
+	pipeline, _ := cfg["pipeline"].(map[string]interface{})
+	if pipeline == nil {
+		mutatorLog.Info("WARN: allowedAudiences set on AgentRuntime CR but no pipeline section in config; setting has no effect")
+		return
+	}
+	inbound, _ := pipeline["inbound"].(map[string]interface{})
+	if inbound == nil {
+		mutatorLog.Info("WARN: allowedAudiences set on AgentRuntime CR but no inbound pipeline; setting has no effect")
+		return
+	}
+	plugins, _ := inbound["plugins"].([]interface{})
+	for _, p := range plugins {
+		pm, _ := p.(map[string]interface{})
+		if pm == nil || pm["name"] != "jwt-validation" {
+			continue
+		}
+		pluginCfg, _ := pm["config"].(map[string]interface{})
+		if pluginCfg == nil {
+			pluginCfg = map[string]interface{}{}
+			pm["config"] = pluginCfg
+		}
+		pluginCfg["allowed_audiences"] = audiences
+		return
+	}
+	mutatorLog.Info("WARN: allowedAudiences set on AgentRuntime CR but jwt-validation plugin not in inbound pipeline; setting has no effect")
+}
+
 // ensurePerAgentConfigMap creates or updates a per-agent ConfigMap that merges the
 // namespace-level authbridge-runtime-config with per-agent overrides (mode, listener
 // addresses, mtls). The authbridge sidecar mounts this instead of the shared ConfigMap.
@@ -762,6 +803,7 @@ func (m *PodMutator) ensurePerAgentConfigMap(
 	nsConfig *NamespaceConfig,
 	listenerOverrides map[string]string,
 	mtlsMode string,
+	allowedAudiences []string,
 ) (string, error) {
 	cmName := perAgentConfigMapName(crName)
 
@@ -794,6 +836,13 @@ func (m *PodMutator) ensurePerAgentConfigMap(
 	// the per-plugin config schema.
 	if cfg["pipeline"] == nil && nsConfig != nil {
 		cfg["pipeline"] = synthesizePipeline(nsConfig)
+	}
+
+	// Inject per-agent AllowedAudiences into the jwt-validation plugin config.
+	// This overrides any namespace-level audience setting with the per-agent value
+	// from the AgentRuntime CR's .spec.identity.allowedAudiences.
+	if len(allowedAudiences) > 0 {
+		injectAllowedAudiences(cfg, allowedAudiences)
 	}
 
 	// Override mode

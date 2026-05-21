@@ -19,6 +19,7 @@ package injector
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -43,6 +44,9 @@ type AgentRuntimeOverrides struct {
 	ClientRegistrationRealm         *string
 	AdminCredentialsSecretName      *string
 	AdminCredentialsSecretNamespace *string
+
+	// Identity — from .spec.identity.allowedAudiences
+	AllowedAudiences []string
 
 	// Observability — from .spec.trace
 	TraceEndpoint     *string
@@ -107,6 +111,11 @@ func extractOverrides(rt *agentv1alpha1.AgentRuntime) *AgentRuntimeOverrides {
 	if rt.Spec.Identity != nil && rt.Spec.Identity.SPIFFE != nil && rt.Spec.Identity.SPIFFE.TrustDomain != "" {
 		td := rt.Spec.Identity.SPIFFE.TrustDomain
 		overrides.SpiffeTrustDomain = &td
+	}
+
+	// .spec.identity.allowedAudiences — clone to decouple from CR memory
+	if rt.Spec.Identity != nil && len(rt.Spec.Identity.AllowedAudiences) > 0 {
+		overrides.AllowedAudiences = slices.Clone(rt.Spec.Identity.AllowedAudiences)
 	}
 
 	// .spec.trace.endpoint
