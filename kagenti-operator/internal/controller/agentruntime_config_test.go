@@ -258,6 +258,46 @@ var _ = Describe("AgentRuntime Config", func() {
 			Expect(r1.Hash).NotTo(Equal(r2.Hash))
 		})
 
+		It("should change when MTLSMode flips on the CR", func() {
+			// CR-side parallel to the CM-edit test below: spec.mtlsMode
+			// must feed the hash so flipping disabled→strict on a CR
+			// rolls the workload. Without an explicit assertion a
+			// future refactor that drops MTLSMode from resolvedConfig
+			// would silently regress rollout-on-CR-edit.
+			specOff := &agentv1alpha1.AgentRuntimeSpec{
+				Type:      agentv1alpha1.RuntimeTypeAgent,
+				TargetRef: agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "hash-mtls-cr"},
+				MTLSMode:  "disabled",
+			}
+			specOn := &agentv1alpha1.AgentRuntimeSpec{
+				Type:      agentv1alpha1.RuntimeTypeAgent,
+				TargetRef: agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "hash-mtls-cr"},
+				MTLSMode:  "strict",
+			}
+
+			r1, _ := ComputeConfigHash(ctx, k8sClient, namespace, specOff)
+			r2, _ := ComputeConfigHash(ctx, k8sClient, namespace, specOn)
+			Expect(r1.Hash).NotTo(Equal(r2.Hash))
+		})
+
+		It("should change when AuthBridgeMode flips on the CR", func() {
+			// Bonus: AuthBridgeMode rollouts had a pre-existing gap
+			// (not in resolvedConfig) that this PR closed. Lock it.
+			specA := &agentv1alpha1.AgentRuntimeSpec{
+				Type:           agentv1alpha1.RuntimeTypeAgent,
+				TargetRef:      agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "hash-abm-cr"},
+				AuthBridgeMode: "proxy-sidecar",
+			}
+			specB := &agentv1alpha1.AgentRuntimeSpec{
+				Type:           agentv1alpha1.RuntimeTypeAgent,
+				TargetRef:      agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "hash-abm-cr"},
+				AuthBridgeMode: "lite",
+			}
+			r1, _ := ComputeConfigHash(ctx, k8sClient, namespace, specA)
+			r2, _ := ComputeConfigHash(ctx, k8sClient, namespace, specB)
+			Expect(r1.Hash).NotTo(Equal(r2.Hash))
+		})
+
 		It("should change when authbridge-runtime-config edits", func() {
 			// Edits to the namespace authbridge-runtime-config (which the
 			// admission webhook reads at pod creation) must roll

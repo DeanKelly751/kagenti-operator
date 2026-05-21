@@ -79,6 +79,15 @@ type resolvedConfig struct {
 	// pipelines/listener/mtls config drift through here in any shape and
 	// we want any byte change to roll the workload. Empty string when
 	// the ConfigMap doesn't exist in the namespace.
+	//
+	// Operational note: a single edit to authbridge-runtime-config
+	// re-hashes every AgentRuntime in the namespace and reconciles them
+	// in a burst. Kubernetes sequences the actual pod rolls per
+	// Deployment, but the controller's reconcile load scales linearly
+	// with the number of AgentRuntimes. For typical small namespaces
+	// (single-digit agents) this is fine; in larger deployments,
+	// formatting / whitespace edits to this CM during peak hours will
+	// trigger a noticeable rollout fan-out.
 	AuthBridgeRuntime string `json:"authBridgeRuntime,omitempty"`
 }
 

@@ -238,18 +238,33 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 	// ServiceAccount, container env). Mode-compat validation
 	// (mtlsMode incompatible with envoy-sidecar) runs in the
 	// AgentRuntime validating webhook upstream of pod admission.
-	mtlsMode := MTLSModeDisabled
-	mtlsSource := "default"
+	// Resolution chain: CR > namespace > "disabled". An explicit
+	// CR value (including "disabled") pins; the namespace fallback
+	// only fires when the CR doesn't set the field at all.
+	// arOverrides.MTLSMode is the sentinel — extractOverrides only
+	// populates it when Spec.MTLSMode is non-empty.
+	mtlsMode := ""
+	mtlsSource := ""
 	if arOverrides != nil && arOverrides.MTLSMode != nil {
 		mtlsMode = *arOverrides.MTLSMode
 		mtlsSource = "agentruntime-cr"
 	}
-	if mtlsMode == MTLSModeDisabled {
+	if mtlsMode == "" {
 		if m := ExtractMTLSMode(nsConfig.AuthBridgeRuntimeYAML); m != "" {
 			mtlsMode = m
 			mtlsSource = "namespace-configmap"
 		}
 	}
+	if mtlsMode == "" {
+		mtlsMode = MTLSModeDisabled
+		mtlsSource = "default"
+	}
+	// Defense in depth: the CRD enum check rejects unknown values at
+	// the API server, but the namespace ConfigMap and any future
+	// non-CRD source feed in raw strings. A typo (e.g. "strikt") would
+	// otherwise flow through unchecked. Same defensive pattern as the
+	// authBridgeMode resolution above; do not drop this switch as
+	// "redundant with CRD validation" — it covers paths the CRD doesn't.
 	switch mtlsMode {
 	case MTLSModeDisabled, MTLSModePermissive, MTLSModeStrict:
 		// recognized, keep as-is

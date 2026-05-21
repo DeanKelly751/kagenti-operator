@@ -112,6 +112,13 @@ type AgentRuntimeSpec struct {
 	// mtls.mode > "disabled". Setting mtlsMode != disabled implicitly
 	// requires SPIRE — the operator auto-enables spire for the workload.
 	//
+	// CR-empty vs CR="disabled" are observably different in
+	// `kubectl get agentruntime -o yaml` (the former omits the field,
+	// the latter shows mtlsMode: disabled) but produce the same
+	// effective mode: empty falls through to the namespace ConfigMap,
+	// "disabled" is an explicit override that pins mode off even when
+	// the namespace default is non-disabled.
+	//
 	// Note: changing mtlsMode triggers a pod rollout because authbridge
 	// cannot hot-reload mTLS config (the byte-peek listener is wired at
 	// process start).
