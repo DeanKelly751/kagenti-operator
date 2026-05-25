@@ -20,6 +20,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -168,7 +170,7 @@ func (r *OtelBootstrapRunnable) reconcileIngressCA(ctx context.Context, log logr
 
 	existing := &corev1.ConfigMap{}
 	existingKey := types.NamespacedName{Name: ingressCAConfigMap, Namespace: r.Namespace}
-	if err := r.Client.Get(ctx, existingKey, existing); err != nil {
+	if err := r.APIReader.Get(ctx, existingKey, existing); err != nil {
 		if !errors.IsNotFound(err) {
 			return fmt.Errorf("checking existing %s ConfigMap: %w", ingressCAConfigMap, err)
 		}
@@ -184,10 +186,17 @@ func (r *OtelBootstrapRunnable) reconcileIngressCA(ctx context.Context, log logr
 			Data: map[string]string{caBundleKey: caBundle},
 		}
 		if err := r.Client.Create(ctx, cm); err != nil {
-			return fmt.Errorf("creating %s ConfigMap: %w", ingressCAConfigMap, err)
+			if !errors.IsAlreadyExists(err) {
+				return fmt.Errorf("creating %s ConfigMap: %w", ingressCAConfigMap, err)
+			}
+			log.Info("ConfigMap appeared between check and create, will update", "name", ingressCAConfigMap)
+			if err := r.APIReader.Get(ctx, existingKey, existing); err != nil {
+				return fmt.Errorf("re-reading %s ConfigMap: %w", ingressCAConfigMap, err)
+			}
+		} else {
+			log.Info("Created ingress CA ConfigMap", "name", ingressCAConfigMap)
+			return nil
 		}
-		log.Info("Created ingress CA ConfigMap", "name", ingressCAConfigMap)
-		return nil
 	}
 
 	if existing.Data[caBundleKey] == caBundle {
@@ -196,6 +205,11 @@ func (r *OtelBootstrapRunnable) reconcileIngressCA(ctx context.Context, log logr
 	}
 
 	existing.Data = map[string]string{caBundleKey: caBundle}
+	if existing.Labels == nil {
+		existing.Labels = map[string]string{}
+	}
+	existing.Labels["app.kubernetes.io/managed-by"] = "kagenti-operator"
+	existing.Labels["app.kubernetes.io/component"] = "otel-bootstrap"
 	if err := r.Client.Update(ctx, existing); err != nil {
 		return fmt.Errorf("updating %s ConfigMap: %w", ingressCAConfigMap, err)
 	}
@@ -206,14 +220,14 @@ func (r *OtelBootstrapRunnable) reconcileIngressCA(ctx context.Context, log logr
 // reconcileCollectorConfig discovers available components and assembles the
 // OTel collector ConfigMap from preset configurations.
 func (r *OtelBootstrapRunnable) reconcileCollectorConfig(ctx context.Context, log logr.Logger, isOCP bool) error {
-	mlflowAvailable, mlflowNamespace, err := r.discoverMLflow(ctx, log)
+	mf, err := r.discoverMLflow(ctx, log)
 	if err != nil {
 		return err
 	}
 
 	phoenixAvailable := r.discoverPhoenix(ctx, log)
 
-	config, err := assembleCollectorConfig(isOCP, mlflowAvailable, mlflowNamespace, phoenixAvailable)
+	config, err := assembleCollectorConfig(isOCP, mf, phoenixAvailable)
 	if err != nil {
 		return fmt.Errorf("assembling collector config: %w", err)
 	}
@@ -228,7 +242,7 @@ func (r *OtelBootstrapRunnable) reconcileCollectorConfig(ctx context.Context, lo
 
 	existing := &corev1.ConfigMap{}
 	key := types.NamespacedName{Name: collectorConfigMapName, Namespace: r.Namespace}
-	if err := r.Client.Get(ctx, key, existing); err != nil {
+	if err := r.APIReader.Get(ctx, key, existing); err != nil {
 		if !errors.IsNotFound(err) {
 			return fmt.Errorf("checking existing collector ConfigMap: %w", err)
 		}
@@ -247,11 +261,18 @@ func (r *OtelBootstrapRunnable) reconcileCollectorConfig(ctx context.Context, lo
 			Data: map[string]string{configMapDataKey: configStr},
 		}
 		if err := r.Client.Create(ctx, cm); err != nil {
-			return fmt.Errorf("creating collector ConfigMap: %w", err)
+			if !errors.IsAlreadyExists(err) {
+				return fmt.Errorf("creating collector ConfigMap: %w", err)
+			}
+			log.Info("ConfigMap appeared between check and create, will update", "name", collectorConfigMapName)
+			if err := r.APIReader.Get(ctx, key, existing); err != nil {
+				return fmt.Errorf("re-reading collector ConfigMap: %w", err)
+			}
+		} else {
+			log.Info("Created OTel collector ConfigMap", "components",
+				componentSummary(mf.available, phoenixAvailable))
+			return r.rolloutRestartCollector(ctx, log, configHash)
 		}
-		log.Info("Created OTel collector ConfigMap", "components",
-			componentSummary(mlflowAvailable, phoenixAvailable))
-		return r.rolloutRestartCollector(ctx, log, configHash)
 	}
 
 	existingHash := existing.Annotations[restartAnnotation]
@@ -265,60 +286,105 @@ func (r *OtelBootstrapRunnable) reconcileCollectorConfig(ctx context.Context, lo
 		existing.Annotations = make(map[string]string)
 	}
 	existing.Annotations[restartAnnotation] = configHash
+	if existing.Labels == nil {
+		existing.Labels = map[string]string{}
+	}
+	existing.Labels["app.kubernetes.io/managed-by"] = "kagenti-operator"
+	existing.Labels["app.kubernetes.io/component"] = "otel-bootstrap"
 	if err := r.Client.Update(ctx, existing); err != nil {
 		return fmt.Errorf("updating collector ConfigMap: %w", err)
 	}
 	log.Info("Updated OTel collector ConfigMap", "components",
-		componentSummary(mlflowAvailable, phoenixAvailable))
+		componentSummary(mf.available, phoenixAvailable))
 
 	return r.rolloutRestartCollector(ctx, log, configHash)
 }
 
+// mlflowInfo holds the discovered MLflow endpoint and workspace namespace.
+type mlflowInfo struct {
+	available   bool
+	tracesURL   string // in-cluster traces endpoint (e.g. https://mlflow.ns.svc:8443/v1/traces)
+	workspaceNS string // namespace for x-mlflow-workspace header
+}
+
 // discoverMLflow checks for the MLflow CRD and, if present, discovers the
-// MLflow CR to derive the namespace where the service runs.
-func (r *OtelBootstrapRunnable) discoverMLflow(ctx context.Context, log logr.Logger) (available bool, namespace string, err error) {
+// MLflow CR to derive the in-cluster endpoint and workspace namespace.
+func (r *OtelBootstrapRunnable) discoverMLflow(ctx context.Context, log logr.Logger) (*mlflowInfo, error) {
 	crdExists, err := r.mlflowCRDPresent(ctx)
 	if err != nil {
-		return false, "", fmt.Errorf("checking MLflow CRD: %w", err)
+		return nil, fmt.Errorf("checking MLflow CRD: %w", err)
 	}
 	if !crdExists {
 		log.Info("MLflow CRD (mlflows.mlflow.opendatahub.io) not found. " +
 			"MLflow presets will be skipped. If the MLflow operator is installed later, " +
 			"restart the kagenti-operator pod to pick up MLflow configuration.")
-		return false, "", nil
+		return &mlflowInfo{}, nil
 	}
 
 	log.Info("MLflow CRD detected, discovering MLflow CR")
 
 	list := &mlflow.MLflowList{}
-	if err := r.Client.List(ctx, list); err != nil {
+	if err := r.APIReader.List(ctx, list); err != nil {
 		log.Info("Could not list MLflow CRs, skipping MLflow presets", "error", err)
-		return false, "", nil
+		return &mlflowInfo{}, nil
 	}
 
 	for i := range list.Items {
 		cr := &list.Items[i]
 		if meta.IsStatusConditionTrue(cr.Status.Conditions, "Available") {
-			log.Info("Found available MLflow CR",
-				"name", cr.Name, "namespace", cr.Namespace, "url", cr.Status.URL)
-			return true, cr.Namespace, nil
+			info := mlflowInfoFromCR(cr, log)
+			return info, nil
 		}
 	}
 
 	log.Info("MLflow CRD present but no Available MLflow CR found, waiting for service readiness")
-	available, namespace, err = r.waitForMLflowService(ctx, log)
+	info, err := r.waitForMLflowService(ctx, log)
 	if err != nil {
 		log.Info("MLflow service did not become ready within timeout, skipping MLflow presets",
 			"error", err)
-		return false, "", nil
+		return &mlflowInfo{}, nil
 	}
-	return available, namespace, nil
+	return info, nil
+}
+
+// mlflowInfoFromCR extracts the in-cluster endpoint and workspace namespace
+// from an MLflow CR. The MLflow CRD is cluster-scoped, so cr.Namespace is
+// always empty; we derive the namespace from status.address.url instead
+// (e.g. "https://mlflow.redhat-ods-applications.svc:8443").
+func mlflowInfoFromCR(cr *mlflow.MLflow, log logr.Logger) *mlflowInfo {
+	info := &mlflowInfo{available: true}
+
+	if cr.Status.Address != nil && cr.Status.Address.URL != "" {
+		parsed, err := url.Parse(cr.Status.Address.URL)
+		if err == nil {
+			hostname := parsed.Hostname()
+			parts := strings.SplitN(hostname, ".", 3)
+			if len(parts) >= 2 {
+				info.workspaceNS = parts[1]
+			}
+			info.tracesURL = fmt.Sprintf("%s://%s/v1/traces", parsed.Scheme, parsed.Host)
+			log.Info("Found available MLflow CR",
+				"name", cr.Name, "addressURL", cr.Status.Address.URL,
+				"tracesURL", info.tracesURL, "workspaceNS", info.workspaceNS)
+			return info
+		}
+		log.Info("Could not parse MLflow address URL, falling back", "url", cr.Status.Address.URL, "error", err)
+	}
+
+	if cr.Status.URL != "" {
+		info.tracesURL = strings.TrimRight(cr.Status.URL, "/") + "/v1/traces"
+		log.Info("Found available MLflow CR (using external URL)",
+			"name", cr.Name, "url", cr.Status.URL, "tracesURL", info.tracesURL)
+	} else {
+		log.Info("Found available MLflow CR but no endpoint URL in status",
+			"name", cr.Name)
+	}
+	return info
 }
 
 // waitForMLflowService retries with backoff until an MLflow CR becomes Available.
-func (r *OtelBootstrapRunnable) waitForMLflowService(ctx context.Context, log logr.Logger) (bool, string, error) {
-	var resultAvailable bool
-	var resultNamespace string
+func (r *OtelBootstrapRunnable) waitForMLflowService(ctx context.Context, log logr.Logger) (*mlflowInfo, error) {
+	var result *mlflowInfo
 
 	backoff := wait.Backoff{
 		Duration: defaultBackoffInitial,
@@ -332,17 +398,14 @@ func (r *OtelBootstrapRunnable) waitForMLflowService(ctx context.Context, log lo
 
 	err := wait.ExponentialBackoffWithContext(timeoutCtx, backoff, func(ctx context.Context) (bool, error) {
 		list := &mlflow.MLflowList{}
-		if err := r.Client.List(ctx, list); err != nil {
+		if err := r.APIReader.List(ctx, list); err != nil {
 			log.V(1).Info("Retrying MLflow CR list", "error", err)
 			return false, nil
 		}
 		for i := range list.Items {
 			cr := &list.Items[i]
 			if meta.IsStatusConditionTrue(cr.Status.Conditions, "Available") {
-				log.Info("MLflow CR became Available",
-					"name", cr.Name, "namespace", cr.Namespace)
-				resultAvailable = true
-				resultNamespace = cr.Namespace
+				result = mlflowInfoFromCR(cr, log)
 				return true, nil
 			}
 		}
@@ -350,7 +413,10 @@ func (r *OtelBootstrapRunnable) waitForMLflowService(ctx context.Context, log lo
 		return false, nil
 	})
 
-	return resultAvailable, resultNamespace, err
+	if result == nil {
+		result = &mlflowInfo{}
+	}
+	return result, err
 }
 
 // mlflowCRDPresent checks if the mlflows.mlflow.opendatahub.io CRD is installed.
@@ -380,7 +446,7 @@ func (r *OtelBootstrapRunnable) mlflowCRDPresent(ctx context.Context) (bool, err
 func (r *OtelBootstrapRunnable) discoverPhoenix(ctx context.Context, log logr.Logger) bool {
 	svc := &corev1.Service{}
 	key := types.NamespacedName{Name: phoenixServiceName, Namespace: r.Namespace}
-	if err := r.Client.Get(ctx, key, svc); err != nil {
+	if err := r.APIReader.Get(ctx, key, svc); err != nil {
 		log.V(1).Info("Phoenix service not found, skipping Phoenix preset",
 			"namespace", r.Namespace)
 		return false
@@ -394,7 +460,7 @@ func (r *OtelBootstrapRunnable) discoverPhoenix(ctx context.Context, log logr.Lo
 func (r *OtelBootstrapRunnable) rolloutRestartCollector(ctx context.Context, log logr.Logger, configHash string) error {
 	dep := &appsv1.Deployment{}
 	key := types.NamespacedName{Name: collectorDeployment, Namespace: r.Namespace}
-	if err := r.Client.Get(ctx, key, dep); err != nil {
+	if err := r.APIReader.Get(ctx, key, dep); err != nil {
 		if errors.IsNotFound(err) {
 			log.Info("OTel collector Deployment not found, skipping rollout restart")
 			return nil
@@ -421,7 +487,7 @@ func (r *OtelBootstrapRunnable) rolloutRestartCollector(ctx context.Context, log
 
 // assembleCollectorConfig builds the complete OTel collector YAML config by
 // merging the base config with component-specific presets.
-func assembleCollectorConfig(isOCP, mlflowAvailable bool, mlflowNamespace string, phoenixAvailable bool) (map[string]any, error) {
+func assembleCollectorConfig(isOCP bool, mf *mlflowInfo, phoenixAvailable bool) (map[string]any, error) {
 	config, err := parsePreset(baseConfig)
 	if err != nil {
 		return nil, fmt.Errorf("parsing base config: %w", err)
@@ -438,13 +504,17 @@ func assembleCollectorConfig(isOCP, mlflowAvailable bool, mlflowNamespace string
 		hasComponentPipeline = true
 	}
 
-	if mlflowAvailable {
+	if mf.available {
 		mlflowCfg, err := parsePreset(mlflowPreset)
 		if err != nil {
 			return nil, fmt.Errorf("parsing mlflow preset: %w", err)
 		}
 		mergeDeep(config, mlflowCfg)
 		hasComponentPipeline = true
+
+		if mf.tracesURL != "" {
+			setMLflowTracesEndpoint(config, mf.tracesURL)
+		}
 
 		if isOCP {
 			rhoaiAuth, err := parsePreset(rhoaiMlflowAuthPreset)
@@ -454,7 +524,7 @@ func assembleCollectorConfig(isOCP, mlflowAvailable bool, mlflowNamespace string
 			mergeDeep(config, rhoaiAuth)
 
 			clearMLflowExporterTLS(config)
-			setMLflowBearerTokenAuth(config, mlflowNamespace)
+			setMLflowBearerTokenAuth(config, mf.workspaceNS)
 		} else {
 			mlflowAuth, err := parsePreset(mlflowAuthPreset)
 			if err != nil {
@@ -474,11 +544,25 @@ func assembleCollectorConfig(isOCP, mlflowAvailable bool, mlflowNamespace string
 		mergeDeep(config, defaultCfg)
 	}
 
-	if isOCP && mlflowAvailable {
+	if isOCP && mf.available {
 		setIngressCATLS(config)
 	}
 
 	return config, nil
+}
+
+// setMLflowTracesEndpoint overrides the hardcoded preset endpoint with the
+// dynamically discovered in-cluster URL from the MLflow CR.
+func setMLflowTracesEndpoint(config map[string]any, tracesURL string) {
+	exporters, ok := config["exporters"].(map[string]any)
+	if !ok {
+		return
+	}
+	mlflowExp, ok := exporters["otlphttp/mlflow"].(map[string]any)
+	if !ok {
+		return
+	}
+	mlflowExp["traces_endpoint"] = tracesURL
 }
 
 // parsePreset unmarshals a YAML string into a map.

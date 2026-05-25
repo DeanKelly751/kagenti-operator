@@ -483,7 +483,7 @@ func TestConfigMapChanged_TriggersRestart(t *testing.T) {
 // --- assembleCollectorConfig unit tests ---
 
 func TestAssembleConfig_DefaultOnly(t *testing.T) {
-	cfg, err := assembleCollectorConfig(false, false, "", false)
+	cfg, err := assembleCollectorConfig(false, &mlflowInfo{}, false)
 	if err != nil {
 		t.Fatalf("assembleCollectorConfig failed: %v", err)
 	}
@@ -502,7 +502,7 @@ func TestAssembleConfig_DefaultOnly(t *testing.T) {
 }
 
 func TestAssembleConfig_PhoenixAndMLflow(t *testing.T) {
-	cfg, err := assembleCollectorConfig(false, true, "mlflow-ns", true)
+	cfg, err := assembleCollectorConfig(false, &mlflowInfo{available: true, tracesURL: "http://mlflow.mlflow-ns.svc:5000/v1/traces", workspaceNS: "mlflow-ns"}, true)
 	if err != nil {
 		t.Fatalf("assembleCollectorConfig failed: %v", err)
 	}
@@ -522,7 +522,7 @@ func TestAssembleConfig_PhoenixAndMLflow(t *testing.T) {
 }
 
 func TestAssembleConfig_OCP_MLflow_IngressCATLS(t *testing.T) {
-	cfg, err := assembleCollectorConfig(true, true, "rhoai-ns", false)
+	cfg, err := assembleCollectorConfig(true, &mlflowInfo{available: true, tracesURL: "https://mlflow.rhoai-ns.svc:8443/v1/traces", workspaceNS: "rhoai-ns"}, false)
 	if err != nil {
 		t.Fatalf("assembleCollectorConfig failed: %v", err)
 	}
