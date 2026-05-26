@@ -46,6 +46,7 @@ import (
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 	"github.com/kagenti/operator/internal/agentcard"
+	"github.com/kagenti/operator/internal/bootstrap"
 	"github.com/kagenti/operator/internal/controller"
 	"github.com/kagenti/operator/internal/keycloak"
 	"github.com/kagenti/operator/internal/mlflow"
@@ -100,6 +101,7 @@ func main() {
 	var signatureAuditMode bool
 	var enforceNetworkPolicies bool
 	var enableMLflow bool
+	var enableOtelBootstrap bool
 
 	var enableCardDiscovery bool
 
@@ -143,6 +145,8 @@ func main() {
 		"Create NetworkPolicies to restrict traffic for agents with unverified signatures")
 	flag.BoolVar(&enableMLflow, "enable-mlflow", false,
 		"Enable MLflow experiment tracking integration")
+	flag.BoolVar(&enableOtelBootstrap, "enable-otel-bootstrap", false,
+		"Enable OTel collector bootstrap (ingress CA trust and ConfigMap assembly) at startup")
 
 	flag.BoolVar(&enableCardDiscovery, "enable-card-discovery", false,
 		"Enable automatic agent card discovery from AgentRuntime workloads into status.card")
@@ -517,6 +521,21 @@ func main() {
 		}
 	}
 	// +kubebuilder:scaffold:builder
+
+	if enableOtelBootstrap {
+		otelBootstrap := &bootstrap.OtelBootstrapRunnable{
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Config:    mgr.GetConfig(),
+			Namespace: getOperatorNamespace(),
+			Log:       ctrl.Log.WithName("bootstrap"),
+		}
+		if err := mgr.Add(otelBootstrap); err != nil {
+			setupLog.Error(err, "unable to add OTel bootstrap runnable")
+			os.Exit(1)
+		}
+		setupLog.Info("OTel collector bootstrap enabled")
+	}
 
 	if metricsCertWatcher != nil {
 		setupLog.Info("Adding metrics certificate watcher to manager")

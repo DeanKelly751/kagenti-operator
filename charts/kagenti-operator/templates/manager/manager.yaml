@@ -34,6 +34,9 @@ spec:
             {{- if .Values.mlflow.enable }}
             - "--enable-mlflow=true"
             {{- end }}
+            {{- if .Values.otelBootstrap.enable }}
+            - "--enable-otel-bootstrap=true"
+            {{- end }}
             {{- if .Values.verifiedFetch.enabled }}
             - "--enable-verified-fetch=true"
             - "--verified-fetch-spiffe-socket={{ .Values.verifiedFetch.spiffeEndpointSocket }}"

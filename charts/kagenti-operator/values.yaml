@@ -96,6 +96,14 @@ enforceNetworkPolicies: false
 mlflow:
   enable: false
 
+# [OTEL BOOTSTRAP]: OTel collector bootstrap at operator startup.
+# When enabled, the operator assembles the OTel collector ConfigMap from
+# detected components (Phoenix, MLflow) and projects the OpenShift ingress
+# CA into the operator namespace (OCP only). Replaces the Helm-based
+# otel-ingress-ca-job and kagenti.otel.collectorConfig helper.
+otelBootstrap:
+  enable: false
+
 # [VERIFIED FETCH]: mTLS-authenticated fetch of agent cards via SPIFFE identity (Phase 1)
 # When enabled, the operator uses go-spiffe mTLS to fetch agent cards and records
 # the agent's attested SPIFFE ID in CRD status.
