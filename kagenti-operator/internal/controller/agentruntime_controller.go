@@ -560,7 +560,7 @@ func (r *AgentRuntimeReconciler) resolveServiceForWorkload(ctx context.Context, 
 // their lifecycle is managed by the sandbox controller.
 func (r *AgentRuntimeReconciler) checkWorkloadReady(ctx context.Context, namespace string, ref agentv1alpha1.TargetRef) (bool, string) {
 	switch ref.Kind {
-	case "Deployment":
+	case "Deployment": //nolint:goconst
 		dep := &appsv1.Deployment{}
 		if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: namespace}, dep); err != nil {
 			return false, fmt.Sprintf("failed to get Deployment %s: %v", ref.Name, err)
@@ -568,7 +568,7 @@ func (r *AgentRuntimeReconciler) checkWorkloadReady(ctx context.Context, namespa
 		if dep.Status.ReadyReplicas == 0 {
 			return false, fmt.Sprintf("Deployment %s has 0 ready replicas", ref.Name)
 		}
-	case "StatefulSet":
+	case "StatefulSet": //nolint:goconst
 		sts := &appsv1.StatefulSet{}
 		if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: namespace}, sts); err != nil {
 			return false, fmt.Sprintf("failed to get StatefulSet %s: %v", ref.Name, err)
