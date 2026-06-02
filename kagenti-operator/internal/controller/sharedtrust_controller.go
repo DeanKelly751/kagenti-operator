@@ -396,7 +396,7 @@ func CertManagerCRDExists(cfg *rest.Config) bool {
 	defer cancel()
 
 	var found bool
-	err = wait.PollUntilContextTimeout(ctx, 5*time.Second, 30*time.Second, true, func(ctx context.Context) (bool, error) {
+	_ = wait.PollUntilContextTimeout(ctx, 5*time.Second, 30*time.Second, true, func(ctx context.Context) (bool, error) {
 		resources, err := dc.ServerResourcesForGroupVersion("cert-manager.io/v1")
 		if err != nil {
 			sharedTrustLogger.Info("cert-manager CRDs not found, retrying", "error", err)
