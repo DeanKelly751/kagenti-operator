@@ -86,15 +86,7 @@ type resolvedConfig struct {
 	// (single-digit agents) this is fine; in larger deployments,
 	// formatting / whitespace edits to this CM during peak hours will
 	// trigger a noticeable rollout fan-out.
-	AuthBridgeRuntime string        `json:"authBridgeRuntime,omitempty"`
-	Skills            []skillConfig `json:"skills,omitempty"`
-}
-
-type skillConfig struct {
-	Name       string `json:"name"`
-	Image      string `json:"image"`
-	MountPath  string `json:"mountPath"`
-	PullPolicy string `json:"pullPolicy,omitempty"`
+	AuthBridgeRuntime string `json:"authBridgeRuntime,omitempty"`
 }
 
 // ConfigResult holds the computed hash and any warnings from the config resolution.
@@ -173,15 +165,6 @@ func resolveConfig(ctx context.Context, c client.Reader, namespace string, spec 
 
 	resolved.AuthBridgeMode = spec.AuthBridgeMode
 	resolved.MTLSMode = spec.MTLSMode
-
-	for _, s := range spec.Skills {
-		resolved.Skills = append(resolved.Skills, skillConfig{
-			Name:       s.Name,
-			Image:      s.Image,
-			MountPath:  s.MountPath,
-			PullPolicy: string(s.PullPolicy),
-		})
-	}
 
 	return resolved, warnings
 }

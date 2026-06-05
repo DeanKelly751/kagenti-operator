@@ -22,10 +22,11 @@ type FeatureGates struct {
 	//   true            → resolved path: webhook reads namespace ConfigMaps at
 	//                     admission time and injects literal env var values.
 	PerWorkloadConfigResolution bool `json:"perWorkloadConfigResolution" yaml:"perWorkloadConfigResolution"`
-	// SkillImageVolumes controls whether the AgentRuntime controller mounts OCI
-	// skill images as Kubernetes ImageVolumes into agent pods. Requires
-	// Kubernetes 1.31+ with the ImageVolume feature gate enabled.
-	SkillImageVolumes bool `json:"skillImageVolumes" yaml:"skillImageVolumes"`
+	// SkillDiscovery controls whether the AgentRuntime controller reads the
+	// kagenti.io/skills annotation from target workloads and populates
+	// status.linkedSkills. When disabled, skill discovery is skipped and
+	// the SkillsDiscovered condition is not set.
+	SkillDiscovery bool `json:"skillDiscovery" yaml:"skillDiscovery"`
 }
 
 // DefaultFeatureGates returns feature gates with sidecar injection enabled for
@@ -36,6 +37,7 @@ func DefaultFeatureGates() *FeatureGates {
 		EnvoyProxy:                  true,
 		InjectTools:                 false,
 		PerWorkloadConfigResolution: false,
+		SkillDiscovery:              false,
 	}
 }
 

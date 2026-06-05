@@ -1348,45 +1348,31 @@ data:
 `
 }
 
-// combinedClusterSPIFFEIDFixture returns YAML for a ClusterSPIFFEID matching
-// the combined test namespace.
-func combinedClusterSPIFFEIDFixture() string {
-	return `apiVersion: spire.spiffe.io/v1alpha1
-kind: ClusterSPIFFEID
-metadata:
-  name: e2e-combined-test
-spec:
-  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
-  podSelector:
-    matchLabels:
-      kagenti.io/type: agent
-  namespaceSelector:
-    matchLabels:
-      kagenti-enabled: "true"
-`
-}
+// --- Skill Discovery E2E fixtures ---
 
-// --- Skill Image Volumes E2E fixtures ---
+const skillDiscoveryTestNamespace = "e2e-skill-discovery-test"
 
-const skillTestNamespace = "e2e-skills-test"
-
-func skillTargetDeploymentFixture() string {
+// skillDiscoveryDeploymentFixture returns YAML for a Deployment with the
+// kagenti.io/skills annotation set by the user (or kagenti backend).
+func skillDiscoveryDeploymentFixture() string {
 	return `apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: skill-agent-target
-  namespace: ` + skillTestNamespace + `
+  name: skill-discovery-agent
+  namespace: ` + skillDiscoveryTestNamespace + `
   labels:
-    app.kubernetes.io/name: skill-agent-target
+    app.kubernetes.io/name: skill-discovery-agent
+  annotations:
+    kagenti.io/skills: '["summarizer","openshift-review"]'
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: skill-agent-target
+      app.kubernetes.io/name: skill-discovery-agent
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: skill-agent-target
+        app.kubernetes.io/name: skill-discovery-agent
         kagenti.io/inject: disabled
     spec:
       securityContext:
@@ -1406,107 +1392,157 @@ spec:
 `
 }
 
-func skillAgentRuntimeFixture() string {
+// skillDiscoveryAgentRuntimeFixture returns YAML for an AgentRuntime CR
+// targeting the skill-discovery-agent Deployment. No spec.skills — the
+// operator discovers skills from the Deployment's annotation.
+func skillDiscoveryAgentRuntimeFixture() string {
 	return `apiVersion: agent.kagenti.dev/v1alpha1
 kind: AgentRuntime
 metadata:
-  name: skill-agent-runtime
-  namespace: ` + skillTestNamespace + `
+  name: skill-discovery-agent
+  namespace: ` + skillDiscoveryTestNamespace + `
 spec:
   type: agent
   targetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: skill-agent-target
-  skills:
-    - name: resume-reviewer
-      image: registry.k8s.io/pause:3.9
-      mountPath: /agent/skills/resume-reviewer
-    - name: blog-writer
-      image: registry.k8s.io/pause:3.10
-      mountPath: /agent/skills/blog-writer
-      pullPolicy: Always
+    name: skill-discovery-agent
 `
 }
 
-func skillAgentRuntimeUpdatedFixture() string {
-	return `apiVersion: agent.kagenti.dev/v1alpha1
-kind: AgentRuntime
+// ociSkillDeploymentFixture returns YAML for a Deployment with two OCI
+// ImageVolume skills and the kagenti.io/skills annotation listing both.
+func ociSkillDeploymentFixture() string {
+	return `apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: skill-agent-runtime
-  namespace: ` + skillTestNamespace + `
+  name: oci-skill-agent
+  namespace: ` + skillDiscoveryTestNamespace + `
+  labels:
+    app.kubernetes.io/name: oci-skill-agent
+  annotations:
+    kagenti.io/skills: '["summarizer","openshift-review"]'
 spec:
-  type: agent
-  targetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: skill-agent-target
-  skills:
-    - name: resume-reviewer
-      image: registry.k8s.io/pause:3.10
-      mountPath: /agent/skills/resume-reviewer
-    - name: blog-writer
-      image: registry.k8s.io/pause:3.10
-      mountPath: /agent/skills/blog-writer
-      pullPolicy: Always
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oci-skill-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oci-skill-agent
+        kagenti.io/inject: disabled
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: registry.k8s.io/pause:3.9
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: skill-summarizer
+              mountPath: /app/skills/summarizer
+              readOnly: true
+            - name: skill-openshift-review
+              mountPath: /app/skills/openshift-review
+              readOnly: true
+      volumes:
+        - name: skill-summarizer
+          image:
+            reference: registry.k8s.io/pause:3.9
+        - name: skill-openshift-review
+          image:
+            reference: registry.k8s.io/pause:3.9
 `
 }
 
-func skillAgentRuntimeNoSkillsFixture() string {
-	return `apiVersion: agent.kagenti.dev/v1alpha1
-kind: AgentRuntime
+// ociSkillDeploymentOneSkillFixture returns the same Deployment with one skill
+// removed (openshift-review), simulating an OCI skill removal.
+func ociSkillDeploymentOneSkillFixture() string {
+	return `apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: skill-agent-runtime
-  namespace: ` + skillTestNamespace + `
+  name: oci-skill-agent
+  namespace: ` + skillDiscoveryTestNamespace + `
+  labels:
+    app.kubernetes.io/name: oci-skill-agent
+  annotations:
+    kagenti.io/skills: '["summarizer"]'
 spec:
-  type: agent
-  targetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: skill-agent-target
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oci-skill-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oci-skill-agent
+        kagenti.io/inject: disabled
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: registry.k8s.io/pause:3.9
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: skill-summarizer
+              mountPath: /app/skills/summarizer
+              readOnly: true
+      volumes:
+        - name: skill-summarizer
+          image:
+            reference: registry.k8s.io/pause:3.9
 `
 }
 
-func skillDuplicateNamesAgentRuntimeFixture() string {
+// ociSkillAgentRuntimeFixture returns YAML for an AgentRuntime CR
+// targeting the oci-skill-agent Deployment.
+func ociSkillAgentRuntimeFixture() string {
 	return `apiVersion: agent.kagenti.dev/v1alpha1
 kind: AgentRuntime
 metadata:
-  name: skill-duplicate-runtime
-  namespace: ` + skillTestNamespace + `
+  name: oci-skill-agent
+  namespace: ` + skillDiscoveryTestNamespace + `
 spec:
   type: agent
   targetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: skill-agent-target
-  skills:
-    - name: my-skill
-      image: registry.k8s.io/pause:3.9
-      mountPath: /agent/skills/my-skill
-    - name: my-skill
-      image: registry.k8s.io/pause:3.10
-      mountPath: /agent/skills/my-skill-2
+    name: oci-skill-agent
 `
 }
 
-func skillDuplicateMountPathAgentRuntimeFixture() string {
-	return `apiVersion: agent.kagenti.dev/v1alpha1
-kind: AgentRuntime
+// combinedClusterSPIFFEIDFixture returns YAML for a ClusterSPIFFEID matching
+// the combined test namespace.
+func combinedClusterSPIFFEIDFixture() string {
+	return `apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
 metadata:
-  name: skill-dup-mount-runtime
-  namespace: ` + skillTestNamespace + `
+  name: e2e-combined-test
 spec:
-  type: agent
-  targetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: skill-agent-target
-  skills:
-    - name: skill-a
-      image: registry.k8s.io/pause:3.9
-      mountPath: /agent/skills/shared
-    - name: skill-b
-      image: registry.k8s.io/pause:3.10
-      mountPath: /agent/skills/shared
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  podSelector:
+    matchLabels:
+      kagenti.io/type: agent
+  namespaceSelector:
+    matchLabels:
+      kagenti-enabled: "true"
 `
 }

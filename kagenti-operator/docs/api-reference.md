@@ -404,7 +404,7 @@ The controller merges configuration from three layers (highest priority wins):
 2. **Namespace defaults** — ConfigMap with `kagenti.io/defaults=true` label in the workload's namespace
 3. **Cluster defaults** — `kagenti-platform-config` ConfigMap in `kagenti-system`
 
-> **Note:** Feature gates (`kagenti-feature-gates`) are platform-wide policy and are **not** overrideable by namespace defaults or AgentRuntime CRs. They control which AuthBridge components (envoy proxy, SPIFFE helper, client registration) are enabled globally, and whether OCI skill image mounting (`skillImageVolumes`) is active.
+> **Note:** Feature gates (`kagenti-feature-gates`) are platform-wide policy and are **not** overrideable by namespace defaults or AgentRuntime CRs. They control which AuthBridge components (envoy proxy, SPIFFE helper, client registration) are enabled globally, and whether skill discovery (`skillDiscovery`) is active.
 
 ### Spec Fields
 
@@ -413,7 +413,6 @@ The controller merges configuration from three layers (highest priority wins):
 | `type` | string | Yes | Classifies the workload as `agent` or `tool` |
 | `targetRef` | [TargetRef](#targetref) | Yes | Identifies the workload backing this runtime (uses the same TargetRef type as AgentCard) |
 | `identity` | [IdentitySpec](#identityspec) | No | Optional per-workload identity overrides |
-| `skills` | [][SkillImageRef](#skillimageref) | No | OCI skill images to mount into the agent pod as Kubernetes ImageVolumes. Requires the `skillImageVolumes` feature gate and Kubernetes 1.31+. Max 20 items. |
 
 #### IdentitySpec
 
@@ -428,30 +427,6 @@ Configures workload identity for an AgentRuntime.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `trustDomain` | string | No | Overrides the operator-level `--spire-trust-domain` for this workload. If empty, the operator flag value is used. Must match pattern: `^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$` |
-
-#### SkillImageRef
-
-Identifies an OCI skill image to mount into the agent pod as a Kubernetes [ImageVolume](https://kubernetes.io/docs/tasks/configure-pod-container/image-volumes/). Skills are packaged as OCI images following the [skillimage](https://github.com/redhat-et/skillimage) convention (`FROM scratch` with `skill.yaml` + `SKILL.md`).
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | Yes | Unique identifier for this skill mount. Used as the volume name suffix (`skill-<name>`). Must be a valid DNS label (lowercase alphanumeric or hyphens, max 58 characters). |
-| `image` | string | Yes | OCI image reference for the skill (e.g., `ghcr.io/redhat-et/skillimage/resume-reviewer:v1.0.0`) |
-| `mountPath` | string | Yes | Absolute path where the skill image is mounted in the container. Different agent frameworks expect skills in different locations (e.g., `/agent/skills/my-skill`, `/app/.claude/skills/my-skill`). |
-| `pullPolicy` | string | No | Image pull policy: `Always`, `Never`, or `IfNotPresent`. Defaults to `Always` for `:latest` tags, `IfNotPresent` otherwise (standard Kubernetes behavior). |
-
-**Prerequisites:**
-- The `skillImageVolumes` feature gate must be enabled (defaults to `false`)
-- Kubernetes 1.31+ with the `ImageVolume` feature gate enabled on the kubelet
-- OpenShift 4.18+ (for OpenShift deployments)
-
-**Behavior:**
-- Each skill is mounted as a read-only ImageVolume at the specified `mountPath`
-- Skill changes (add, remove, image update, mount path change) trigger rolling updates via config-hash
-- Skill volumes use the `skill-` prefix and do not interfere with existing ConfigMap, Secret, or CSI volumes
-- The operator sets a `kagenti.io/skills` annotation on the target workload's metadata containing a JSON array of skill names (e.g., `["weather-forecast","resume-reviewer"]`). Downstream systems such as agent card controllers or the Kagenti UI can read this annotation to discover which skills are mounted without inspecting the pod spec. The annotation is removed when skills are cleared or the AgentRuntime is deleted.
-- On AgentRuntime deletion, all skill volumes and the `kagenti.io/skills` annotation are removed from the target workload
-- If the feature gate is disabled but skills are defined, a `SkillsMounted=False` condition is set with reason `FeatureGateDisabled`
 
 ### Labels and Annotations Applied to Target Workloads
 
@@ -468,7 +443,7 @@ The AgentRuntime controller applies the following labels and annotations to the 
 
 | Annotation | Value | Description |
 |------------|-------|-------------|
-| `kagenti.io/skills` | JSON array of skill names | Lists mounted skill names (e.g., `["weather-forecast","resume-reviewer"]`). Only set when the `skillImageVolumes` feature gate is enabled and skills are defined. Removed when skills are cleared or on AgentRuntime deletion. |
+| `kagenti.io/skills` | JSON array of skill names | Read by the operator (not set by it) to discover linked skills. Set by the kagenti backend or the user. Value is a JSON array (e.g., `["weather-forecast","resume-reviewer"]`). Populates `status.linkedSkills` when the `skillDiscovery` feature gate is enabled. |
 
 **PodTemplateSpec labels:**
 
@@ -501,9 +476,7 @@ The AgentRuntime controller applies the following labels and annotations to the 
 | `Ready` | True | `Configured` | Labels and config-hash applied to the target workload |
 | `Ready` | False | `ConfigHashError` | Failed to compute the config hash |
 | `Ready` | False | `ConfigApplyError` | Failed to apply labels/annotations to the workload |
-| `SkillsMounted` | True | `SkillsApplied` | OCI skill ImageVolumes applied to the target workload |
-| `SkillsMounted` | False | `FeatureGateDisabled` | Skills defined but `skillImageVolumes` feature gate is disabled |
-| `SkillsMounted` | False | `UnsupportedWorkloadKind` | Skills defined but the target workload kind (e.g., Sandbox) does not support skill ImageVolumes |
+| `SkillsDiscovered` | True | `SkillsFound` | Linked skills discovered from `kagenti.io/skills` annotation on the target workload |
 
 ### Admission Validation
 
@@ -569,9 +542,9 @@ spec:
     name: calculator-tool
 ```
 
-#### Agent Runtime with OCI Skill Images
+#### Agent Runtime with Skill Discovery
 
-Mount OCI-packaged skills into the agent pod. Requires the `skillImageVolumes` feature gate enabled in the `kagenti-feature-gates` ConfigMap and Kubernetes 1.31+.
+When the `skillDiscovery` feature gate is enabled, the operator reads the `kagenti.io/skills` annotation from the target workload and populates `status.linkedSkills`.
 
 ```yaml
 apiVersion: agent.kagenti.dev/v1alpha1
@@ -585,23 +558,15 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: resume-agent
-  skills:
-    - name: resume-reviewer
-      image: ghcr.io/redhat-et/skillimage/resume-reviewer:v1.0.0
-      mountPath: /agent/skills/resume-reviewer
-    - name: blog-writer
-      image: ghcr.io/redhat-et/skillimage/blog-writer:latest
-      mountPath: /agent/skills/blog-writer
-      pullPolicy: Always
 ```
 
-To enable the feature gate:
+To enable skill discovery:
 
 ```yaml
 # In the kagenti-feature-gates ConfigMap (kagenti-system namespace)
 # or via Helm values:
 featureGates:
-  skillImageVolumes: true
+  skillDiscovery: true
 ```
 
 ### kubectl Usage Examples

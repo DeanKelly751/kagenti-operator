@@ -58,8 +58,8 @@ const (
 	// AnnotationConfigHash is the annotation applied to PodTemplateSpec to trigger rolling updates.
 	AnnotationConfigHash = "kagenti.io/config-hash"
 
-	// AnnotationSkills is the annotation applied to workload metadata to advertise
-	// which skill images are mounted. Value is a JSON array of skill names.
+	// AnnotationSkills is read from target workloads to discover linked skills.
+	// Value is a JSON array of skill names, set by the kagenti backend or the user.
 	AnnotationSkills = "kagenti.io/skills"
 
 	// AnnotationRestartPending marks a Sandbox that was scaled to 0 and needs
@@ -68,10 +68,11 @@ const (
 	AnnotationRestartPending = "kagenti.io/restart-pending"
 
 	// Condition types for AgentRuntime status.
-	ConditionTypeReady          = "Ready"
-	ConditionTypeTargetResolved = "TargetResolved"
-	ConditionTypeConfigResolved = "ConfigResolved"
-	ConditionTypeCardFetched    = "CardFetched"
+	ConditionTypeReady            = "Ready"
+	ConditionTypeTargetResolved   = "TargetResolved"
+	ConditionTypeConfigResolved   = "ConfigResolved"
+	ConditionTypeCardFetched      = "CardFetched"
+	ConditionTypeSkillsDiscovered = "SkillsDiscovered"
 
 	// AnnotationLastCardFetchHash stores the change-detection key used to skip
 	// redundant card fetches when the workload's pod template has not changed.
@@ -223,29 +224,19 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// 6.5. Set SkillsMounted condition based on skills and feature gate state
-	if len(rt.Spec.Skills) > 0 {
-		fg := r.getFeatureGates()
-		if !fg.SkillImageVolumes {
-			r.setCondition(rt, ConditionTypeSkillsMounted, metav1.ConditionFalse, "FeatureGateDisabled",
-				"Skills defined but skillImageVolumes feature gate is disabled")
-			if r.Recorder != nil {
-				r.Recorder.Event(rt, corev1.EventTypeWarning, "SkillsNotMounted",
-					"skillImageVolumes feature gate is disabled; enable it to mount OCI skill images")
-			}
-		} else if rt.Spec.TargetRef.Kind == KindSandbox {
-			r.setCondition(rt, ConditionTypeSkillsMounted, metav1.ConditionFalse, "UnsupportedWorkloadKind",
-				"Sandbox workloads do not support skill ImageVolumes")
-			if r.Recorder != nil {
-				r.Recorder.Event(rt, corev1.EventTypeWarning, "SkillsNotMounted",
-					"Sandbox workloads do not support skill ImageVolumes")
-			}
+	// 6.5. Discover linked skills from workload annotation (set by kagenti backend or user)
+	fg := r.getFeatureGates()
+	if fg.SkillDiscovery {
+		rt.Status.LinkedSkills = r.readLinkedSkills(ctx, rt)
+		if len(rt.Status.LinkedSkills) > 0 {
+			r.setCondition(rt, ConditionTypeSkillsDiscovered, metav1.ConditionTrue, "SkillsFound",
+				fmt.Sprintf("%d linked skill(s) discovered from workload annotation", len(rt.Status.LinkedSkills)))
 		} else {
-			r.setCondition(rt, ConditionTypeSkillsMounted, metav1.ConditionTrue, "SkillsApplied",
-				fmt.Sprintf("%d skill image(s) mounted", len(rt.Spec.Skills)))
+			meta.RemoveStatusCondition(&rt.Status.Conditions, ConditionTypeSkillsDiscovered)
 		}
 	} else {
-		meta.RemoveStatusCondition(&rt.Status.Conditions, ConditionTypeSkillsMounted)
+		rt.Status.LinkedSkills = nil
+		meta.RemoveStatusCondition(&rt.Status.Conditions, ConditionTypeSkillsDiscovered)
 	}
 
 	// 7. Count configured pods
@@ -343,27 +334,6 @@ func (r *AgentRuntimeReconciler) applyWorkloadConfig(ctx context.Context, rt *ag
 		workloadLabels[LabelManagedBy] = LabelManagedByValue
 		acc.obj.SetLabels(workloadLabels)
 
-		// Advertise mounted skills on workload metadata
-		workloadAnnotations := acc.obj.GetAnnotations()
-		if workloadAnnotations == nil {
-			workloadAnnotations = make(map[string]string)
-		}
-		fg := r.getFeatureGates()
-		if fg.SkillImageVolumes && len(rt.Spec.Skills) > 0 {
-			names := make([]string, 0, len(rt.Spec.Skills))
-			for _, s := range rt.Spec.Skills {
-				names = append(names, s.Name)
-			}
-			b, err := json.Marshal(names)
-			if err != nil {
-				logger.Error(err, "failed to marshal skill names")
-			}
-			workloadAnnotations[AnnotationSkills] = string(b)
-		} else {
-			delete(workloadAnnotations, AnnotationSkills)
-		}
-		acc.obj.SetAnnotations(workloadAnnotations)
-
 		// Apply labels to PodTemplateSpec
 		podLabels := acc.getPodLabels(acc.obj)
 		if podLabels == nil {
@@ -379,13 +349,6 @@ func (r *AgentRuntimeReconciler) applyWorkloadConfig(ctx context.Context, rt *ag
 		}
 		podAnnotations[AnnotationConfigHash] = configHash
 		acc.setPodAnnotations(acc.obj, podAnnotations)
-
-		// Apply skill ImageVolumes when feature gate is enabled
-		if acc.getPodSpec != nil {
-			if fg.SkillImageVolumes {
-				reconcileSkillVolumes(acc.getPodSpec(acc.obj), rt.Spec.Skills)
-			}
-		}
 
 		logger.Info("Applying config to workload",
 			"workload", ref.Name,
@@ -508,6 +471,47 @@ func (r *AgentRuntimeReconciler) countConfiguredPods(ctx context.Context, rt *ag
 		}
 	}
 	return count, nil
+}
+
+// readLinkedSkills reads the kagenti.io/skills annotation from the target
+// workload and returns the skill names. This annotation is set by the kagenti
+// backend (PR #1440) or manually by the user — the operator reads but never
+// sets it.
+func (r *AgentRuntimeReconciler) readLinkedSkills(ctx context.Context, rt *agentv1alpha1.AgentRuntime) []string {
+	logger := log.FromContext(ctx)
+	ref := rt.Spec.TargetRef
+
+	acc, ok := newRuntimePodTemplateAccessor(ref.Kind)
+	if !ok {
+		return nil
+	}
+
+	key := types.NamespacedName{Name: ref.Name, Namespace: rt.Namespace}
+	if err := r.Get(ctx, key, acc.obj); err != nil {
+		logger.V(1).Info("Failed to read workload for skill annotation", "error", err)
+		return nil
+	}
+
+	annotations := acc.obj.GetAnnotations()
+	if annotations == nil {
+		return nil
+	}
+
+	raw, ok := annotations[AnnotationSkills]
+	if !ok || raw == "" {
+		return nil
+	}
+
+	var skills []string
+	if err := json.Unmarshal([]byte(raw), &skills); err != nil {
+		logger.V(1).Info("Failed to parse kagenti.io/skills annotation", "error", err, "raw", raw)
+		if r.Recorder != nil {
+			r.Recorder.Event(rt, corev1.EventTypeWarning, "SkillAnnotationParseError",
+				fmt.Sprintf("Failed to parse kagenti.io/skills annotation: %v", err))
+		}
+		return nil
+	}
+	return skills
 }
 
 // resolveServiceForWorkload finds the Service that fronts the target workload.
@@ -689,19 +693,10 @@ func (r *AgentRuntimeReconciler) handleDeletion(ctx context.Context, rt *agentv1
 			podAnnotations[AnnotationConfigHash] = defaultsHash
 			acc.setPodAnnotations(acc.obj, podAnnotations)
 
-			// Remove managed-by label and skills annotation from workload metadata
+			// Remove managed-by label from workload metadata
 			workloadLabels := acc.obj.GetLabels()
 			delete(workloadLabels, LabelManagedBy)
 			acc.obj.SetLabels(workloadLabels)
-
-			workloadAnnotations := acc.obj.GetAnnotations()
-			delete(workloadAnnotations, AnnotationSkills)
-			acc.obj.SetAnnotations(workloadAnnotations)
-
-			// Remove skill volumes on deletion
-			if acc.getPodSpec != nil {
-				reconcileSkillVolumes(acc.getPodSpec(acc.obj), nil)
-			}
 
 			logger.Info("Updated workload to defaults-only config on AgentRuntime deletion",
 				"workload", ref.Name, "kind", ref.Kind)

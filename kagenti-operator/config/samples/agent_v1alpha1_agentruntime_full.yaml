@@ -1,6 +1,5 @@
 # Full AgentRuntime: enroll a Deployment as an agent with per-workload overrides.
-# Overrides the SPIFFE trust domain, and mounts OCI skill images
-# (requires skillImageVolumes feature gate + K8s 1.31+).
+# Overrides the SPIFFE trust domain for this workload.
 apiVersion: agent.kagenti.dev/v1alpha1
 kind: AgentRuntime
 metadata:
@@ -17,7 +16,3 @@ spec:
   identity:
     spiffe:
       trustDomain: custom.example.com
-  skills:
-    - name: weather-forecast
-      image: ghcr.io/redhat-et/skillimage/weather-forecast:v1.0.0
-      mountPath: /agent/skills/weather-forecast

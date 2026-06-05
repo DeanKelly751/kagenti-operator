@@ -593,10 +593,10 @@ spec:
 	return err == nil
 }
 
-// EnableSkillImageVolumes creates a feature-gates ConfigMap with
-// skillImageVolumes enabled and patches the controller Deployment to mount it.
-func EnableSkillImageVolumes(namespace, deploy string) error {
-	By("creating feature-gates ConfigMap with skillImageVolumes enabled")
+// EnableSkillDiscovery creates a feature-gates ConfigMap with
+// skillDiscovery enabled and patches the controller Deployment to mount it.
+func EnableSkillDiscovery(namespace, deploy string) error {
+	By("creating feature-gates ConfigMap with skillDiscovery enabled")
 	cmd := exec.Command("kubectl", "apply", "-f", "-", "-n", namespace)
 	cmd.Stdin = strings.NewReader(`apiVersion: v1
 kind: ConfigMap
@@ -606,11 +606,9 @@ data:
   feature-gates.yaml: |
     globalEnabled: true
     envoyProxy: true
-    spiffeHelper: true
-    clientRegistration: true
     injectTools: false
     perWorkloadConfigResolution: false
-    skillImageVolumes: true
+    skillDiscovery: true
 `)
 	if _, err := Run(cmd); err != nil {
 		return fmt.Errorf("failed to create feature-gates ConfigMap: %w", err)
@@ -634,10 +632,10 @@ data:
 	return WaitForRollout(deploy, namespace, 2*time.Minute)
 }
 
-// DisableSkillImageVolumes updates the feature-gates ConfigMap to disable
-// skillImageVolumes. The feature gate loader's file watcher picks up changes.
-func DisableSkillImageVolumes(namespace string) error {
-	By("updating feature-gates ConfigMap to disable skillImageVolumes")
+// DisableSkillDiscovery updates the feature-gates ConfigMap to disable
+// skillDiscovery. The feature gate loader's file watcher picks up changes.
+func DisableSkillDiscovery(namespace string) error {
+	By("updating feature-gates ConfigMap to disable skillDiscovery")
 	cmd := exec.Command("kubectl", "apply", "-f", "-", "-n", namespace)
 	cmd.Stdin = strings.NewReader(`apiVersion: v1
 kind: ConfigMap
@@ -647,11 +645,9 @@ data:
   feature-gates.yaml: |
     globalEnabled: true
     envoyProxy: true
-    spiffeHelper: true
-    clientRegistration: true
     injectTools: false
     perWorkloadConfigResolution: false
-    skillImageVolumes: false
+    skillDiscovery: false
 `)
 	if _, err := Run(cmd); err != nil {
 		return fmt.Errorf("failed to update feature-gates ConfigMap: %w", err)
