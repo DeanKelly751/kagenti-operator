@@ -122,7 +122,7 @@ The following are already implemented and do NOT need new code:
 
 ### Implementation for User Story 3
 
-- [ ] T016 [US3] Verify T006's MTLSReady condition correctly gates the `Ready` condition. When `MTLSReady=False`, the overall `Ready` condition should either be `False` or include a warning. Update the Ready condition logic (around line 251) to check MTLSReady before setting `Ready=True`.
+- [ ] T016 [US3] Verify T006's MTLSReady condition works end-to-end. `MTLSReady=False` does NOT block `Ready=True` — the workload is still functional without mTLS. Instead, emit a Kubernetes Warning Event on the AgentRuntime so `kubectl describe` surfaces the issue. Also expand SPIRE detection to check for CSI driver volumes (`csi.spiffe.io`) alongside spiffe-helper.
 
 **Checkpoint**: SPIRE-unavailable produces clear, actionable conditions.
 
@@ -181,7 +181,7 @@ The following are already implemented and do NOT need new code:
 | T012-T013 | NEW | Unit tests for SpiffeFetcher default |
 | T014 | DONE | fetchCard() already implements mTLS-first logic |
 | T015 | NEW | Unit test for SPIRE unavailable |
-| T016 | NEW | Gate Ready condition on MTLSReady |
+| T016 | NEW | MTLSReady condition + Warning Event (does not block Ready) |
 | T017-T018 | NEW | Deprecation warning test + verification |
 | T019 | DONE | Envoy mTLS confirmed in webhook injector |
 | T020 | NEW | Verify authbridge config schema match |

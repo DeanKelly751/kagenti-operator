@@ -70,9 +70,10 @@ AgentRuntime.spec.mTLSMode
     │               └── Outbound (forward proxy): mTLS origination
     │
     ├── Operator sets MTLSReady condition on AgentRuntime.status
+    │       │  (informational — does NOT block Ready condition)
     │       │
     │       ├── SPIREAvailable (True) — SPIRE detected
-    │       ├── SPIREUnavailable (False) — SPIRE not detected
+    │       ├── SPIREUnavailable (False) — SPIRE not detected + Warning Event
     │       └── MTLSDisabled (True) — mTLSMode: disabled
     │
     └── Controller uses SpiffeFetcher (when SPIRE available)

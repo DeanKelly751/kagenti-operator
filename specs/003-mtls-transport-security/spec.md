@@ -140,6 +140,34 @@ Operators using the legacy JWS signing pipeline receive deprecation warnings dir
 - What happens during SVID rotation? The authbridge's per-handshake callbacks re-read certificates from disk on every TLS handshake. Rotation is transparent — no restart, no connection drop.
 - What happens in a mixed-mode deployment (some agents permissive, some strict)? Permissive agents accept both TLS and plaintext inbound. Strict agents reject plaintext. Permissive outbound is plaintext — a permissive caller cannot reach a strict target. For full mesh mTLS, all agents should be strict.
 
+### Coexistence with Istio mTLS
+
+SPIRE-based mTLS (this spec) and Istio-based mTLS (PR #383 SharedTrust controller, Issue #399 Istio auto-labeling) operate at different layers and are complementary, not competing:
+
+- **SPIRE mTLS** (this spec): Application-layer identity via authbridge sidecars. SPIRE issues X.509 SVIDs that prove agent identity. The authbridge proxy terminates/originates TLS using these certificates.
+- **Istio mTLS** (#383, #399): Infrastructure-layer encryption via ztunnel (ambient mode) or Envoy sidecar (sidecar mode). Provides pod-to-pod encryption transparently at L4.
+
+When both are active on the same workload, traffic is double-encrypted (Istio at L4, then SPIRE at L7 inside the authbridge). This is functionally correct but wastes resources. For this iteration, both can coexist without conflict because they operate on different ports/layers. A future optimization could detect Istio enrollment and skip authbridge TLS when Istio ambient mode covers the same path.
+
+The operator does not need to detect or interact with Istio in this spec. If Istio is present, it adds a transparent encryption layer underneath; if absent, authbridge handles mTLS on its own.
+
+### MTLSReady Condition and Ready Condition Interaction
+
+`MTLSReady=False` does NOT block `Ready=True`. The `Ready` condition reflects whether the workload is configured and running — not whether mTLS is active. Blocking Ready would break existing deployments without SPIRE during the transition period.
+
+When `MTLSReady=False`, the operator:
+- Sets `Ready=True` (workload is functional)
+- Sets `MTLSReady=False/SPIREUnavailable` with actionable message
+- Emits a Kubernetes Event (type Warning) so `kubectl describe agentruntime` shows the issue
+
+Operators monitor `MTLSReady` to track mTLS rollout progress across the fleet.
+
+### SPIRE Detection Heuristic
+
+The controller detects SPIRE availability by checking for the spiffe-helper init container or the SPIRE agent socket volume mount in the workload's pod template. This covers the standard deployment pattern where the webhook injects spiffe-helper.
+
+**Known limitation**: SPIRE CSI driver deployments use a `csi` volume type instead of the spiffe-helper init container. The detection heuristic should also check for CSI volumes with driver `csi.spiffe.io`. This is a follow-up enhancement — for the initial implementation, spiffe-helper is the supported pattern.
+
 ## Requirements
 
 ### Functional Requirements
