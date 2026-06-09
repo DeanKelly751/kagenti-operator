@@ -297,7 +297,6 @@ var _ = Describe("AgentRuntime Controller", func() {
 			updated := &agentv1alpha1.AgentRuntime{}
 			Expect(k8sClient.Get(ctx, nn, updated)).To(Succeed())
 
-			Expect(updated.Status.Phase).To(Equal(agentv1alpha1.RuntimePhaseActive))
 			Expect(updated.Status.Conditions).NotTo(BeEmpty())
 
 			var readyCond *metav1.Condition
@@ -360,7 +359,7 @@ var _ = Describe("AgentRuntime Controller", func() {
 			_ = k8sClient.Delete(ctx, rt)
 		})
 
-		It("should set Error phase and TargetNotFound condition", func() {
+		It("should set TargetNotFound condition", func() {
 			r := newReconciler()
 
 			// First reconcile: adds finalizer
@@ -376,8 +375,6 @@ var _ = Describe("AgentRuntime Controller", func() {
 
 			updated := &agentv1alpha1.AgentRuntime{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rt-no-target", Namespace: namespace}, updated)).To(Succeed())
-
-			Expect(updated.Status.Phase).To(Equal(agentv1alpha1.RuntimePhaseError))
 
 			var targetCond *metav1.Condition
 			for i := range updated.Status.Conditions {

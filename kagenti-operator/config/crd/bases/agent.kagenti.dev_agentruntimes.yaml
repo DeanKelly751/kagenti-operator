@@ -26,10 +26,6 @@ spec:
       jsonPath: .spec.targetRef.name
       name: Target
       type: string
-    - description: Runtime Phase
-      jsonPath: .status.phase
-      name: Phase
-      type: string
     - description: Card Fetch Status
       jsonPath: .status.conditions[?(@.type=='CardFetched')].status
       name: CardFetched
@@ -491,13 +487,6 @@ spec:
                   by the controller.
                 format: int64
                 type: integer
-              phase:
-                description: Phase is the high-level state of the AgentRuntime
-                enum:
-                - Pending
-                - Active
-                - Error
-                type: string
             type: object
         required:
         - spec

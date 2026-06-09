@@ -270,7 +270,6 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// 8. Update status (retry on conflict to preserve all conditions computed above)
 	rt.Status.ConfiguredPods = configuredPods
-	r.setPhase(rt, agentv1alpha1.RuntimePhaseActive)
 	r.setCondition(rt, ConditionTypeReady, metav1.ConditionTrue, "Configured",
 		fmt.Sprintf("Workload %s configured with config-hash %s", rt.Spec.TargetRef.Name, configResult.Hash[:12]))
 	if fg.SkillDiscovery {
@@ -770,10 +769,6 @@ func (r *AgentRuntimeReconciler) handleDeletion(ctx context.Context, rt *agentv1
 
 	logger.Info("Removed finalizer from AgentRuntime", "name", rt.Name)
 	return ctrl.Result{}, nil
-}
-
-func (r *AgentRuntimeReconciler) setPhase(rt *agentv1alpha1.AgentRuntime, phase agentv1alpha1.RuntimePhase) {
-	rt.Status.Phase = phase
 }
 
 func (r *AgentRuntimeReconciler) setCondition(rt *agentv1alpha1.AgentRuntime, condType string, status metav1.ConditionStatus, reason, message string) {

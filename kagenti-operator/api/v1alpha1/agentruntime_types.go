@@ -28,15 +28,6 @@ const (
 	RuntimeTypeTool  RuntimeType = "tool"
 )
 
-// +kubebuilder:validation:Enum=Pending;Active;Error
-type RuntimePhase string
-
-const (
-	RuntimePhasePending RuntimePhase = "Pending"
-	RuntimePhaseActive  RuntimePhase = "Active"
-	RuntimePhaseError   RuntimePhase = "Error"
-)
-
 // +kubebuilder:validation:Enum=mtls;http
 type TransportSecurity string
 
@@ -192,10 +183,6 @@ type AgentRuntimeStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Phase is the high-level state of the AgentRuntime
-	// +optional
-	Phase RuntimePhase `json:"phase,omitempty"`
-
 	// ConfiguredPods is the count of pods with expected labels/config
 	// +optional
 	ConfiguredPods int32 `json:"configuredPods,omitempty"`
@@ -221,7 +208,6 @@ type AgentRuntimeStatus struct {
 // +kubebuilder:resource:shortName=art;agentrt
 // +kubebuilder:printcolumn:name="Type",type="string",JSONPath=".spec.type",description="Workload Type"
 // +kubebuilder:printcolumn:name="Target",type="string",JSONPath=".spec.targetRef.name",description="Target Workload"
-// +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Runtime Phase"
 // +kubebuilder:printcolumn:name="CardFetched",type="string",JSONPath=".status.conditions[?(@.type=='CardFetched')].status",description="Card Fetch Status",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
