@@ -752,20 +752,18 @@ func UncommentCode(filename, target, prefix string) error {
 	return os.WriteFile(filename, out.Bytes(), 0644)
 }
 
-// ProbeWebhookReady checks that the controller pod is fully Ready (all
-// containers passing readiness probes). The manager's readiness probe gates
-// on full initialization including the webhook server startup.
+// ProbeWebhookReady checks that the controller pod is fully Ready.
+// The readyz endpoint gates on webhookServer.StartedChecker(), so Ready
+// means the webhook TLS server is accepting connections on :9443.
 func ProbeWebhookReady(namespace string) error {
-	cmd := exec.Command("kubectl", "get", "pods",
-		"-l", "control-plane=controller-manager",
+	cmd := exec.Command("kubectl", "wait",
+		"--for=condition=Ready",
+		"pod", "-l", "control-plane=controller-manager",
 		"-n", namespace,
-		"-o", "jsonpath={.items[0].status.conditions[?(@.type==\"Ready\")].status}")
-	output, err := Run(cmd)
+		"--timeout=5s")
+	_, err := Run(cmd)
 	if err != nil {
-		return fmt.Errorf("failed to check controller pod readiness: %w", err)
-	}
-	if strings.TrimSpace(output) != "True" {
-		return fmt.Errorf("controller pod not yet Ready (status=%q)", output)
+		return fmt.Errorf("controller pod not yet Ready: %w", err)
 	}
 	return nil
 }
