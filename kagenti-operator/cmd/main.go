@@ -105,6 +105,8 @@ func main() {
 	var enforceNetworkPolicies bool
 	var enableMLflow bool
 	var enableOtelBootstrap bool
+	var mlflowWorkspace string
+	var mlflowExperimentName string
 
 	var enableCardDiscovery bool
 
@@ -158,6 +160,10 @@ func main() {
 		"Enable MLflow experiment tracking integration")
 	flag.BoolVar(&enableOtelBootstrap, "enable-otel-bootstrap", false,
 		"Enable OTel collector bootstrap (ingress CA trust and ConfigMap assembly) at startup")
+	flag.StringVar(&mlflowWorkspace, "mlflow-workspace", "",
+		"Kubernetes namespace used as the x-mlflow-workspace header value (RHOAI only)")
+	flag.StringVar(&mlflowExperimentName, "mlflow-experiment-name", "kagenti-traces",
+		"MLflow experiment name; created automatically if it doesn't exist")
 
 	flag.BoolVar(&enableCardDiscovery, "enable-card-discovery", false,
 		"Enable automatic agent card discovery from AgentRuntime workloads into status.card")
@@ -526,6 +532,18 @@ func main() {
 			os.Exit(1)
 		}
 		setupLog.Info("MLflow UI config bootstrap enabled")
+
+		if err = (&controller.MLflowOperandReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+			//nolint:staticcheck // consistent with existing controllers
+			Recorder:          mgr.GetEventRecorderFor("mlflow-operand-controller"),
+			OperatorNamespace: getOperatorNamespace(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "MLflowOperand")
+			os.Exit(1)
+		}
+		setupLog.Info("MLflow operand controller enabled")
 	}
 
 	if enableClientRegistration {
@@ -603,11 +621,13 @@ func main() {
 
 	if enableOtelBootstrap {
 		otelBootstrap := &bootstrap.OtelBootstrapRunnable{
-			Client:    mgr.GetClient(),
-			APIReader: mgr.GetAPIReader(),
-			Config:    mgr.GetConfig(),
-			Namespace: getOperatorNamespace(),
-			Log:       ctrl.Log.WithName("bootstrap"),
+			Client:               mgr.GetClient(),
+			APIReader:            mgr.GetAPIReader(),
+			Config:               mgr.GetConfig(),
+			Namespace:            getOperatorNamespace(),
+			Log:                  ctrl.Log.WithName("bootstrap"),
+			MLflowWorkspace:      mlflowWorkspace,
+			MLflowExperimentName: mlflowExperimentName,
 		}
 		if err := mgr.Add(otelBootstrap); err != nil {
 			setupLog.Error(err, "unable to add OTel bootstrap runnable")
