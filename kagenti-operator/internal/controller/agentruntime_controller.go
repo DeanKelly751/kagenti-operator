@@ -281,7 +281,7 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if err := r.Get(ctx, req.NamespacedName, rt); err != nil {
 			return err
 		}
-		rt.Status = *desired
+		rt.Status = *desired // safe: this controller is the sole status owner
 		return r.Status().Update(ctx, rt)
 	}); err != nil {
 		logger.Error(err, "Failed to update status")
