@@ -40,13 +40,13 @@ import (
 )
 
 const (
-	// MLflowExperimentsAPIGroup is the API group used by the MLflow Kubernetes
-	// authorization plugin for SubjectAccessReview checks.
-	MLflowExperimentsAPIGroup = "mlflow.opendatahub.io"
+	// MLflowExperimentsAPIGroup is the API group used by the MLflow gateway's
+	// Kubernetes authorization plugin for SubjectAccessReview checks.
+	MLflowExperimentsAPIGroup = "mlflow.kubeflow.org"
 
 	// MLflowExperimentsResource is the virtual resource the MLflow gateway checks
-	// when authorizing experiment-level operations.
-	MLflowExperimentsResource = "mlflowexperiments"
+	// when authorizing experiment-level operations via SubjectAccessReview.
+	MLflowExperimentsResource = "experiments"
 
 	// MLflow annotation keys stored on the PodTemplateSpec.
 	AnnotationMLflowExperimentID   = "mlflow.kagenti.io/experiment-id"
@@ -77,7 +77,7 @@ type MLflowReconciler struct {
 }
 
 // +kubebuilder:rbac:groups=mlflow.opendatahub.io,resources=mlflows,verbs=create;get;list;update;watch
-// +kubebuilder:rbac:groups=mlflow.opendatahub.io,resources=mlflowexperiments,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=mlflow.kubeflow.org,resources=experiments,verbs=get;list;watch;update
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=create;get;list;watch;update
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=create;get;list;watch;update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch

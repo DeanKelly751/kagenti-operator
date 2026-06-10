@@ -169,9 +169,9 @@ rules:
   - update
   - watch
 - apiGroups:
-  - mlflow.opendatahub.io
+  - mlflow.kubeflow.org
   resources:
-  - mlflowexperiments
+  - experiments
   verbs:
   - get
   - list

@@ -87,7 +87,7 @@ The MLflow controller uses Kubernetes namespace-scoped authentication with least
 1. **Operator access**: The controller-manager's ServiceAccount is bound (via a ClusterRoleBinding shipped in the Helm chart / kustomize) to the broad `mlflow-operator-mlflow-integration` ClusterRole. This lets the operator call the MLflow REST API to create experiments. The `X-MLFLOW-WORKSPACE` header is set to the agent's namespace, scoping the experiment to that workspace.
 
 2. **Agent access (scoped)**: For each agent Deployment the controller creates:
-   - A **Role** named `kagenti-mlflow-<deployment-name>` with `get` and `update` on the `mlflowexperiments` resource, scoped to the agent's own experiment via `resourceNames`. This means agents **cannot** create/delete experiments or access `registeredmodels` or `gatewayendpoints`.
+   - A **Role** named `kagenti-mlflow-<deployment-name>` with `get` and `update` on the `experiments` resource (API group `mlflow.kubeflow.org`), scoped to the agent's own experiment via `resourceNames`. This means agents **cannot** create/delete experiments or access `registeredmodels` or `gatewayendpoints`.
    - A **RoleBinding** with the same name that binds the agent's ServiceAccount to the scoped Role.
 
    The agent authenticates to MLflow using its projected SA token at `/var/run/secrets/kubernetes.io/serviceaccount/token`.
