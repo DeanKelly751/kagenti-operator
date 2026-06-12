@@ -462,28 +462,27 @@ const mandatoryOutboundExclude = "8080"
 //   - "enforce-redirect" (proxy-sidecar): a fail-closed egress guard that
 //     REDIRECTs external TCP bypassing the forward proxy to the transparent
 //     listener (TRANSPARENT_PORT) and DROPs non-TCP. Driven by PROXY_UID +
-//     CLUSTER_CIDRS + TRANSPARENT_PORT; the exclude args do not apply.
+//     TRANSPARENT_PORT; the exclude args do not apply. Cluster DNS is kept
+//     direct by the init script reading the pod's resolv.conf nameservers.
 func (b *ContainerBuilder) BuildProxyInitContainer(mode ProxyInitMode, outboundPortsExclude, inboundPortsExclude string) corev1.Container {
 	var env []corev1.EnvVar
 	switch mode {
 	case ProxyInitModeEnforceRedirect:
 		// PROXY_UID is exempted (its egress is not redirected) and MUST match the
-		// proxy container's RunAsUser (both derive from b.cfg.Proxy.UID).
-		// CLUSTER_CIDRS are allowed direct; external TCP is REDIRECTed to
-		// TRANSPARENT_PORT (the proxy's transparent listener), external non-TCP is
-		// dropped. The redirect-only exclude vars are unused in this mode.
-		clusterCIDRs := strings.Join(b.cfg.Proxy.ClusterCIDRs, ",")
+		// proxy container's RunAsUser (both derive from b.cfg.Proxy.UID). External
+		// TCP is REDIRECTed to TRANSPARENT_PORT (the proxy's transparent listener),
+		// external non-TCP is dropped. Cluster DNS is left direct by the init script
+		// itself (it reads the pod's resolv.conf nameservers — no CIDR knob needed).
+		// The redirect-only exclude vars are unused in this mode.
 		env = []corev1.EnvVar{
 			{Name: "MODE", Value: string(ProxyInitModeEnforceRedirect)},
 			{Name: "PROXY_UID", Value: fmt.Sprintf("%d", b.cfg.Proxy.UID)},
-			{Name: "CLUSTER_CIDRS", Value: clusterCIDRs},
 			{Name: "TRANSPARENT_PORT", Value: fmt.Sprintf("%d", b.cfg.Proxy.TransparentPort)},
 		}
 		builderLog.Info("building ProxyInit Container",
 			"mode", "enforce-redirect",
 			"proxyUID", b.cfg.Proxy.UID,
-			"transparentPort", b.cfg.Proxy.TransparentPort,
-			"clusterCIDRs", clusterCIDRs)
+			"transparentPort", b.cfg.Proxy.TransparentPort)
 	case ProxyInitModeRedirect:
 		outboundValue := buildOutboundExcludeValue(outboundPortsExclude)
 		inboundValue := buildPortExcludeValue(inboundPortsExclude, "inbound-ports-exclude")

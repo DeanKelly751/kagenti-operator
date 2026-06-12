@@ -225,13 +225,9 @@ defaults:
     # always-on enforce-redirect egress guard (proxy-sidecar / lite). MUST match
     # the authbridge listener.transparent_proxy_addr (default :8082).
     transparentPort: 8082
-    # In-cluster CIDRs (pods/services/DNS) left direct by the enforce-redirect
-    # guard; external TCP is REDIRECTed to the transparent listener and external
-    # non-TCP is dropped. The default is Kind-shaped (pods 10.244/16 + services
-    # 10.96/16). OpenShift/EKS MUST override — e.g. OCP services 172.30.0.0/16
-    # (outside 10/8) + pods 10.128.0.0/14 — or in-cluster service traffic breaks.
-    clusterCIDRs:
-      - "10.0.0.0/8"
+    # Cluster DNS is kept direct by proxy-init itself (it reads the pod's
+    # /etc/resolv.conf nameservers), so there is no in-cluster CIDR knob to set —
+    # works on Kind / OpenShift / EKS / NodeLocal-DNSCache with no per-cluster config.
 
   # Resource defaults (conservative for dev)
   # Note: requests must be <= limits

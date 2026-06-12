@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"net"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -52,16 +51,6 @@ type ProxyConfig struct {
 	// external TCP egress to. It MUST match the authbridge proxy-sidecar
 	// listener.transparent_proxy_addr (default :8082).
 	TransparentPort int32 `json:"transparentPort" yaml:"transparentPort"`
-
-	// ClusterCIDRs are the in-cluster ranges (pods / services / DNS) that the
-	// enforce-redirect guard allows direct; external TCP is REDIRECTed to the
-	// transparent listener and external non-TCP is dropped. The default
-	// 10.0.0.0/8 is Kind-shaped (pods 10.244/16 + services 10.96/16). OCP/EKS
-	// MUST override this (e.g. OCP services 172.30.0.0/16, pods 10.128.0.0/14 —
-	// 172.30/16 is outside 10/8) or in-cluster service traffic will be dropped.
-	// Egress enforcement is always-on for proxy-sidecar / lite, so this is
-	// always consumed there; envoy-sidecar (transparent redirect) does not use it.
-	ClusterCIDRs []string `json:"clusterCIDRs" yaml:"clusterCIDRs"`
 }
 
 type ResourcesConfig struct {
@@ -96,11 +85,6 @@ func (c *PlatformConfig) DeepCopy() *PlatformConfig {
 	if c.TokenExchange.DefaultScopes != nil {
 		result.TokenExchange.DefaultScopes = make([]string, len(c.TokenExchange.DefaultScopes))
 		copy(result.TokenExchange.DefaultScopes, c.TokenExchange.DefaultScopes)
-	}
-
-	if c.Proxy.ClusterCIDRs != nil {
-		result.Proxy.ClusterCIDRs = make([]string, len(c.Proxy.ClusterCIDRs))
-		copy(result.Proxy.ClusterCIDRs, c.Proxy.ClusterCIDRs)
 	}
 
 	// Deep copy ResourceRequirements — ResourceList is a map that would be shared
@@ -146,23 +130,6 @@ func (c *PlatformConfig) Validate() error {
 	// container runs as it; it must be a real non-root user.
 	if c.Proxy.UID < 1 {
 		return fmt.Errorf("proxy.uid must be >= 1 (got %d): the proxy must not run as root and the egress-enforcement exemption keys on this UID", c.Proxy.UID)
-	}
-	// ClusterCIDRs drive the only in-cluster allowance in the enforce-redirect
-	// guard, which is always-on for proxy-sidecar / lite. Validate at load time so
-	// a misconfig fails fast with a clear message rather than: (a) an empty list
-	// silently falling back to the Kind-shaped 10.0.0.0/8 default in
-	// init-iptables.sh, or (b) a malformed entry crashing the proxy-init container
-	// under `set -e` with a cryptic iptables error.
-	if len(c.Proxy.ClusterCIDRs) == 0 {
-		return fmt.Errorf("proxy.clusterCIDRs must be non-empty (set the cluster's pod+service CIDRs)")
-	}
-	// Syntactic validation only — overlapping ranges and IPv4/IPv6 mixing are
-	// accepted (iptables handles both, and the init script splits v4/v6 itself);
-	// we only reject malformed strings here.
-	for _, cidr := range c.Proxy.ClusterCIDRs {
-		if _, _, err := net.ParseCIDR(cidr); err != nil {
-			return fmt.Errorf("proxy.clusterCIDRs entry %q is not a valid CIDR: %w", cidr, err)
-		}
 	}
 	if c.Images.EnvoyProxy == "" {
 		return fmt.Errorf("images.envoyProxy is required")
