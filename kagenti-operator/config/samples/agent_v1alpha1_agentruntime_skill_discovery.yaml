@@ -44,9 +44,18 @@ spec:
         app.kubernetes.io/name: my-agent
         kagenti.io/type: agent
     spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: agent
           image: ghcr.io/kagenti/agent-examples/a2a_currency_converter:v0.1.0-alpha.1
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: 8000
           env:

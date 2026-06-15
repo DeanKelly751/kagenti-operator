@@ -36,7 +36,7 @@ func TestReadAgentRuntimeOverrides_NotFound(t *testing.T) {
 	scheme := newAgentRuntimeScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	overrides, err := ReadAgentRuntimeOverrides(context.Background(), fakeClient, "ns1", "my-agent")
+	overrides, err := ReadAgentRuntimeOverrides(context.Background(), fakeClient, "ns1", "my-agent", "Deployment")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestReadAgentRuntimeOverrides_MatchesByTargetRef(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cr).Build()
 
-	overrides, err := ReadAgentRuntimeOverrides(context.Background(), fakeClient, "ns1", "my-agent")
+	overrides, err := ReadAgentRuntimeOverrides(context.Background(), fakeClient, "ns1", "my-agent", "Deployment")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestReadAgentRuntimeOverrides_PartialOverrides(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cr).Build()
 
-	overrides, err := ReadAgentRuntimeOverrides(context.Background(), fakeClient, "ns1", "my-agent")
+	overrides, err := ReadAgentRuntimeOverrides(context.Background(), fakeClient, "ns1", "my-agent", "Deployment")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestReadAgentRuntimeOverrides_NoTargetRefMatch(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cr).Build()
 
-	overrides, err := ReadAgentRuntimeOverrides(context.Background(), fakeClient, "ns1", "my-agent")
+	overrides, err := ReadAgentRuntimeOverrides(context.Background(), fakeClient, "ns1", "my-agent", "Deployment")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -175,11 +175,82 @@ func TestReadAgentRuntimeOverrides_CRDNotInstalled(t *testing.T) {
 	scheme := runtime.NewScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	overrides, err := ReadAgentRuntimeOverrides(context.Background(), fakeClient, "ns1", "my-agent")
+	overrides, err := ReadAgentRuntimeOverrides(context.Background(), fakeClient, "ns1", "my-agent", "Deployment")
 	if err != nil {
 		t.Fatalf("expected nil error for missing CRD (graceful skip), got: %v", err)
 	}
 	if overrides != nil {
 		t.Fatalf("expected nil overrides, got %+v", overrides)
+	}
+}
+
+func TestReadAgentRuntimeOverrides_KindMismatch(t *testing.T) {
+	scheme := newAgentRuntimeScheme()
+
+	cr := &agentv1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-agent-runtime",
+			Namespace: "ns1",
+		},
+		Spec: agentv1alpha1.AgentRuntimeSpec{
+			Type: agentv1alpha1.RuntimeTypeAgent,
+			TargetRef: agentv1alpha1.TargetRef{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       "my-agent",
+			},
+			Identity: &agentv1alpha1.IdentitySpec{
+				SPIFFE: &agentv1alpha1.SPIFFEIdentity{
+					TrustDomain: "should-not-match",
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cr).Build()
+
+	overrides, err := ReadAgentRuntimeOverrides(context.Background(), fakeClient, "ns1", "my-agent", "StatefulSet")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides != nil {
+		t.Fatalf("expected nil overrides for kind mismatch (Deployment CR vs StatefulSet query), got %+v", overrides)
+	}
+}
+
+func TestReadAgentRuntimeOverrides_EmptyKind_MatchesByNameOnly(t *testing.T) {
+	scheme := newAgentRuntimeScheme()
+
+	cr := &agentv1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-agent-runtime",
+			Namespace: "ns1",
+		},
+		Spec: agentv1alpha1.AgentRuntimeSpec{
+			Type: agentv1alpha1.RuntimeTypeAgent,
+			TargetRef: agentv1alpha1.TargetRef{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       "my-agent",
+			},
+			Identity: &agentv1alpha1.IdentitySpec{
+				SPIFFE: &agentv1alpha1.SPIFFEIdentity{
+					TrustDomain: "override.local",
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cr).Build()
+
+	overrides, err := ReadAgentRuntimeOverrides(context.Background(), fakeClient, "ns1", "my-agent", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides == nil {
+		t.Fatal("expected non-nil overrides when kind is empty (backward-compatible name-only match)")
+	}
+	if overrides.SpiffeTrustDomain == nil || *overrides.SpiffeTrustDomain != "override.local" {
+		t.Errorf("SpiffeTrustDomain = %v, want override.local", overrides.SpiffeTrustDomain)
 	}
 }

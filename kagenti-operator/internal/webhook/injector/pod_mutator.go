@@ -100,7 +100,7 @@ func NewPodMutator(
 // InjectAuthBridge evaluates the multi-layer precedence chain and conditionally injects sidecars.
 //
 //nolint:gocyclo // sequential injection steps form a single logical pipeline
-func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSpec, namespace, crName string, labels, annotations map[string]string) (bool, error) {
+func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSpec, namespace, crName, workloadKind string, labels, annotations map[string]string) (bool, error) {
 	mutatorLog.Info("InjectAuthBridge called", "namespace", namespace, "crName", crName, "labels", labels)
 
 	// Pre-filter: kagenti.io/type must be agent or tool.
@@ -167,7 +167,7 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 	// injects sidecars using defaults-only config (platform + namespace
 	// defaults, no per-workload overrides). ResolveConfig handles nil
 	// overrides transparently.
-	arOverrides, err := ReadAgentRuntimeOverrides(ctx, m.Client, namespace, crName)
+	arOverrides, err := ReadAgentRuntimeOverrides(ctx, m.Client, namespace, crName, workloadKind)
 	if err != nil {
 		mutatorLog.Error(err, "failed to read AgentRuntime",
 			"namespace", namespace, "crName", crName)

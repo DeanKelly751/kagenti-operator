@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -18,17 +19,22 @@ var log = logf.Log.WithName("config")
 type ConfigLoader struct {
 	configPath string
 
-	mu            sync.RWMutex
-	currentConfig *PlatformConfig
+	// currentConfig stores an immutable *PlatformConfig snapshot.
+	// Readers get the pointer directly (no copy), writers swap the
+	// pointer atomically on each Load(). This avoids DeepCopy on every
+	// webhook admission request.
+	currentConfig atomic.Pointer[PlatformConfig]
 
+	mu       sync.Mutex // protects onChange only
 	onChange []func(*PlatformConfig)
 }
 
 func NewConfigLoader(configPath string) *ConfigLoader {
-	return &ConfigLoader{
-		configPath:    configPath,
-		currentConfig: CompiledDefaults(), // Start with compiled defaults
+	l := &ConfigLoader{
+		configPath: configPath,
 	}
+	l.currentConfig.Store(CompiledDefaults())
+	return l
 }
 
 // Load reads config from file and merges with compiled defaults
@@ -43,8 +49,8 @@ func (l *ConfigLoader) Load() error {
 	if err != nil {
 		if os.IsNotExist(err) {
 			log.Info("Config file not found, using compiled defaults only")
+			l.currentConfig.Store(config)
 			l.mu.Lock()
-			l.currentConfig = config
 			callbacks := make([]func(*PlatformConfig), len(l.onChange))
 			copy(callbacks, l.onChange)
 			l.mu.Unlock()
@@ -68,20 +74,18 @@ func (l *ConfigLoader) Load() error {
 		return err
 	}
 
-	// Update current config (thread-safe)
-	l.mu.Lock()
-	l.currentConfig = config
-	l.mu.Unlock()
+	// Update current config (atomic swap — readers see it immediately)
+	l.currentConfig.Store(config)
 
 	log.Info("Platform config loaded successfully from file")
 	logConfig(config, "configmap")
 
 	// Snapshot callbacks under lock, then invoke outside lock
 	// so callbacks can safely call Get() without deadlock.
-	l.mu.RLock()
+	l.mu.Lock()
 	callbacks := make([]func(*PlatformConfig), len(l.onChange))
 	copy(callbacks, l.onChange)
-	l.mu.RUnlock()
+	l.mu.Unlock()
 
 	for _, cb := range callbacks {
 		cb(config.DeepCopy())
@@ -90,13 +94,11 @@ func (l *ConfigLoader) Load() error {
 	return nil
 }
 
-// Get returns current config (thread-safe)
+// Get returns the current config snapshot (lock-free, no copy).
+// The returned pointer must be treated as read-only; callers that need
+// to mutate config should DeepCopy explicitly.
 func (l *ConfigLoader) Get() *PlatformConfig {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
-	// Return a copy to prevent modification
-	return l.currentConfig.DeepCopy()
+	return l.currentConfig.Load()
 }
 
 // Watch starts watching the config file for changes

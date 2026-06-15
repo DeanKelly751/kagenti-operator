@@ -63,9 +63,10 @@ type AgentRuntimeOverrides struct {
 
 // ReadAgentRuntimeOverrides reads the AgentRuntime CR for a given workload
 // using typed access. It lists AgentRuntimes in the namespace and finds the
-// one whose spec.targetRef.name matches workloadName.
+// one whose spec.targetRef.name and spec.targetRef.kind match. When
+// workloadKind is empty, only the name is matched (backward-compatible).
 // Returns (nil, nil) if no matching AgentRuntime CR is found.
-func ReadAgentRuntimeOverrides(ctx context.Context, c client.Reader, namespace, workloadName string) (*AgentRuntimeOverrides, error) {
+func ReadAgentRuntimeOverrides(ctx context.Context, c client.Reader, namespace, workloadName, workloadKind string) (*AgentRuntimeOverrides, error) {
 	list := &agentv1alpha1.AgentRuntimeList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		// If the AgentRuntime CRD is not installed, there are no CRs to find.
@@ -81,20 +82,38 @@ func ReadAgentRuntimeOverrides(ctx context.Context, c client.Reader, namespace, 
 		return nil, fmt.Errorf("listing AgentRuntime CRs in %s: %w", namespace, err)
 	}
 
-	// Find the AgentRuntime whose spec.targetRef.name matches the workload
+	// Find the AgentRuntime whose spec.targetRef matches the workload.
+	// When workloadKind is known, both name and kind must match.
+	// When workloadKind is empty (bare pods, unrecognized owners), we
+	// fall back to name-only matching for backward compatibility.
+	var match *agentv1alpha1.AgentRuntime
+	nameMatches := 0
 	for i := range list.Items {
 		rt := &list.Items[i]
 		if rt.Spec.TargetRef.Name != workloadName {
 			continue
 		}
+		nameMatches++
+		if workloadKind != "" && rt.Spec.TargetRef.Kind != workloadKind {
+			continue
+		}
+		match = rt
+		break
+	}
 
+	if match != nil {
+		if workloadKind == "" && nameMatches > 1 {
+			arConfigLog.V(0).Info("workloadKind unknown and multiple AgentRuntimes match by name — using first match",
+				"namespace", namespace, "workloadName", workloadName, "nameMatches", nameMatches)
+		}
 		arConfigLog.Info("Found matching AgentRuntime CR",
-			"namespace", namespace, "crName", rt.Name, "targetRef.name", workloadName)
-		return extractOverrides(rt), nil
+			"namespace", namespace, "crName", match.Name,
+			"targetRef.name", workloadName, "targetRef.kind", match.Spec.TargetRef.Kind)
+		return extractOverrides(match), nil
 	}
 
 	arConfigLog.V(1).Info("No AgentRuntime CR targets this workload",
-		"namespace", namespace, "workloadName", workloadName)
+		"namespace", namespace, "workloadName", workloadName, "workloadKind", workloadKind)
 	return nil, nil
 }
 

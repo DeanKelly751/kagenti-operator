@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -16,17 +17,18 @@ import (
 type FeatureGateLoader struct {
 	configPath string
 
-	mu      sync.RWMutex
-	current *FeatureGates
+	current atomic.Pointer[FeatureGates]
 
+	mu       sync.Mutex // protects onChange only
 	onChange []func(*FeatureGates)
 }
 
 func NewFeatureGateLoader(configPath string) *FeatureGateLoader {
-	return &FeatureGateLoader{
+	l := &FeatureGateLoader{
 		configPath: configPath,
-		current:    DefaultFeatureGates(),
 	}
+	l.current.Store(DefaultFeatureGates())
+	return l
 }
 
 // Load reads feature gates from file.
@@ -39,8 +41,8 @@ func (l *FeatureGateLoader) Load() error {
 	if err != nil {
 		if os.IsNotExist(err) {
 			log.Info("Feature gates file not found, using defaults (all enabled)")
+			l.current.Store(gates)
 			l.mu.Lock()
-			l.current = gates
 			callbacks := make([]func(*FeatureGates), len(l.onChange))
 			copy(callbacks, l.onChange)
 			l.mu.Unlock()
@@ -65,18 +67,16 @@ func (l *FeatureGateLoader) Load() error {
 		gates = DefaultFeatureGates()
 	}
 
-	l.mu.Lock()
-	l.current = gates
-	l.mu.Unlock()
+	l.current.Store(gates)
 
 	logFeatureGates(gates, "configmap")
 
 	// Snapshot callbacks under lock, then invoke outside lock
 	// so callbacks can safely call Get() without deadlock.
-	l.mu.RLock()
+	l.mu.Lock()
 	callbacks := make([]func(*FeatureGates), len(l.onChange))
 	copy(callbacks, l.onChange)
-	l.mu.RUnlock()
+	l.mu.Unlock()
 
 	for _, cb := range callbacks {
 		cb(gates.DeepCopy())
@@ -85,11 +85,10 @@ func (l *FeatureGateLoader) Load() error {
 	return nil
 }
 
-// Get returns current feature gates (thread-safe).
+// Get returns the current feature gates snapshot (lock-free, no copy).
+// FeatureGates contains only value types (booleans), so sharing is safe.
 func (l *FeatureGateLoader) Get() *FeatureGates {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.current.DeepCopy()
+	return l.current.Load()
 }
 
 // Watch starts watching the feature gates file for changes.

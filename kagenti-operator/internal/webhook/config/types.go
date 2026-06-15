@@ -6,7 +6,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// PlatformConfig represents the complete platform configuration
+// PlatformConfig represents the complete platform configuration.
+//
+// IMPORTANT: Instances returned by ConfigLoader.Get() are shared across
+// concurrent webhook requests and MUST NOT be mutated. If you need to
+// modify config values for a specific request, call DeepCopy() first.
 type PlatformConfig struct {
 	Images        ImageConfig           `json:"images" yaml:"images"`
 	Proxy         ProxyConfig           `json:"proxy" yaml:"proxy"`

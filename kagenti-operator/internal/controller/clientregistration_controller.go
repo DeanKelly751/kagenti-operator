@@ -10,6 +10,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -394,17 +395,20 @@ func readClusterFeatureGates(ctx context.Context, c client.Reader) (globalOn, cl
 	if cm.Data == nil {
 		return globalOn, clientReg, injectTools, nil
 	}
-	// Only one ConfigMap data entry is consulted: we return after the first non-empty
-	// value that unmarshals to a non-empty YAML map (map iteration order); other keys are ignored.
-	for _, raw := range cm.Data {
+
+	parseGates := func(raw string) (bool, map[string]interface{}) {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
-			continue
+			return false, nil
 		}
 		var m map[string]interface{}
 		if err := yaml.Unmarshal([]byte(raw), &m); err != nil || len(m) == 0 {
-			continue
+			return false, nil
 		}
+		return true, m
+	}
+
+	applyGates := func(m map[string]interface{}) {
 		if v, ok := m["globalEnabled"].(bool); ok {
 			globalOn = v
 		}
@@ -414,7 +418,30 @@ func readClusterFeatureGates(ctx context.Context, c client.Reader) (globalOn, cl
 		if v, ok := m["injectTools"].(bool); ok {
 			injectTools = v
 		}
-		return globalOn, clientReg, injectTools, nil
+	}
+
+	// Prefer the well-known key used by the webhook's FeatureGateLoader.
+	if raw, ok := cm.Data["feature-gates.yaml"]; ok {
+		if valid, m := parseGates(raw); valid {
+			applyGates(m)
+			return globalOn, clientReg, injectTools, nil
+		}
+	}
+
+	// Fallback: try remaining keys in sorted order for determinism.
+	keys := make([]string, 0, len(cm.Data))
+	for k := range cm.Data {
+		if k == "feature-gates.yaml" {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if valid, m := parseGates(cm.Data[k]); valid {
+			applyGates(m)
+			return globalOn, clientReg, injectTools, nil
+		}
 	}
 	return globalOn, clientReg, injectTools, nil
 }

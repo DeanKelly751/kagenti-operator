@@ -347,24 +347,35 @@ func (r *MLflowOperandReconciler) resolveMLflowClusterRole(ctx context.Context) 
 }
 
 // agentNamespaces returns the set of namespaces containing at least one
-// Deployment with the kagenti.io/type=agent label.
+// Deployment or StatefulSet with the kagenti.io/type=agent label.
 func (r *MLflowOperandReconciler) agentNamespaces(ctx context.Context) ([]string, error) {
-	depList := &appsv1.DeploymentList{}
-	if err := r.List(ctx, depList, client.MatchingLabels{
-		LabelAgentType: LabelValueAgent,
-	}); err != nil {
-		return nil, err
-	}
-
+	agentLabel := client.MatchingLabels{LabelAgentType: LabelValueAgent}
 	seen := make(map[string]struct{})
 	var namespaces []string
-	for i := range depList.Items {
-		ns := depList.Items[i].Namespace
+
+	addNamespace := func(ns string) {
 		if _, ok := seen[ns]; !ok {
 			seen[ns] = struct{}{}
 			namespaces = append(namespaces, ns)
 		}
 	}
+
+	depList := &appsv1.DeploymentList{}
+	if err := r.List(ctx, depList, agentLabel); err != nil {
+		return nil, err
+	}
+	for i := range depList.Items {
+		addNamespace(depList.Items[i].Namespace)
+	}
+
+	stsList := &appsv1.StatefulSetList{}
+	if err := r.List(ctx, stsList, agentLabel); err != nil {
+		return nil, err
+	}
+	for i := range stsList.Items {
+		addNamespace(stsList.Items[i].Namespace)
+	}
+
 	return namespaces, nil
 }
 

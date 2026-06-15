@@ -51,6 +51,7 @@ import (
 	"github.com/kagenti/operator/internal/agentcard"
 	"github.com/kagenti/operator/internal/signature"
 	webhookconfig "github.com/kagenti/operator/internal/webhook/config"
+	"github.com/kagenti/operator/internal/workload"
 )
 
 const (
@@ -670,22 +671,7 @@ func getAgentTLSPort(svc *corev1.Service) int32 {
 // For StatefulSets: Pod is directly owned by the StatefulSet.
 // For Sandboxes: Pod is directly owned by the Sandbox CR.
 func isPodOwnedByWorkload(pod *corev1.Pod, workloadName string) bool {
-	for _, ref := range pod.OwnerReferences {
-		if ref.Kind == "ReplicaSet" {
-			// ReplicaSet name is <deployment-name>-<pod-template-hash>.
-			// Extract the deployment name by trimming the last "-<hash>" suffix.
-			if idx := strings.LastIndex(ref.Name, "-"); idx > 0 && ref.Name[:idx] == workloadName {
-				return true
-			}
-		}
-		if ref.Kind == "StatefulSet" && ref.Name == workloadName {
-			return true
-		}
-		if ref.Kind == KindSandbox && ref.Name == workloadName {
-			return true
-		}
-	}
-	return false
+	return workload.IsPodOwnedBy(pod, workloadName)
 }
 
 // handleDeletion runs finalizer logic when an AgentRuntime is deleted.

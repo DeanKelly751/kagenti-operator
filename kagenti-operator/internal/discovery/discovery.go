@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -114,8 +115,9 @@ func discoverFromSpireBundle(ctx context.Context, c client.Reader, ns string) (s
 		return "", err
 	}
 
-	for key, val := range cm.Data {
-		if key == "bundle.spiffe" || key == "bundle.json" {
+	// Try well-known keys first in deterministic order.
+	for _, key := range []string{"bundle.spiffe", "bundle.json"} {
+		if val, ok := cm.Data[key]; ok {
 			td, err := extractTrustDomainFromBundle(val)
 			if err == nil && td != "" {
 				return td, nil
@@ -123,9 +125,16 @@ func discoverFromSpireBundle(ctx context.Context, c client.Reader, ns string) (s
 		}
 	}
 
-	// Fallback: try any key that parses as SPIFFE bundle
-	for _, val := range cm.Data {
-		td, err := extractTrustDomainFromBundle(val)
+	// Fallback: try remaining keys in sorted order for determinism.
+	keys := make([]string, 0, len(cm.Data))
+	for k := range cm.Data {
+		if k != "bundle.spiffe" && k != "bundle.json" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		td, err := extractTrustDomainFromBundle(cm.Data[k])
 		if err == nil && td != "" {
 			return td, nil
 		}
@@ -136,15 +145,22 @@ func discoverFromSpireBundle(ctx context.Context, c client.Reader, ns string) (s
 
 // extractTrustDomainFromBundle parses SPIFFE bundle JSON where top-level keys are trust domains.
 // Format: {"example.org": {"keys": [...]}}
+// When multiple trust domains exist, the lexicographically smallest is returned
+// for deterministic behaviour across restarts.
 func extractTrustDomainFromBundle(raw string) (string, error) {
 	var bundle map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &bundle); err != nil {
 		return "", err
 	}
+	domains := make([]string, 0, len(bundle))
 	for domain := range bundle {
 		if domain != "" {
-			return domain, nil
+			domains = append(domains, domain)
 		}
 	}
-	return "", fmt.Errorf("empty bundle")
+	if len(domains) == 0 {
+		return "", fmt.Errorf("empty bundle")
+	}
+	sort.Strings(domains)
+	return domains[0], nil
 }
