@@ -38,6 +38,10 @@ func CompiledDefaults() *PlatformConfig {
 			// Empty by default: proxy-init auto-detects the iptables backend from
 			// /proc/modules. Set (e.g. "iptables") to force a backend per-platform.
 			IptablesCmd: "",
+			// Both modes allowed by default. Set to ["none"] on platforms
+			// where iptables is unavailable (ROSA HCP, managed OpenShift),
+			// or ["enforce-redirect"] to prevent opt-out.
+			AllowedEgressEnforcement: []string{"enforce-redirect", "none"},
 		},
 		Resources: ResourcesConfig{
 			EnvoyProxy: corev1.ResourceRequirements{

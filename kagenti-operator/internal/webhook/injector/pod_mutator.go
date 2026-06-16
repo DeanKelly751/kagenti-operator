@@ -335,6 +335,19 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 		egressEnforcement = EgressEnforcementEnforceRedirect
 		egressEnforcementSource = "default-invalid-fallback"
 	}
+	// Validate against the platform's allowed list. If the resolved value
+	// is not permitted, fall back to the first allowed value (fail closed
+	// when only enforce-redirect is allowed, fail open when only none is
+	// allowed — the admin controls the list).
+	allowed := currentConfig.Proxy.AllowedEgressEnforcement
+	if len(allowed) > 0 && !stringInSlice(egressEnforcement, allowed) {
+		mutatorLog.Info("WARN: egressEnforcement value not in platform allowedEgressEnforcement; overriding",
+			"namespace", namespace, "crName", crName,
+			"requested", egressEnforcement, "allowed", allowed,
+			"overrideTo", allowed[0])
+		egressEnforcement = allowed[0]
+		egressEnforcementSource = "platform-policy-override"
+	}
 	mutatorLog.Info("resolved egress enforcement",
 		"namespace", namespace, "crName", crName,
 		"mode", egressEnforcement, "source", egressEnforcementSource)
@@ -1106,6 +1119,15 @@ func containerExists(containers []corev1.Container, name string) bool {
 func volumeExists(volumes []corev1.Volume, name string) bool {
 	for i := range volumes {
 		if volumes[i].Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func stringInSlice(s string, list []string) bool {
+	for _, v := range list {
+		if v == s {
 			return true
 		}
 	}

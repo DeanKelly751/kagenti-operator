@@ -2114,3 +2114,89 @@ func TestInjectAuthBridge_EgressEnforcement_EnvoySidecarIgnoresNone(t *testing.T
 		t.Error("envoy-sidecar mode should inject proxy-init regardless of egressEnforcement=none")
 	}
 }
+
+// newTestMutatorWithAllowedEgress creates a test mutator with a custom
+// allowedEgressEnforcement platform policy.
+func newTestMutatorWithAllowedEgress(allowed []string, objs ...client.Object) *PodMutator {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = appsv1.AddToScheme(scheme)
+	_ = agentv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	return &PodMutator{
+		Client:    fakeClient,
+		APIReader: fakeClient,
+		GetPlatformConfig: func() *config.PlatformConfig {
+			cfg := config.CompiledDefaults()
+			cfg.Proxy.AllowedEgressEnforcement = allowed
+			return cfg
+		},
+		GetFeatureGates: config.DefaultFeatureGates,
+	}
+}
+
+func TestInjectAuthBridge_EgressEnforcement_PlatformPolicyBlocksNone(t *testing.T) {
+	// Platform only allows enforce-redirect. CR requests none → overridden.
+	rt := newAgentRuntimeWithEgressEnforcement("test-ns", "my-agent", EgressEnforcementNone)
+	m := newTestMutatorWithAllowedEgress([]string{EgressEnforcementEnforceRedirect}, rt)
+	ctx := context.Background()
+
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{
+			{Name: "agent", Image: "my-agent:latest"},
+		},
+	}
+	labels := map[string]string{KagentiTypeLabel: KagentiTypeAgent}
+
+	_, err := m.InjectAuthBridge(ctx, podSpec, "test-ns", "my-agent", labels, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !containerExists(podSpec.InitContainers, ProxyInitContainerName) {
+		t.Error("platform policy allows only enforce-redirect; proxy-init should be injected despite CR requesting none")
+	}
+}
+
+func TestInjectAuthBridge_EgressEnforcement_PlatformPolicyAllowsNone(t *testing.T) {
+	// Platform allows both modes. CR requests none → honored.
+	rt := newAgentRuntimeWithEgressEnforcement("test-ns", "my-agent", EgressEnforcementNone)
+	m := newTestMutatorWithAllowedEgress([]string{EgressEnforcementEnforceRedirect, EgressEnforcementNone}, rt)
+	ctx := context.Background()
+
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{
+			{Name: "agent", Image: "my-agent:latest"},
+		},
+	}
+	labels := map[string]string{KagentiTypeLabel: KagentiTypeAgent}
+
+	_, err := m.InjectAuthBridge(ctx, podSpec, "test-ns", "my-agent", labels, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if containerExists(podSpec.InitContainers, ProxyInitContainerName) {
+		t.Error("platform allows none; CR requests none; proxy-init should NOT be injected")
+	}
+}
+
+func TestInjectAuthBridge_EgressEnforcement_PlatformPolicyOnlyNone(t *testing.T) {
+	// Platform only allows none (ROSA HCP). Default enforce-redirect → overridden to none.
+	rt := newAgentRuntimeWithMode("test-ns", "my-agent", ModeProxySidecar)
+	m := newTestMutatorWithAllowedEgress([]string{EgressEnforcementNone}, rt)
+	ctx := context.Background()
+
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{
+			{Name: "agent", Image: "my-agent:latest"},
+		},
+	}
+	labels := map[string]string{KagentiTypeLabel: KagentiTypeAgent}
+
+	_, err := m.InjectAuthBridge(ctx, podSpec, "test-ns", "my-agent", labels, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if containerExists(podSpec.InitContainers, ProxyInitContainerName) {
+		t.Error("platform only allows none; proxy-init should NOT be injected even with default enforce-redirect")
+	}
+}

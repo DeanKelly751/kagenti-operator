@@ -59,6 +59,14 @@ type ProxyConfig struct {
 	// ROSA). Set to "iptables" (nft) or "iptables-legacy" to force a backend
 	// where auto-detection is wrong or undesired.
 	IptablesCmd string `json:"iptablesCmd" yaml:"iptablesCmd"`
+
+	// AllowedEgressEnforcement restricts which egressEnforcement values
+	// workloads (AgentRuntime CR / namespace ConfigMap) may select.
+	// The webhook rejects resolved values not in this list, falling back
+	// to the first entry. Default: ["enforce-redirect", "none"] (both
+	// allowed). Set to ["enforce-redirect"] to prevent opt-out, or
+	// ["none"] on platforms where iptables is unavailable.
+	AllowedEgressEnforcement []string `json:"allowedEgressEnforcement,omitempty" yaml:"allowedEgressEnforcement,omitempty"`
 }
 
 type ResourcesConfig struct {
@@ -93,6 +101,11 @@ func (c *PlatformConfig) DeepCopy() *PlatformConfig {
 	if c.TokenExchange.DefaultScopes != nil {
 		result.TokenExchange.DefaultScopes = make([]string, len(c.TokenExchange.DefaultScopes))
 		copy(result.TokenExchange.DefaultScopes, c.TokenExchange.DefaultScopes)
+	}
+
+	if c.Proxy.AllowedEgressEnforcement != nil {
+		result.Proxy.AllowedEgressEnforcement = make([]string, len(c.Proxy.AllowedEgressEnforcement))
+		copy(result.Proxy.AllowedEgressEnforcement, c.Proxy.AllowedEgressEnforcement)
 	}
 
 	// Deep copy ResourceRequirements — ResourceList is a map that would be shared
@@ -147,6 +160,14 @@ func (c *PlatformConfig) Validate() error {
 	case "", "iptables", "iptables-nft", "iptables-legacy":
 	default:
 		return fmt.Errorf("proxy.iptablesCmd %q is not a recognized backend (want one of: \"\" (auto-detect), iptables, iptables-nft, iptables-legacy)", c.Proxy.IptablesCmd)
+	}
+	if len(c.Proxy.AllowedEgressEnforcement) == 0 {
+		return fmt.Errorf("proxy.allowedEgressEnforcement must not be empty (set [\"enforce-redirect\"] to require enforcement, [\"none\"] to disable it, or both to allow workload choice)")
+	}
+	for _, mode := range c.Proxy.AllowedEgressEnforcement {
+		if mode != "enforce-redirect" && mode != "none" {
+			return fmt.Errorf("proxy.allowedEgressEnforcement contains invalid value %q (allowed: enforce-redirect, none)", mode)
+		}
 	}
 	if c.Images.EnvoyProxy == "" {
 		return fmt.Errorf("images.envoyProxy is required")
