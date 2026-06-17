@@ -257,7 +257,7 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 		}
 	}
 	if mtlsMode == "" {
-		mtlsMode = MTLSModeDisabled
+		mtlsMode = MTLSModePermissive
 		mtlsSource = "default"
 	}
 	// Defense in depth: the CRD enum check rejects unknown values at
@@ -270,10 +270,10 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 	case MTLSModeDisabled, MTLSModePermissive, MTLSModeStrict:
 		// recognized, keep as-is
 	default:
-		mutatorLog.Info("WARN: unrecognized mtlsMode; defaulting to disabled",
+		mutatorLog.Info("WARN: unrecognized mtlsMode; defaulting to permissive",
 			"namespace", namespace, "crName", crName,
 			"unrecognized", mtlsMode, "source", mtlsSource)
-		mtlsMode = MTLSModeDisabled
+		mtlsMode = MTLSModePermissive
 		mtlsSource = "default-invalid-fallback"
 	}
 	mutatorLog.Info("resolved mTLS mode",
@@ -300,6 +300,57 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 				"namespace", namespace, "serviceAccount", crName)
 		}
 	}
+
+	// ========================================
+	// Resolve egressEnforcement (CR > namespace > enforce-redirect)
+	// ========================================
+	//
+	// Controls proxy-init injection in proxy-sidecar / lite modes.
+	// "enforce-redirect" (default): proxy-init injected with iptables.
+	// "none": proxy-init skipped — cooperative HTTP_PROXY only.
+	// envoy-sidecar mode ignores this (proxy-init is structural there).
+	egressEnforcement := ""
+	egressEnforcementSource := ""
+	if arOverrides != nil && arOverrides.EgressEnforcement != nil {
+		egressEnforcement = *arOverrides.EgressEnforcement
+		egressEnforcementSource = "agentruntime-cr"
+	}
+	if egressEnforcement == "" {
+		if ee := ExtractEgressEnforcement(nsConfig.AuthBridgeRuntimeYAML); ee != "" {
+			egressEnforcement = ee
+			egressEnforcementSource = "namespace-configmap"
+		}
+	}
+	if egressEnforcement == "" {
+		egressEnforcement = EgressEnforcementEnforceRedirect
+		egressEnforcementSource = "cluster-default"
+	}
+	switch egressEnforcement {
+	case EgressEnforcementEnforceRedirect, EgressEnforcementNone:
+		// recognized, keep as-is
+	default:
+		mutatorLog.Info("WARN: unrecognized egressEnforcement; defaulting to enforce-redirect (fail closed)",
+			"namespace", namespace, "crName", crName,
+			"unrecognized", egressEnforcement, "source", egressEnforcementSource)
+		egressEnforcement = EgressEnforcementEnforceRedirect
+		egressEnforcementSource = "default-invalid-fallback"
+	}
+	// Validate against the platform's allowed list. If the resolved value
+	// is not permitted, fall back to the first allowed value (fail closed
+	// when only enforce-redirect is allowed, fail open when only none is
+	// allowed — the admin controls the list).
+	allowed := currentConfig.Proxy.AllowedEgressEnforcement
+	if !slices.Contains(allowed, egressEnforcement) {
+		mutatorLog.Info("WARN: egressEnforcement value not in platform allowedEgressEnforcement; overriding",
+			"namespace", namespace, "crName", crName,
+			"requested", egressEnforcement, "allowed", allowed,
+			"overrideTo", allowed[0])
+		egressEnforcement = allowed[0]
+		egressEnforcementSource = "platform-policy-override"
+	}
+	mutatorLog.Info("resolved egress enforcement",
+		"namespace", namespace, "crName", crName,
+		"mode", egressEnforcement, "source", egressEnforcementSource)
 
 	// ========================================
 	// Resolve AllowedAudiences (from AgentRuntime CR)
@@ -516,6 +567,15 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 				))
 		}
 
+		// Set MTLS_MODE env var on the authbridge container so it knows the
+		// resolved mTLS posture at runtime.
+		for i := range podSpec.Containers {
+			if podSpec.Containers[i].Name == AuthBridgeProxyContainerName {
+				setOrAddEnv(&podSpec.Containers[i], "MTLS_MODE", mtlsMode)
+				break
+			}
+		}
+
 		// Inject HTTP_PROXY env vars into all existing app containers
 		for i := range podSpec.Containers {
 			c := &podSpec.Containers[i]
@@ -525,19 +585,27 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 			injectHTTPProxyEnv(c, forwardProxyPort)
 		}
 
-		// Fail-closed egress enforcement (always-on for proxy-sidecar / lite).
+		// Egress enforcement for proxy-sidecar / lite.
 		// HTTP_PROXY above is cooperative — an app that ignores it egresses
-		// directly. The enforce-redirect proxy-init guard transparently REDIRECTs
-		// any bypass egress to the forward proxy's transparent listener, so it is
-		// captured rather than dropped and nothing breaks. envoy-sidecar enforces
-		// structurally via its own transparent redirect, so this is the
-		// proxy-sidecar / lite path only. The exempted PROXY_UID equals the proxy
-		// container's RunAsUser (both b.cfg.Proxy.UID).
-		if !containerExists(podSpec.InitContainers, ProxyInitContainerName) {
-			podSpec.InitContainers = append(podSpec.InitContainers,
-				builder.BuildProxyInitContainer(ProxyInitModeEnforceRedirect, "", ""))
-			mutatorLog.Info("proxy-sidecar egress enforcement enabled (enforce-redirect)",
-				"namespace", namespace, "crName", crName)
+		// directly. When egressEnforcement is "enforce-redirect" (default),
+		// proxy-init is injected with iptables rules that transparently
+		// REDIRECT bypass egress to AuthBridge's transparent listener.
+		// When "none", proxy-init is skipped — use on platforms where
+		// iptables is unavailable (ROSA HCP, managed OpenShift).
+		// envoy-sidecar mode has its own structural proxy-init and ignores
+		// this setting.
+		if egressEnforcement == EgressEnforcementEnforceRedirect {
+			if !containerExists(podSpec.InitContainers, ProxyInitContainerName) {
+				podSpec.InitContainers = append(podSpec.InitContainers,
+					builder.BuildProxyInitContainer(ProxyInitModeEnforceRedirect, "", ""))
+				mutatorLog.Info("proxy-sidecar egress enforcement enabled (enforce-redirect)",
+					"namespace", namespace, "crName", crName)
+			}
+		} else {
+			mutatorLog.Info("proxy-sidecar egress enforcement disabled (cooperative mode)",
+				"namespace", namespace, "crName", crName,
+				"egressEnforcement", egressEnforcement,
+				"source", egressEnforcementSource)
 		}
 
 		// spiffe-helper is bundled in the authbridge combined image and
@@ -618,6 +686,14 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 
 	if decision.EnvoyProxy.Inject && !containerExists(podSpec.Containers, EnvoyProxyContainerName) {
 		podSpec.Containers = append(podSpec.Containers, builder.BuildEnvoyProxyContainerWithSpireOption(spireEnabled))
+	}
+
+	// Set MTLS_MODE env var on the envoy-sidecar authbridge container.
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == EnvoyProxyContainerName {
+			setOrAddEnv(&podSpec.Containers[i], "MTLS_MODE", mtlsMode)
+			break
+		}
 	}
 
 	if decision.ProxyInit.Inject && !containerExists(podSpec.InitContainers, ProxyInitContainerName) {

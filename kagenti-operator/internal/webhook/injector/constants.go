@@ -57,6 +57,19 @@ const (
 	ProxyInitModeEnforceRedirect ProxyInitMode = "enforce-redirect"
 )
 
+// Egress enforcement modes for proxy-sidecar / lite paths.
+// Controls whether proxy-init is injected for fail-closed egress capture.
+const (
+	// EgressEnforcementEnforceRedirect injects proxy-init with iptables
+	// rules (default). Requires NET_ADMIN and a kernel with iptables support.
+	EgressEnforcementEnforceRedirect = "enforce-redirect"
+
+	// EgressEnforcementNone skips proxy-init injection. Egress relies on
+	// HTTP_PROXY (cooperative) + inbound AuthBridge + NetworkPolicy.
+	// Use on platforms where iptables is unavailable (ROSA HCP, managed OpenShift).
+	EgressEnforcementNone = "none"
+)
+
 // mTLS modes for the proxy-sidecar / lite paths. Selected per workload
 // via AgentRuntime CR `Spec.MTLSMode`, falling back to the namespace
 // `authbridge-runtime-config` ConfigMap's `mtls.mode` field, then

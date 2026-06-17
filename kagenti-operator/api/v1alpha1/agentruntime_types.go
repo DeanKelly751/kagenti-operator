@@ -86,8 +86,8 @@ type AgentRuntimeSpec struct {
 	//
 	// Three valid values:
 	//
-	//   disabled    Plaintext between sidecars (default).
-	//   permissive  Inbound: byte-peek listener accepts both TLS and
+	//   disabled    Plaintext between sidecars.
+	//   permissive  (default) Inbound: byte-peek listener accepts both TLS and
 	//               plaintext on the same port. Outbound: tries TLS,
 	//               falls back to plaintext on handshake failure (one-line
 	//               WARN log per fallback). Use during rollout.
@@ -96,7 +96,7 @@ type AgentRuntimeSpec struct {
 	//               completes.
 	//
 	// Resolution: AgentRuntime CR > namespace authbridge-runtime-config
-	// mtls.mode > "disabled". Setting mtlsMode != disabled implicitly
+	// mtls.mode > "permissive". Setting mtlsMode != disabled implicitly
 	// requires SPIRE — the operator auto-enables spire for the workload.
 	//
 	// CR-empty vs CR="disabled" are observably different in
@@ -111,8 +111,34 @@ type AgentRuntimeSpec struct {
 	// process start).
 	//
 	// +optional
+	// +kubebuilder:default=permissive
 	// +kubebuilder:validation:Enum=disabled;permissive;strict
 	MTLSMode string `json:"mtlsMode,omitempty"`
+
+	// EgressEnforcement controls whether the proxy-init init container is
+	// injected for fail-closed egress capture in proxy-sidecar / lite modes.
+	//
+	// Values:
+	//   enforce-redirect (default) — proxy-init is injected with iptables
+	//                     rules that transparently REDIRECT egress bypassing
+	//                     HTTP_PROXY to AuthBridge's transparent listener.
+	//                     Requires NET_ADMIN capability and a kernel that
+	//                     supports iptables (legacy or nft).
+	//   none             — proxy-init is NOT injected. Egress enforcement
+	//                     relies on HTTP_PROXY (cooperative) + inbound
+	//                     AuthBridge on destinations + NetworkPolicy.
+	//                     Use on platforms where iptables is unavailable
+	//                     (e.g. ROSA HCP, managed OpenShift).
+	//
+	// Resolution: AgentRuntime CR > namespace authbridge-runtime-config
+	// egressEnforcement field > "enforce-redirect" (default).
+	//
+	// Does not affect envoy-sidecar mode, which always uses proxy-init
+	// for its structural iptables redirect.
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=enforce-redirect;none
+	EgressEnforcement string `json:"egressEnforcement,omitempty"`
 }
 
 // IdentitySpec configures workload identity for an AgentRuntime.

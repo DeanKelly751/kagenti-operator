@@ -160,6 +160,26 @@ func ExtractMode(authbridgeYAML string) string {
 	return top.Mode
 }
 
+// ExtractEgressEnforcement parses an authbridge-runtime-config config.yaml
+// string and returns the value of its top-level `egressEnforcement:` key.
+// Returns "" if the YAML is empty, malformed, or has no `egressEnforcement`
+// field — in any of those cases the caller should fall back to the next
+// resolution layer (or the "enforce-redirect" default).
+func ExtractEgressEnforcement(authbridgeYAML string) string {
+	if authbridgeYAML == "" {
+		return ""
+	}
+	var top struct {
+		EgressEnforcement string `json:"egressEnforcement"`
+	}
+	if err := yaml.Unmarshal([]byte(authbridgeYAML), &top); err != nil {
+		nsConfigLog.Info("WARN: failed to parse authbridge-runtime-config config.yaml for egressEnforcement; falling back to next resolution layer",
+			"error", err.Error())
+		return ""
+	}
+	return top.EgressEnforcement
+}
+
 // ExtractMTLSMode parses an authbridge-runtime-config config.yaml string
 // and returns the value of its `mtls.mode` field. Returns "" if the YAML
 // is empty, malformed, has no `mtls` block, or its `mode` field is unset
