@@ -2234,3 +2234,159 @@ func TestEnsurePerAgentConfigMap_TLSBridgeBlock(t *testing.T) {
 		t.Error("tls_bridge block should be absent when disabled")
 	}
 }
+
+// tlsBridgeGatesOn returns the default feature gates with the TLSBridge gate
+// flipped on, for tests that exercise the bridge mutation path.
+func tlsBridgeGatesOn() *config.FeatureGates {
+	g := config.DefaultFeatureGates()
+	g.TLSBridge = true
+	return g
+}
+
+// findVolume returns the named volume from the pod spec, or nil.
+func findVolume(podSpec *corev1.PodSpec, name string) *corev1.Volume {
+	for i := range podSpec.Volumes {
+		if podSpec.Volumes[i].Name == name {
+			return &podSpec.Volumes[i]
+		}
+	}
+	return nil
+}
+
+func TestInjectAuthBridge_TLSBridge_GateOnAndEnabled_MountsCA(t *testing.T) {
+	// Feature gate ON + tlsBridgeMode=enabled in proxy-sidecar mode → the
+	// per-agent CA Secret is mounted into both sidecar and agent, and the
+	// agent's trust env vars point at the mounted ca.crt.
+	rt := newAgentRuntimeWithMode("team1", "my-agent", ModeProxySidecar)
+	rt.Spec.TLSBridgeMode = agentv1alpha1.TLSBridgeModeEnabled
+	m := newTestMutator(rt)
+	m.GetFeatureGates = tlsBridgeGatesOn
+	ctx := context.Background()
+
+	podSpec := &corev1.PodSpec{
+		ServiceAccountName: "my-agent",
+		Containers: []corev1.Container{
+			{Name: "agent", Image: "my-agent:latest", Ports: []corev1.ContainerPort{{ContainerPort: 8000}}},
+		},
+	}
+	labels := map[string]string{KagentiTypeLabel: KagentiTypeAgent}
+
+	mutated, err := m.InjectAuthBridge(ctx, podSpec, "team1", "my-agent", "Deployment", labels, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mutated {
+		t.Fatal("expected pod to be mutated")
+	}
+
+	// Volume: Secret-backed, named after the workload, hard mount, key mode 0440.
+	vol := findVolume(podSpec, TLSBridgeCAVolumeName)
+	if vol == nil {
+		t.Fatalf("expected %q volume to be injected", TLSBridgeCAVolumeName)
+	}
+	if vol.Secret == nil {
+		t.Fatalf("%q volume must be Secret-backed", TLSBridgeCAVolumeName)
+	}
+	if vol.Secret.SecretName != "my-agent"+agentv1alpha1.TLSBridgeCASecretSuffix {
+		t.Errorf("secretName = %q, want %q", vol.Secret.SecretName, "my-agent"+agentv1alpha1.TLSBridgeCASecretSuffix)
+	}
+	if vol.Secret.Optional != nil && *vol.Secret.Optional {
+		t.Error("CA volume must be a HARD mount (Optional unset/false) to gate pod start")
+	}
+	if vol.Secret.DefaultMode == nil || *vol.Secret.DefaultMode != 0o440 {
+		t.Errorf("CA volume DefaultMode = %v, want 0440", vol.Secret.DefaultMode)
+	}
+
+	// Sidecar: mounts the CA dir (needs the keypair to mint leaves), but does
+	// NOT get the agent trust env vars.
+	var sidecar, agent *corev1.Container
+	for i := range podSpec.Containers {
+		switch podSpec.Containers[i].Name {
+		case AuthBridgeProxyContainerName:
+			sidecar = &podSpec.Containers[i]
+		case "agent":
+			agent = &podSpec.Containers[i]
+		}
+	}
+	if sidecar == nil {
+		t.Fatal("authbridge-proxy sidecar not found")
+	}
+	if !hasMount(sidecar, TLSBridgeCAVolumeName, TLSBridgeCAMountPath) {
+		t.Errorf("sidecar missing CA mount at %s", TLSBridgeCAMountPath)
+	}
+	for _, env := range tlsBridgeTrustEnvVars {
+		if envValue(sidecar, env) != "" {
+			t.Errorf("sidecar should not get agent trust env %s", env)
+		}
+	}
+
+	// Agent: mounts the CA dir and has every trust env var pointing at ca.crt.
+	if agent == nil {
+		t.Fatal("agent container not found")
+	}
+	if !hasMount(agent, TLSBridgeCAVolumeName, TLSBridgeCAMountPath) {
+		t.Errorf("agent missing CA mount at %s", TLSBridgeCAMountPath)
+	}
+	wantCA := TLSBridgeCAMountPath + "/ca.crt"
+	for _, env := range tlsBridgeTrustEnvVars {
+		if got := envValue(agent, env); got != wantCA {
+			t.Errorf("agent env %s = %q, want %q", env, got, wantCA)
+		}
+	}
+}
+
+func TestInjectAuthBridge_TLSBridge_GateOffButEnabled_NoMount(t *testing.T) {
+	// tlsBridgeMode=enabled but the cluster TLSBridge gate is OFF → no CA
+	// volume, no trust env. The bridge must not engage without the operator gate.
+	rt := newAgentRuntimeWithMode("team1", "my-agent", ModeProxySidecar)
+	rt.Spec.TLSBridgeMode = agentv1alpha1.TLSBridgeModeEnabled
+	m := newTestMutator(rt) // default gates: TLSBridge off
+	ctx := context.Background()
+
+	podSpec := &corev1.PodSpec{
+		ServiceAccountName: "my-agent",
+		Containers: []corev1.Container{
+			{Name: "agent", Image: "my-agent:latest", Ports: []corev1.ContainerPort{{ContainerPort: 8000}}},
+		},
+	}
+	labels := map[string]string{KagentiTypeLabel: KagentiTypeAgent}
+
+	if _, err := m.InjectAuthBridge(ctx, podSpec, "team1", "my-agent", "Deployment", labels, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if findVolume(podSpec, TLSBridgeCAVolumeName) != nil {
+		t.Error("CA volume must not be injected when the TLSBridge gate is off")
+	}
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name != "agent" {
+			continue
+		}
+		for _, env := range tlsBridgeTrustEnvVars {
+			if envValue(&podSpec.Containers[i], env) != "" {
+				t.Errorf("agent trust env %s must not be set when gate is off", env)
+			}
+		}
+	}
+}
+
+// hasMount reports whether the container has a volume mount with the given
+// name at the given path.
+func hasMount(c *corev1.Container, name, path string) bool {
+	for _, vm := range c.VolumeMounts {
+		if vm.Name == name && vm.MountPath == path {
+			return true
+		}
+	}
+	return false
+}
+
+// envValue returns the value of the named env var on the container, or "".
+func envValue(c *corev1.Container, name string) string {
+	for _, e := range c.Env {
+		if e.Name == name {
+			return e.Value
+		}
+	}
+	return ""
+}

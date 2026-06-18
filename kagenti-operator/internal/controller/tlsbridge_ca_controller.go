@@ -84,7 +84,7 @@ func (r *TLSBridgeCAReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			RenewBefore: &metav1.Duration{Duration: 15 * 24 * time.Hour},
 			PrivateKey:  &cmv1.CertificatePrivateKey{Algorithm: cmv1.ECDSAKeyAlgorithm, Size: 256},
 			Usages:      []cmv1.KeyUsage{cmv1.UsageCertSign, cmv1.UsageDigitalSignature},
-			IssuerRef:   cmmeta.ObjectReference{Name: tlsBridgeSelfSignedIssuer, Kind: "Issuer", Group: "cert-manager.io"},
+			IssuerRef:   cmmeta.IssuerReference{Name: tlsBridgeSelfSignedIssuer, Kind: "Issuer", Group: "cert-manager.io"},
 		}
 		return controllerutil.SetControllerReference(ar, cert, r.Scheme)
 	}); err != nil {

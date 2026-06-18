@@ -362,6 +362,43 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 		allowedAudiences = slices.Clone(arOverrides.AllowedAudiences)
 	}
 
+	// ========================================
+	// Resolve TLS bridge posture (CR > namespace > "disabled")
+	// ========================================
+	//
+	// tlsBridgeMode controls whether the Go forward proxy terminates and
+	// re-originates the agent's outbound TLS (the "TLS bridge"). It is gated
+	// twice: the cluster operator must turn on the TLSBridge feature gate AND
+	// the workload (or its namespace) must opt in with tlsBridgeMode=enabled.
+	// The bridge only exists in the proxy-sidecar / lite shapes (the Go forward
+	// proxy); the AgentRuntime validating webhook rejects enabled+envoy-sidecar
+	// upstream of pod admission, so here we only resolve the value and let the
+	// proxy-sidecar branch act on it. Resolution chain mirrors mtlsMode: an
+	// explicit CR value pins; the namespace ConfigMap is the fallback; the
+	// default is "disabled".
+	tlsBridgeMode := agentv1alpha1.TLSBridgeModeDisabled
+	tlsBridgeSource := "default"
+	if arOverrides != nil && arOverrides.TLSBridgeMode != nil {
+		tlsBridgeMode = *arOverrides.TLSBridgeMode
+		tlsBridgeSource = "agentruntime-cr"
+	} else if m := ExtractTLSBridgeMode(nsConfig.AuthBridgeRuntimeYAML); m != "" {
+		tlsBridgeMode = m
+		tlsBridgeSource = "namespace-configmap"
+	}
+	switch tlsBridgeMode {
+	case agentv1alpha1.TLSBridgeModeDisabled, agentv1alpha1.TLSBridgeModeEnabled:
+		// recognized, keep as-is
+	default:
+		mutatorLog.Info("WARN: unrecognized tlsBridgeMode; defaulting to disabled",
+			"namespace", namespace, "crName", crName,
+			"unrecognized", tlsBridgeMode, "source", tlsBridgeSource)
+		tlsBridgeMode = agentv1alpha1.TLSBridgeModeDisabled
+		tlsBridgeSource = "default-invalid-fallback"
+	}
+	mutatorLog.Info("resolved TLS bridge mode",
+		"namespace", namespace, "crName", crName,
+		"mode", tlsBridgeMode, "source", tlsBridgeSource)
+
 	if currentGates.PerWorkloadConfigResolution {
 		// Resolved path: build literal env vars from namespace config
 		// arOverrides was already read above as a gate check.
@@ -472,6 +509,22 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 			proxyImage = builder.cfg.Images.AuthBridgeLite
 		}
 
+		// TLS bridge gate: on only when BOTH the cluster feature gate and the
+		// resolved per-workload mode are enabled. We are already inside the
+		// proxy-sidecar / lite branch — the only shapes that host the Go forward
+		// proxy — so no further authBridgeMode check is needed. gatedTLSBridgeMode
+		// is what we render into the per-agent ConfigMap: it stays "disabled"
+		// (so the config block is omitted) unless the gate truly opens.
+		tlsBridgeOn := currentGates.TLSBridge && tlsBridgeMode == agentv1alpha1.TLSBridgeModeEnabled
+		gatedTLSBridgeMode := agentv1alpha1.TLSBridgeModeDisabled
+		if tlsBridgeOn {
+			gatedTLSBridgeMode = agentv1alpha1.TLSBridgeModeEnabled
+		}
+		if tlsBridgeMode == agentv1alpha1.TLSBridgeModeEnabled && !currentGates.TLSBridge {
+			mutatorLog.Info("tlsBridgeMode=enabled requested but TLSBridge feature gate is off — not bridging",
+				"namespace", namespace, "crName", crName)
+		}
+
 		// Collect all ports in use across all containers in the pod.
 		usedPorts := map[int32]bool{}
 		for _, c := range podSpec.Containers {
@@ -552,7 +605,7 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 				"reverse_proxy_backend": fmt.Sprintf("http://127.0.0.1:%d", newAgentPort),
 				"forward_proxy_addr":    fmt.Sprintf(":%d", forwardProxyPort),
 			},
-			mtlsMode, allowedAudiences, "") // tlsBridgeMode wired (gated) in the mutate path below
+			mtlsMode, allowedAudiences, gatedTLSBridgeMode)
 		if err != nil {
 			return false, fmt.Errorf("proxy-sidecar per-agent ConfigMap: %w", err)
 		}
@@ -631,6 +684,19 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 		// already calls this helper further down; the proxy-sidecar branch returns early,
 		// so it needs its own invocation.
 		ApplyKeycloakClientCredentialsSecretVolumes(podSpec, annotations)
+
+		// TLS bridge: mount the per-agent CA so the sidecar can forge leaves and
+		// the agent trusts them. The Secret is named after the workload (crName
+		// == spec.targetRef.name), matching what TLSBridgeCAReconciler provisions.
+		// The volume is a HARD mount, so if the gate is on but cert-manager has
+		// not yet issued the Secret the pod blocks on start — which is the
+		// intended startup-ordering barrier.
+		if tlsBridgeOn {
+			applyTLSBridgeMounts(podSpec, crName)
+			mutatorLog.Info("TLS bridge enabled — mounted per-agent CA",
+				"namespace", namespace, "crName", crName,
+				"caSecret", crName+agentv1alpha1.TLSBridgeCASecretSuffix)
+		}
 
 		mutatorLog.Info("proxy-sidecar mode injection complete",
 			"namespace", namespace, "crName", crName,

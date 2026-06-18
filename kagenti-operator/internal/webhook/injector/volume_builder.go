@@ -17,9 +17,87 @@ limitations under the License.
 package injector
 
 import (
+	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 )
+
+// tlsBridgeTrustEnvVars are the CA-bundle environment variables honored by the
+// TLS stacks common to agent workloads (Node.js, OpenSSL, Python, curl, git,
+// AWS SDKs, gRPC C-core). When the TLS bridge is on, the agent must trust the
+// per-origin leaves the bridge forges; pointing every one of these at the
+// mounted CA covers the agent regardless of which client library it uses.
+// Go's crypto/tls also honors SSL_CERT_FILE.
+var tlsBridgeTrustEnvVars = []string{
+	"NODE_EXTRA_CA_CERTS",              // Node.js
+	"SSL_CERT_FILE",                    // OpenSSL (curl, Python ssl, Go)
+	"REQUESTS_CA_BUNDLE",               // Python requests / httpx
+	"CURL_CA_BUNDLE",                   // curl
+	"GIT_SSL_CAINFO",                   // git over HTTPS
+	"AWS_CA_BUNDLE",                    // AWS SDKs / CLI
+	"GRPC_DEFAULT_SSL_ROOTS_FILE_PATH", // gRPC C-core
+}
+
+// addVolumeMountIfMissing appends a VolumeMount to the container unless one
+// with the same name is already present (idempotent re-injection).
+func addVolumeMountIfMissing(c *corev1.Container, vm corev1.VolumeMount) {
+	for i := range c.VolumeMounts {
+		if c.VolumeMounts[i].Name == vm.Name {
+			return
+		}
+	}
+	c.VolumeMounts = append(c.VolumeMounts, vm)
+}
+
+// applyTLSBridgeMounts wires the per-agent CA that backs the AuthBridge TLS
+// bridge into the pod. cert-manager publishes the CA keypair into the Secret
+// <workloadName>-tls-bridge-ca (see TLSBridgeCAReconciler); this function:
+//   - adds a Secret-backed volume, hard (NOT Optional) so the kubelet blocks
+//     pod start until cert-manager has issued the Secret — this is what closes
+//     the startup ordering race between the controller and the pod — with the
+//     key mode 0440 (group-readable, never world-readable)
+//   - mounts it read-only into the authbridge-proxy sidecar, which reads
+//     ca.crt + tls.key from TLSBridgeCAMountPath to forge per-origin leaves
+//   - mounts ca.crt (via the same volume) read-only into every agent container
+//     and points the common CA-bundle env vars at it, so the agent's TLS
+//     clients accept the bridge's forged certificates
+//
+// workloadName MUST equal the AgentRuntime's spec.targetRef.name (== crName in
+// the webhook) so the Secret name matches what the reconciler provisions.
+func applyTLSBridgeMounts(podSpec *corev1.PodSpec, workloadName string) {
+	secretName := workloadName + agentv1alpha1.TLSBridgeCASecretSuffix
+
+	// 1) Secret volume — hard mount, group-readable key (0440).
+	if !volumeExists(podSpec.Volumes, TLSBridgeCAVolumeName) {
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: TLSBridgeCAVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  secretName,
+					DefaultMode: ptr.To(int32(0o440)),
+				},
+			},
+		})
+	}
+
+	caCrtPath := TLSBridgeCAMountPath + "/ca.crt"
+	for i := range podSpec.Containers {
+		c := &podSpec.Containers[i]
+		addVolumeMountIfMissing(c, corev1.VolumeMount{
+			Name:      TLSBridgeCAVolumeName,
+			MountPath: TLSBridgeCAMountPath,
+			ReadOnly:  true,
+		})
+		// The sidecar needs the full keypair (ca.crt + tls.key) to mint
+		// leaves; agent containers only need to trust ca.crt.
+		if c.Name == AuthBridgeProxyContainerName {
+			continue
+		}
+		for _, env := range tlsBridgeTrustEnvVars {
+			setOrAddEnv(c, env, caCrtPath)
+		}
+	}
+}
 
 // BuildRequiredVolumes creates all volumes required for sidecar containers (with SPIRE)
 func BuildRequiredVolumes() []corev1.Volume {
