@@ -68,7 +68,12 @@ func (r *TLSBridgeCAReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// 2) Per-agent CA Certificate (isCA + cert-sign; NO nameConstraints). Must
 	//    satisfy authbridge FileSource's load-time validation (IsCA +
 	//    KeyUsageCertSign + cert/key match), or the sidecar refuses to start.
-	secretName := ar.Name + agentv1alpha1.TLSBridgeCASecretSuffix
+	// Name the Secret after the TARGET WORKLOAD, not the AgentRuntime CR: the
+	// injecting webhook keys every per-agent resource (incl. this mount) off the
+	// workload name (resourceName == spec.targetRef.name), which can differ from
+	// the CR's metadata.name. Mismatch here => the webhook mounts a Secret that
+	// never exists => pod stuck Pending.
+	secretName := ar.Spec.TargetRef.Name + agentv1alpha1.TLSBridgeCASecretSuffix
 	cert := &cmv1.Certificate{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ar.Namespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, cert, func() error {
 		cert.Spec = cmv1.CertificateSpec{

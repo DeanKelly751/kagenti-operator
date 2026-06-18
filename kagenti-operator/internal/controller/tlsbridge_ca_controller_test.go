@@ -33,15 +33,20 @@ func gatesOn() func() *config.FeatureGates {
 
 func TestTLSBridgeCAReconciler_CreatesIssuerAndCert(t *testing.T) {
 	scheme := tlsBridgeScheme(t)
+	// CR name differs from the target workload name on purpose: the Secret must
+	// be keyed on the workload (TargetRef.Name), which is what the webhook mounts.
 	ar := &agentv1alpha1.AgentRuntime{
-		ObjectMeta: metav1.ObjectMeta{Name: "myagent", Namespace: "team1"},
-		Spec:       agentv1alpha1.AgentRuntimeSpec{TLSBridgeMode: agentv1alpha1.TLSBridgeModeEnabled},
+		ObjectMeta: metav1.ObjectMeta{Name: "myagent-runtime", Namespace: "team1"},
+		Spec: agentv1alpha1.AgentRuntimeSpec{
+			TLSBridgeMode: agentv1alpha1.TLSBridgeModeEnabled,
+			TargetRef:     agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "myworkload"},
+		},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ar).Build()
 	r := &TLSBridgeCAReconciler{Client: c, Scheme: scheme, GetFeatureGates: gatesOn()}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "myagent", Namespace: "team1"},
+		NamespacedName: types.NamespacedName{Name: "myagent-runtime", Namespace: "team1"},
 	}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -55,14 +60,14 @@ func TestTLSBridgeCAReconciler_CreatesIssuerAndCert(t *testing.T) {
 	}
 
 	cert := &cmv1.Certificate{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "myagent-tls-bridge-ca", Namespace: "team1"}, cert); err != nil {
-		t.Fatalf("CA certificate not created: %v", err)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "myworkload-tls-bridge-ca", Namespace: "team1"}, cert); err != nil {
+		t.Fatalf("CA certificate not created (keyed on workload name): %v", err)
 	}
 	if !cert.Spec.IsCA {
 		t.Error("certificate is not isCA (authbridge FileSource would reject the Secret)")
 	}
-	if cert.Spec.SecretName != "myagent-tls-bridge-ca" {
-		t.Errorf("secretName = %q, want myagent-tls-bridge-ca", cert.Spec.SecretName)
+	if cert.Spec.SecretName != "myworkload-tls-bridge-ca" {
+		t.Errorf("secretName = %q, want myworkload-tls-bridge-ca (workload-keyed)", cert.Spec.SecretName)
 	}
 	hasCertSign := false
 	for _, u := range cert.Spec.Usages {
