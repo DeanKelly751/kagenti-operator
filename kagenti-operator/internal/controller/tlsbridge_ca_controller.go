@@ -21,6 +21,12 @@ import (
 // bootstraps each agent's CA Certificate.
 const tlsBridgeSelfSignedIssuer = "authbridge-tls-bridge-selfsigned"
 
+// RBAC for the per-agent CA reconciler — create/manage cert-manager Issuers +
+// Certificates. Free-standing comment group (not the struct doc comment) so
+// controller-gen's rbac generator collects it, matching SharedTrustReconciler.
+// +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cert-manager.io,resources=issuers,verbs=get;list;watch;create;update;patch;delete
+
 // TLSBridgeCAReconciler provisions the per-agent cert-manager CA that backs the
 // AuthBridge TLS bridge. For an AgentRuntime with spec.tlsBridgeMode=enabled
 // (and the TLSBridge feature gate on), it ensures a namespace SelfSigned Issuer
@@ -30,8 +36,6 @@ const tlsBridgeSelfSignedIssuer = "authbridge-tls-bridge-selfsigned"
 //
 // Enablement is keyed on the CR field (explicit per-agent opt-in for an L7
 // interception feature) — namespace-level default-on does not auto-provision a CA.
-//
-// +kubebuilder:rbac:groups=cert-manager.io,resources=certificates;issuers,verbs=get;list;watch;create;update;patch;delete
 type TLSBridgeCAReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
