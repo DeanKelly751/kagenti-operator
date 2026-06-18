@@ -115,6 +115,14 @@ type AgentRuntimeSpec struct {
 	// +kubebuilder:validation:Enum=disabled;permissive;strict
 	MTLSMode string `json:"mtlsMode,omitempty"`
 
+	// TLSBridgeMode controls AuthBridge's outbound TLS bridge (decrypt agent
+	// egress HTTPS into the pipeline). Only honored for authBridgeMode
+	// proxy-sidecar or lite; rejected with envoy-sidecar. Requires cert-manager.
+	// +optional
+	// +kubebuilder:default=disabled
+	// +kubebuilder:validation:Enum=disabled;enabled
+	TLSBridgeMode string `json:"tlsBridgeMode,omitempty"`
+
 	// EgressEnforcement controls whether the proxy-init init container is
 	// injected for fail-closed egress capture in proxy-sidecar / lite modes.
 	//
