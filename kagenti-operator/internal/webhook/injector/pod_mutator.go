@@ -1156,8 +1156,8 @@ func (m *PodMutator) ensurePerAgentEnvoyConfigMap(
 	return cmName, nil
 }
 
-// buildOwnerReference looks up the Deployment or StatefulSet that owns the
-// pod being created and returns an OwnerReference apply configuration.
+// buildOwnerReference looks up the Deployment, StatefulSet, or Sandbox that
+// owns the pod being created and returns an OwnerReference apply configuration.
 // Returns nil if the workload cannot be found (best-effort).
 func (m *PodMutator) buildOwnerReference(ctx context.Context, namespace, crName string) *applyconfigsmetav1.OwnerReferenceApplyConfiguration {
 	// Uses the cached client (not APIReader) because Deployments/StatefulSets
@@ -1192,6 +1192,12 @@ func (m *PodMutator) buildOwnerReference(ctx context.Context, namespace, crName 
 	// Try Sandbox (agents.x-k8s.io). The Sandbox CR name == the workload name,
 	// so the per-agent ConfigMap is garbage-collected with the Sandbox, matching
 	// Deployment/StatefulSet behavior.
+	//
+	// This relies on the shared manager cache having a warm Sandbox informer,
+	// which the AgentRuntime controller keeps populated. If the webhook is ever
+	// split into its own cache/process, this Get may miss until that cache syncs;
+	// it degrades gracefully (any error → nil → no OwnerReference, the pre-Sandbox
+	// behavior), so it never blocks injection.
 	sandbox := &unstructured.Unstructured{}
 	sandbox.SetGroupVersionKind(sandboxOwnerGVK)
 	if err := m.Client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: crName}, sandbox); err == nil {
