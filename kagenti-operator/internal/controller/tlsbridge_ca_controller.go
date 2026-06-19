@@ -64,6 +64,11 @@ func (r *TLSBridgeCAReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// 2) Per-agent CA Certificate (isCA + cert-sign; NO nameConstraints). Must
 	//    satisfy authbridge FileSource's load-time validation (IsCA +
 	//    KeyUsageCertSign + cert/key match), or the sidecar refuses to start.
+	//    Future hardening (deferred): cert-manager nameConstraints could scope
+	//    this CA to the agent's egress hosts so an exfiltrated sidecar key can't
+	//    mint a leaf for arbitrary hosts. Left out for now to avoid the
+	//    cert-manager NameConstraints feature-gate dependency; containment today
+	//    is per-agent isolation + sidecar-only 0o444 key + rotation.
 	// Name the Secret after the TARGET WORKLOAD, not the AgentRuntime CR: the
 	// injecting webhook keys every per-agent resource (incl. this mount) off the
 	// workload name (resourceName == spec.targetRef.name), which can differ from

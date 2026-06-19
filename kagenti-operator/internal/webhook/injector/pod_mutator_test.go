@@ -2380,6 +2380,63 @@ func TestInjectAuthBridge_TLSBridge_Disabled_NoMount(t *testing.T) {
 	}
 }
 
+func TestApplyTLSBridgeMounts_Idempotent(t *testing.T) {
+	// The mutating webhook can re-run on pod updates, so applyTLSBridgeMounts must
+	// be idempotent: a second pass must not duplicate volumes, mounts, or env.
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{
+			{Name: AuthBridgeProxyContainerName},
+			{Name: "agent"},
+		},
+	}
+	applyTLSBridgeMounts(podSpec, "my-agent")
+	applyTLSBridgeMounts(podSpec, "my-agent") // re-injection
+
+	countVol := func(name string) int {
+		n := 0
+		for _, v := range podSpec.Volumes {
+			if v.Name == name {
+				n++
+			}
+		}
+		return n
+	}
+	if got := countVol(TLSBridgeCAVolumeName); got != 1 {
+		t.Errorf("keypair volume count = %d, want 1", got)
+	}
+	if got := countVol(TLSBridgeCACertVolumeName); got != 1 {
+		t.Errorf("ca.crt volume count = %d, want 1", got)
+	}
+
+	countMount := func(c *corev1.Container, name string) int {
+		n := 0
+		for _, m := range c.VolumeMounts {
+			if m.Name == name {
+				n++
+			}
+		}
+		return n
+	}
+	sidecar, agent := &podSpec.Containers[0], &podSpec.Containers[1]
+	if got := countMount(sidecar, TLSBridgeCAVolumeName); got != 1 {
+		t.Errorf("sidecar keypair mount count = %d, want 1", got)
+	}
+	if got := countMount(agent, TLSBridgeCACertVolumeName); got != 1 {
+		t.Errorf("agent ca.crt mount count = %d, want 1", got)
+	}
+	for _, env := range tlsBridgeTrustEnvVars {
+		n := 0
+		for _, e := range agent.Env {
+			if e.Name == env {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("agent env %s count = %d, want 1", env, n)
+		}
+	}
+}
+
 func TestInjectAuthBridge_TLSBridge_NoSPIRE_NoForcedFSGroup(t *testing.T) {
 	// With SPIRE off (spiffe-helper disabled + mTLS disabled) the bridge must
 	// still mount its CA, and must NOT force a fixed fsGroup — the keypair is
