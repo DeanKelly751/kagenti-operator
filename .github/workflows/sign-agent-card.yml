@@ -32,16 +32,11 @@ jobs:
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.cache/uv
-          key: ${{ runner.os }}-uv-sigstore-a2a-293f9bd
+          key: ${{ runner.os }}-uv-rh-sigstore-a2a
 
-      - name: Install sigstore-a2a with pinned dependencies
+      - name: Install rh-sigstore-a2a
         run: |
-          # Pin a2a-sdk to specific version
-          uv pip install --system --prerelease=allow "a2a-sdk==0.2.16"
-          # Pin sigstore-a2a to specific commit SHA for reproducibility and security
-          # Commit 293f9bd from 2026-03-30: "ci(deps): Bump actions/deploy-pages from 4 to 5"
-          # Update periodically by checking: https://github.com/sigstore/sigstore-a2a/commits/main
-          uv pip install --system --prerelease=allow "git+https://github.com/sigstore/sigstore-a2a.git@293f9bd"
+          uv pip install --system --prerelease=allow rh-sigstore-a2a
 
       - name: Get GitHub OIDC token
         run: |
